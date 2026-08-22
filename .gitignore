@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local weights, captures, and training output
+models/*.pt
+models/*.onnx
+runs/
+data/
+*.wav
+*.mp4
+*.npy
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

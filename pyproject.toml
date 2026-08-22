@@ -1,0 +1,54 @@
+[project]
+name = "aetv"
+version = "0.1.0"
+description = "Autoencoder Television: analog video over HF OFDM for amateur radio"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "AETV contributors" }]
+keywords = ["amateur-radio", "hf", "ofdm", "video", "jscc"]
+classifiers = [
+    "License :: OSI Approved :: Artistic License",
+    "Topic :: Communications :: Ham Radio",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+ham = [
+    "torch>=2.2",
+    "sounddevice>=0.4.6",
+    "opencv-python>=4.8",
+]
+train = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "lpips>=0.1.4",
+    "datasets>=2.18",
+    "pylance>=10,<11",
+    "tensorboard>=2.14",
+]
+dev = [
+    "pytest>=8.0",
+    "torch>=2.2",
+]
+
+[project.scripts]
+aetv = "aetv.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/arodland/AETV"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aetv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

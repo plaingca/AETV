@@ -1,0 +1,8 @@
+AETV is derived from the SSTVAE project (https://github.com/arodland/SSTVAE).
+The OFDM numerology, Golay(24,12) codec, and Watterson channel model follow
+that work. The Flex-8k video mode, training recipe, and ham inference harness
+are new to this repository.
+
+The Artistic License 2.0 applies. Do not commit copyrighted test video.
+Identify every transmission with your callsign; this software does not
+replace a license or a band-plan check.

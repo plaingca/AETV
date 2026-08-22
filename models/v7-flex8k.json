@@ -1,0 +1,10 @@
+{
+  "path": "models/v7-flex8k.pt",
+  "mode": "V7",
+  "step": 10000,
+  "source_run": "aetv-v7-flex8k-144p-stage2-nogan",
+  "bytes": 215756107,
+  "sha256": "afe476e5c5681210817a8e0598ec38ef40bdbd609485ad10d7a13ae9e6cd460b",
+  "model_width": 128,
+  "latent_channels": 3
+}
