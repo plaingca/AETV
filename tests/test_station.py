@@ -1,0 +1,221 @@
+"""Ham-station helpers: ring buffer, resample, Kiwi IQ mix, CAT, fail-safe PTT."""
+
+from __future__ import annotations
+
+import socket
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from aetv.audio_io import StreamResampler, resample_ratio
+from aetv.cat import CatConfig, NullPtt, RigctldClient, open_ptt
+from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
+from aetv.ringbuffer import RingBuffer
+from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
+from aetv.station import TxEngine, TxPhase, WATCHDOG_MARGIN_S, _PttWatchdog
+
+
+def test_ringbuffer_wrap_and_tail():
+    ring = RingBuffer(seconds=1.0, fs=100)
+    ring.write(np.arange(150, dtype=np.float64))
+    snap, total = ring.snapshot()
+    assert total == 150
+    assert len(snap) == 100
+    assert snap[0] == 50
+    assert snap[-1] == 149
+    tail = ring.tail(10)
+    assert np.array_equal(tail, np.arange(140, 150))
+
+
+def test_stream_resampler_matches_oneshot():
+    from scipy.signal import resample_poly
+
+    rng = np.random.default_rng(0)
+    src = rng.standard_normal(8000).astype(np.float64)
+    up, down = resample_ratio(8000, 24000)
+    one = resample_poly(src, up, down)
+    stream = StreamResampler(up, down)
+    parts = [stream(src[i : i + 256]) for i in range(0, len(src), 256)]
+    got = np.concatenate(parts) if any(len(p) for p in parts) else np.zeros(0)
+    n = min(len(one), len(got))
+    assert n > 1000
+    err = np.max(np.abs(one[:n] - got[:n]))
+    assert err < 1e-9
+
+
+def test_kiwi_center_and_passband_tone():
+    dial_mhz = 7.088
+    fcenter = 5000.0
+    center = kiwi_center_khz(dial_mhz, fcenter)
+    assert center == pytest.approx(7093.0)
+    src_rate, dst_rate = 12000, 24000
+    tone_hz = 3000.0
+    t = np.arange(src_rate) / src_rate
+    iq_hz = tone_hz - fcenter
+    iq = np.exp(2j * np.pi * iq_hz * t)
+    audio, _phase = iq_to_passband(iq, src_rate, dst_rate, offset_hz=dial_mhz * 1e6 - center * 1e3)
+    spec = np.abs(np.fft.rfft(audio * np.hanning(len(audio))))
+    freqs = np.fft.rfftfreq(len(audio), 1.0 / dst_rate)
+    peak = freqs[int(np.argmax(spec))]
+    assert peak == pytest.approx(tone_hz, abs=40.0)
+
+
+def test_iq_stream_phase_continuity():
+    src_rate, dst_rate = 12000, 24000
+    offset = -5000.0
+    t = np.arange(2400) / src_rate
+    iq = np.exp(2j * np.pi * (-2000.0) * t)
+    whole, _ = iq_to_passband(iq, src_rate, dst_rate, offset)
+    conv = IqToPassband(src_rate, dst_rate, offset)
+    parts = [conv(iq[i : i + 300]) for i in range(0, len(iq), 300)]
+    got = np.concatenate(parts)
+    n = min(len(whole), len(got))
+    # Streaming FIR has latency; compare the overlapping body.
+    body = slice(200, n - 200)
+    corr = np.corrcoef(whole[body], got[body])[0, 1]
+    assert corr > 0.99
+
+
+def test_settings_roundtrip(tmp_path: Path):
+    settings = StationSettings(callsign="va7eet", mode="V7", kiwi_host="1.2.3.4:8073")
+    path = tmp_path / "settings.json"
+    save_settings(settings, path)
+    loaded = load_settings(path)
+    assert loaded.callsign == "va7eet"
+    assert loaded.mode == "V7"
+    assert loaded.kiwi_host == "1.2.3.4:8073"
+
+
+def test_normalize_callsign():
+    assert normalize_callsign("va7eet") == "VA7EET"
+    assert normalize_callsign("w1aw/7 extra") == "W1AW/7"
+    assert len(normalize_callsign("ABCDEFGHIJK")) == 8
+
+
+def test_open_ptt_none():
+    ptt = open_ptt(CatConfig(backend="none"))
+    assert isinstance(ptt, NullPtt)
+    ptt.set_ptt(True)
+    ptt.set_ptt(False)
+
+
+class _FakeRigctld(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.ptt = []
+        self.ready = threading.Event()
+
+    def run(self):
+        self.ready.set()
+        conn, _addr = self.sock.accept()
+        with conn:
+            buf = b""
+            while True:
+                chunk = conn.recv(1024)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    cmd = line.decode("ascii").strip()
+                    if cmd.startswith("T "):
+                        self.ptt.append(cmd.split()[1] == "1")
+                        conn.sendall(b"RPRT 0\n")
+                    elif cmd == "f":
+                        conn.sendall(b"7088000\n")
+                    elif cmd == "m":
+                        conn.sendall(b"DIGU\n")
+                    else:
+                        conn.sendall(b"RPRT 0\n")
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def test_rigctld_ptt_and_freq():
+    server = _FakeRigctld()
+    server.start()
+    server.ready.wait(1.0)
+    client = RigctldClient("127.0.0.1", server.port, timeout=1.0)
+    try:
+        assert client.get_frequency_hz() == 7088000.0
+        assert client.get_mode() == "DIGU"
+        client.set_ptt(True)
+        client.set_ptt(False)
+        time.sleep(0.05)
+        assert server.ptt == [True, False]
+    finally:
+        client.close()
+        server.close()
+
+
+class _FakePtt:
+    def __init__(self):
+        self.events = []
+
+    def set_ptt(self, on: bool) -> None:
+        self.events.append(bool(on))
+
+    def describe(self) -> str:
+        return "fake"
+
+    def close(self) -> None:
+        return None
+
+
+def test_tx_ptt_brackets_playback_and_unkeys_on_error():
+    from aetv.settings import StationSettings
+    from aetv.station import Station
+
+    station = Station(StationSettings(audio_only=False, cat_backend="none"))
+    ptt = _FakePtt()
+
+    def player(wave, fs, device=None, should_stop=None, on_progress=None):
+        if on_progress:
+            on_progress(1.0)
+        return True
+
+    engine = TxEngine(station, ptt=ptt, player=player)
+    audio = np.zeros(2400, dtype=np.float32)
+    assert engine._keyed_send(audio, 24000) is True
+    assert ptt.events == [True, False]
+    assert engine.state.phase == TxPhase.DONE
+
+
+def test_tx_ptt_unkeys_when_player_raises():
+    from aetv.settings import StationSettings
+    from aetv.station import Station
+
+    station = Station(StationSettings())
+    ptt = _FakePtt()
+
+    def player(*_args, **_kwargs):
+        raise RuntimeError("soundcard gone")
+
+    engine = TxEngine(station, ptt=ptt, player=player)
+    engine._keyed_send(np.zeros(100, dtype=np.float32), 24000)
+    assert ptt.events[0] is True
+    assert ptt.events[-1] is False
+    assert engine.state.phase == TxPhase.FAILED
+
+
+def test_ptt_watchdog_fires(monkeypatch):
+    ptt = _FakePtt()
+    fired = []
+    dog = _PttWatchdog(ptt, timeout_s=0.05, on_fire=lambda: fired.append(True))
+    dog.start()
+    time.sleep(0.2)
+    assert ptt.events == [False]
+    assert fired == [True]
+    dog.cancel()
+    assert WATCHDOG_MARGIN_S == 15.0

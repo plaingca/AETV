@@ -11,6 +11,27 @@ import numpy as np
 from .config import AETVModeSpec
 
 
+def list_cameras(max_index: int = 8) -> list[dict]:
+    """Probe local camera indices. Names are best-effort; Windows has no stable API."""
+    import cv2
+    import sys
+
+    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+    found: list[dict] = []
+    for index in range(max_index):
+        capture = cv2.VideoCapture(index, backend)
+        if capture is None or not capture.isOpened():
+            if capture is not None:
+                capture.release()
+            continue
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        capture.release()
+        size = f"{width}x{height}" if width and height else "camera"
+        found.append({"index": index, "name": f"Camera {index} ({size})"})
+    return found
+
+
 def resize_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     """Center-crop after covering the target size. Uses OpenCV if present."""
     if frame.shape[0] == height and frame.shape[1] == width:
@@ -35,8 +56,10 @@ def iter_webcam(
 ) -> Iterator[np.ndarray]:
     """Yield (H, W, 3) uint8 frames from a local camera at the mode frame rate."""
     import cv2
+    import sys
 
-    capture = cv2.VideoCapture(camera)
+    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+    capture = cv2.VideoCapture(camera, backend)
     if not capture.isOpened():
         raise RuntimeError(f"could not open webcam index {camera}")
     capture.set(cv2.CAP_PROP_FPS, mode.fps)

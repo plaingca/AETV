@@ -175,6 +175,29 @@ def cmd_train(args) -> int:
     return _exec_script(script, args.train_args)
 
 
+def cmd_gui(_args) -> int:
+    from .gui.app import main as gui_main
+
+    return gui_main()
+
+
+def cmd_kiwi_list(args) -> int:
+    from .kiwi import find_receivers
+
+    receivers = find_receivers(args.lat, args.lon, max_km=args.max_km)
+    usable = [item for item in receivers if item.usable]
+    print(f"reachable within {args.max_km:.0f} km: {len(receivers)}")
+    print(f"API enabled with a free channel: {len(usable)}")
+    print(f"{'km':>6}  {'api':>3} {'free':>4} {'host':<38} loc")
+    for item in receivers:
+        flag = "  <-- usable" if item.usable else ""
+        print(
+            f"{item.km or 0:6.0f}  {item.ext_api:3d} {item.free:4d} "
+            f"{item.host:<38} {item.loc}{flag}"
+        )
+    return 0
+
+
 def cmd_eval(args) -> int:
     from pathlib import Path as P
 
@@ -268,6 +291,15 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
     ev.add_argument("eval_args", nargs=argparse.REMAINDER)
     ev.set_defaults(func=cmd_eval)
+
+    gui = sub.add_parser("gui", help="open the ham-station GUI")
+    gui.set_defaults(func=cmd_gui)
+
+    kiwi = sub.add_parser("kiwi-list", help="find public KiwiSDR receivers that allow API capture")
+    kiwi.add_argument("--lat", type=float, default=49.26)
+    kiwi.add_argument("--lon", type=float, default=-123.11)
+    kiwi.add_argument("--max-km", type=float, default=2500.0)
+    kiwi.set_defaults(func=cmd_kiwi_list)
 
     return parser
 

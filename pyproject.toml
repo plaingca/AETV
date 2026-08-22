@@ -24,6 +24,14 @@ ham = [
     "sounddevice>=0.4.6",
     "opencv-python>=4.8",
 ]
+gui = [
+    "torch>=2.2",
+    "sounddevice>=0.4.6",
+    "opencv-python>=4.8",
+    "pyside6>=6.6",
+    "websockets>=12.0",
+    "pyserial>=3.5",
+]
 train = [
     "torch>=2.2",
     "torchvision>=0.17",
@@ -39,6 +47,7 @@ dev = [
 
 [project.scripts]
 aetv = "aetv.cli:main"
+aetv-gui = "aetv.gui.app:main"
 
 [project.urls]
 Homepage = "https://github.com/arodland/AETV"

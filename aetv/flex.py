@@ -93,13 +93,13 @@ def bind_to_gui_client(radio: FlexClient, client_id: str | None = None) -> str:
                 program = re.search(r"program=(\S+)", line)
                 found[match.group(2)] = program.group(1) if program else "?"
         if not found:
-            raise SystemExit(
+            raise RuntimeError(
                 "no GUI client is connected to the radio, so there is no transmit "
-                "slice to inherit -- start SmartSDR (or pass --bind-client-id)"
+                "slice to inherit — start SmartSDR (or pass --bind-client-id)"
             )
         if len(found) > 1:
             listing = ", ".join(f"{cid} ({prog})" for cid, prog in found.items())
-            raise SystemExit(f"several GUI clients connected; pass --bind-client-id: {listing}")
+            raise RuntimeError(f"several GUI clients connected; pass --bind-client-id: {listing}")
         client_id = next(iter(found))
     radio.command(f"client bind client_id={client_id}")
     return client_id
@@ -109,12 +109,12 @@ def check_frequency(status: str, want_mhz: float | None, want_mode: str | None) 
     freq_mhz = _status_float(status, "freq")
     mode = _status_text(status, "tx_slice_mode")
     if want_mhz is not None and abs(freq_mhz - want_mhz) > 1e-4:
-        raise SystemExit(
-            f"radio is on {freq_mhz:.6f} MHz, not the requested {want_mhz:.6f} MHz -- "
+        raise RuntimeError(
+            f"radio is on {freq_mhz:.6f} MHz, not the requested {want_mhz:.6f} MHz — "
             "tune it and re-run rather than transmitting on the wrong frequency"
         )
     if want_mode and mode.upper() != want_mode.upper():
-        raise SystemExit(f"transmit slice is in {mode}, not {want_mode}")
+        raise RuntimeError(f"transmit slice is in {mode}, not {want_mode}")
     return freq_mhz, mode
 
 
@@ -132,7 +132,7 @@ def send_wav(
 ) -> dict:
     """Play a prepared AETV WAV into DAX, optionally keying the Flex."""
     if not 1 <= power <= 100:
-        raise SystemExit("transmit power must be between 1 and 100 W")
+        raise RuntimeError("transmit power must be between 1 and 100 W")
     sample_rate, audio = read_wav(wav_path)
     output_rate = 48000
     if sample_rate != output_rate:

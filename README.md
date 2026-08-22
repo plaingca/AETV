@@ -6,8 +6,9 @@ the far end turns the recovered latents back into video.
 
 This repository is the standalone Flex-8k release of the AETV work that began
 inside [SSTVAE](https://github.com/arodland/SSTVAE). It ships the modem, the
-published V7 checkpoint recipe, training and evaluation, and a send/receive
-harness for webcam or file sources.
+published V7 checkpoint recipe, training and evaluation, and a ham-station
+GUI with CAT PTT, soundcard or KiwiSDR receive, webcam transmit, and a
+live audio waterfall.
 
 ## What was measured
 
@@ -30,11 +31,22 @@ and the Flex-8k weights in `models/v7-flex8k.pt` (see `models/README.md`).
 ```powershell
 git clone https://github.com/arodland/AETV.git
 cd AETV
-uv sync --extra ham
+uv sync --extra gui
 ```
 
-Training extras (`--extra train`) add torchvision, LPIPS, datasets, and
-Lance. GPU PyTorch is recommended for V7 encode/decode; CPU works, slowly.
+That extra is the redistributable station app: PyTorch, PortAudio,
+OpenCV, PySide6, and the KiwiSDR client. CLI-only send/receive is
+`--extra ham` (no Qt). Training extras (`--extra train`) add
+torchvision, LPIPS, datasets, and Lance. GPU PyTorch is recommended
+for V7 encode/decode; CPU works, slowly.
+
+Copy `models/v7-flex8k.pt` into place (see `models/README.md`), then:
+
+```powershell
+uv run aetv gui
+# or, on Windows:
+.\aetv-gui.ps1
+```
 
 ## Send and receive
 
@@ -56,9 +68,16 @@ uv run aetv receive --duration 35 --out rx.mp4
 uv run aetv simulate --source clip.mp4 --gops 4 --snr 12 --out sim.mp4
 ```
 
-`aetv devices` lists soundcards. Flex DAX TX is documented in
-[`docs/ham-guide.md`](docs/ham-guide.md). `--flex-host` keys a Flex 6000
-only after the radio is already on the requested frequency and mode.
+The GUI is the operator surface: receive on the left, compose and send
+on the right, waterfall along the top. Settings cover Hamlib `rigctld`,
+Flex 6000 PTT, serial RTS/DTR, soundcards, webcam index, and a public
+KiwiSDR picker (IQ centred on dial + 5 kHz so the 8 kHz V7 waveform
+fits the 12 kHz stream).
+
+`aetv devices` lists soundcards. `aetv kiwi-list` probes public
+receivers. Flex DAX TX and CAT details are in
+[`docs/ham-guide.md`](docs/ham-guide.md). Frequency and mode are checked,
+never set — tune the radio first.
 
 ## Train and eval
 
@@ -85,10 +104,11 @@ V7 is the published Flex-8k mode. Each GOP is one second: 8 OFDM frames,
 ## Tests
 
 ```powershell
-uv run pytest tests/test_core.py
+uv run pytest tests/test_core.py tests/test_station.py
 ```
 
-The suite covers N/W/U numerology and a clean modem loopback, including V7.
+The suite covers N/W/U numerology, a clean modem loopback including V7,
+the receive ring buffer, Kiwi IQ-to-passband conversion, and fail-safe PTT.
 
 ## License
 
