@@ -22,6 +22,7 @@ standard errors.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import statistics as st
 import sys
@@ -46,11 +47,58 @@ CELLS: list[tuple[str, float | None, str | None]] = [
     ("clean", None, None),
     ("18 dB", 18.0, None),
     ("12 dB", 12.0, None),
+    ("10 dB OTA", 10.0, None),
+    ("9 dB OTA", 9.0, None),
     ("6 dB", 6.0, None),
     ("0 dB", 0.0, None),
-    ("fade mpg", 12.0, "mpg"),
-    ("fade mpp", 6.0, "mpp"),
+    ("-2 dB", -2.0, None),
+    ("MPG 12", 12.0, "mpg"),
+    ("MPP 12 OTA", 12.0, "mpp"),
+    ("MPP 6", 6.0, "mpp"),
+    ("MPP 0", 0.0, "mpp"),
 ]
+
+METRICS = {
+    "psnr": "higher",
+    "ssim": "higher",
+    "lpips": "lower",
+    "delta_l1": "lower",
+    "accel_l1": "lower",
+    "delta_lpips": "lower",
+}
+
+
+def metric_values(recon: torch.Tensor, target: torch.Tensor, device) -> dict[str, float]:
+    """Spatial and source-referenced temporal metrics for one decoded GOP."""
+    r = recon.float().clamp(0, 1)
+    t = target.float().clamp(0, 1)
+    rf = r[0].permute(1, 0, 2, 3)
+    tf = t[0].permute(1, 0, 2, 3)
+    mu_r = F.avg_pool2d(rf, 7, stride=1, padding=3)
+    mu_t = F.avg_pool2d(tf, 7, stride=1, padding=3)
+    var_r = F.avg_pool2d(rf * rf, 7, stride=1, padding=3) - mu_r.square()
+    var_t = F.avg_pool2d(tf * tf, 7, stride=1, padding=3) - mu_t.square()
+    cov = F.avg_pool2d(rf * tf, 7, stride=1, padding=3) - mu_r * mu_t
+    ssim_map = ((2 * mu_r * mu_t + 0.01**2) * (2 * cov + 0.03**2)) / (
+        (mu_r.square() + mu_t.square() + 0.01**2)
+        * (var_r + var_t + 0.03**2)
+    ).clamp_min(1e-12)
+    delta_r = r[:, :, 1:] - r[:, :, :-1]
+    delta_t = t[:, :, 1:] - t[:, :, :-1]
+    accel_r = delta_r[:, :, 1:] - delta_r[:, :, :-1]
+    accel_t = delta_t[:, :, 1:] - delta_t[:, :, :-1]
+    # Encode signed frame differences into [0, 1] before LPIPS. This preserves
+    # both direction and location of motion while remaining in its image range.
+    delta_r_img = (0.5 * delta_r + 0.5).clamp(0, 1)
+    delta_t_img = (0.5 * delta_t + 0.5).clamp(0, 1)
+    return {
+        "psnr": compute_psnr(r, t),
+        "ssim": float(ssim_map.mean().item()),
+        "lpips": lpips_metric(r, t, device),
+        "delta_l1": float(F.l1_loss(delta_r, delta_t).item()),
+        "accel_l1": float(F.l1_loss(accel_r, accel_t).item()),
+        "delta_lpips": lpips_metric(delta_r_img, delta_t_img, device),
+    }
 
 
 def load_clips(cache_dir: Path, mode_spec, limit: int) -> list[torch.Tensor]:
@@ -86,7 +134,7 @@ def load_clips(cache_dir: Path, mode_spec, limit: int) -> list[torch.Tensor]:
 
 
 def eval_checkpoint(path: Path, clips, mode_spec, args, device):
-    """-> {cell: {'psnr': [per-clip], 'lpips': [per-clip]}}"""
+    """Return per-cell, per-metric values for paired comparison."""
     model = AETVAutoencoder(
         mode=mode_spec,
         width=args.model_width,
@@ -96,7 +144,7 @@ def eval_checkpoint(path: Path, clips, mode_spec, args, device):
     model.load_pretrained_weights(str(path), device=device)
     model.eval()
 
-    out = {label: {"psnr": [], "lpips": []} for label, _, _ in CELLS}
+    out = {label: {metric: [] for metric in METRICS} for label, _, _ in CELLS}
     shape = (mode_spec.gop_frames, mode_spec.height, mode_spec.width)
 
     with torch.no_grad():
@@ -120,8 +168,8 @@ def eval_checkpoint(path: Path, clips, mode_spec, args, device):
                         torch.from_numpy(w).unsqueeze(0).to(device),
                         shape,
                     )
-                out[label]["psnr"].append(compute_psnr(recon, video))
-                out[label]["lpips"].append(lpips_metric(recon, video, device))
+                for metric, value in metric_values(recon, video, device).items():
+                    out[label][metric].append(value)
 
     del model
     torch.cuda.empty_cache()
@@ -145,6 +193,7 @@ def main():
     ap.add_argument("--latent-channels", type=int, default=3)
     ap.add_argument("--clips", type=int, default=32)
     ap.add_argument("--cache-dir", type=str, default="runs/openvid-cache-5fps-eval-v68")
+    ap.add_argument("--out-json", type=str, default=None, help="Optional structured result path")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -173,7 +222,7 @@ def main():
         print(f"  evaluated {label:<18} ({time.time() - t0:.0f}s)", flush=True)
 
     ref = results[args.reference]
-    for metric, better in (("psnr", "higher"), ("lpips", "lower")):
+    for metric, better in METRICS.items():
         print(f"\n=== {metric.upper()} ({better} is better) ===")
         print(f"{'cell':>10} {'reference':>10} | " + " | ".join(f"{lab:>18}" for lab, _ in entries if lab != args.reference))
         for label, _, _ in CELLS:
@@ -189,6 +238,20 @@ def main():
 
     print("\n* marks a paired delta larger than twice its own standard error.")
     print(f"reference = {args.reference}")
+    if args.out_json:
+        payload = {
+            "reference": args.reference,
+            "clips": len(clips),
+            "cells": [
+                {"label": label, "snr_db": snr, "fading": fading}
+                for label, snr, fading in CELLS
+            ],
+            "results": results,
+        }
+        path = Path(args.out_json)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, allow_nan=True) + "\n", encoding="utf-8")
+        print(f"wrote {path}")
 
 
 if __name__ == "__main__":

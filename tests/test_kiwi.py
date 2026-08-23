@@ -8,6 +8,7 @@ from aetv.kiwi import (
     _decode_snd_iq,
     normalize_kiwi_host,
     parse_directory,
+    probe_receiver,
 )
 from aetv.kiwi import KiwiCapture
 
@@ -45,6 +46,35 @@ def test_canonical_kiwi_directory_metadata_is_parsed_without_probing():
     assert radios[0].ext_api == 3
     assert radios[0].free == 3
     assert radios[0].usable
+
+
+def test_canonical_directory_rejects_impossible_operator_coordinates():
+    blob = '''
+    var kiwisdr_com = [{
+      "offline": "no", "name": "bad GPS", "users": "0", "users_max": "8",
+      "ext_api": "4", "gps": "(48.555999, 3555999.000000)",
+      "loc": "France", "url": "http://bad.example:8073"
+    },];
+    '''
+    assert parse_directory(blob) == []
+
+
+def test_live_probe_rejects_impossible_operator_coordinates(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return (
+                b"gps=(48.555999, 3555999.000000)\nusers=0\nusers_max=8\n"
+                b"ext_api=4\noffline=no\n"
+            )
+
+    monkeypatch.setattr("aetv.kiwi.urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    assert probe_receiver("bad.example:8073") is None
 
 
 def test_pasted_kiwi_urls_are_normalized_for_websocket_use():

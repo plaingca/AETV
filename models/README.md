@@ -1,16 +1,21 @@
 # Flex-8k checkpoints
 
-The application defaults to the severe-channel fine-tune:
+The application defaults to the receiver-adapted OTA fine-tune:
 
 | File | Purpose | SHA-256 |
 |---|---|---|
-| `v7-flex8k-severe.pt` | Default; strongest 0/-2 dB and MPP recovery | `e900bd7da2f080d23926a64f76d4b2624c413e08ddcdb91fde81c8acdd9a53b4` |
+| `v8-flex8k-ota-rxfix.pt` | Default; adapted to noise-aware MMSE confidence and verified on a 71-GOP OTA sweep | `294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f` |
+| `v8-flex8k-ota-perceptual.pt` | Previous OTA-perceptual default using the legacy equalizer contract | `425f112924693170c61cebb6ab5865bd526714a4afae9aec88a37709441b5d47` |
+| `v7-flex8k-severe.pt` | Alternate; strongest 0/-2 dB and MPP recovery | `e900bd7da2f080d23926a64f76d4b2624c413e08ddcdb91fde81c8acdd9a53b4` |
 | `v7-flex8k-severe-balanced.pt` | Alternate with slightly more clean-channel fidelity | `18d610a35797f3bffb86f55bd8d9a79182d24b961640b19ffa27304763dcfa03` |
 | `v7-flex8k.pt` | Original published stage-2 baseline | `afe476e5c5681210817a8e0598ec38ef40bdbd609485ad10d7a13ae9e6cd460b` |
 
 Leave the checkpoint field empty in the GUI (or omit `--checkpoint`) to use
-`models/v7-flex8k-severe.pt`. Set `AETV_CHECKPOINT` or pass `--checkpoint` to
+`models/v8-flex8k-ota-rxfix.pt`. Set `AETV_CHECKPOINT` or pass `--checkpoint` to
 select either alternate.
+
+See `docs/v8-ota-rxfix.md` for the receiver correction and OTA replay, and
+`docs/v8-ota-perceptual.md` for the original 32-clip grid and VVC reference.
 
 ## Original published checkpoint
 

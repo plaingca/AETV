@@ -39,7 +39,10 @@ class CameraFrameBuffer:
         with self._lifecycle_lock:
             if self._key == key and self._thread is not None and self._thread.is_alive():
                 return
-            self._stop_locked()
+            if not self._stop_locked():
+                raise RuntimeError(
+                    "previous webcam worker did not stop; refusing to open a second camera backend"
+                )
             with self._condition:
                 self._history.clear()
                 self._error = None
@@ -92,17 +95,23 @@ class CameraFrameBuffer:
 
     def close(self) -> None:
         with self._lifecycle_lock:
-            self._stop_locked()
-            with self._condition:
-                self._key = None
-                self._history.clear()
+            if self._stop_locked():
+                with self._condition:
+                    self._key = None
+                    self._history.clear()
 
-    def _stop_locked(self) -> None:
+    def _stop_locked(self) -> bool:
         self._stop.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
+        if thread is not None and thread.is_alive():
+            # Do not forget this worker and start a second native capture
+            # stack. Some Windows webcam drivers corrupt the process heap if
+            # two overlapping Media Foundation/DirectShow lifecycles race.
+            return False
         self._thread = None
+        return True
 
     def _run(self, mode: AETVModeSpec, camera: int, stop: threading.Event) -> None:
         try:
@@ -184,7 +193,7 @@ def iter_webcam(
     backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
     condition = threading.Condition()
     stop = threading.Event()
-    state: dict = {"frame": None, "sequence": 0, "error": None, "capture": None}
+    state: dict = {"frame": None, "sequence": 0, "error": None}
     # Sampling must not stop while the neural encoder is using the yielded
     # GOP. Keep a small, bounded clocked queue so capture for GOP N+1 overlaps
     # encoding GOP N without accumulating stale camera video.
@@ -194,7 +203,6 @@ def iter_webcam(
 
     def drain_camera() -> None:
         capture = cv2.VideoCapture(camera, backend)
-        state["capture"] = capture
         if not capture.isOpened():
             with condition:
                 state["error"] = RuntimeError(f"could not open webcam index {camera}")
@@ -295,10 +303,10 @@ def iter_webcam(
         stop.set()
         sampler.join(timeout=1.0)
         reader.join(timeout=2.0)
-        if reader.is_alive() and state["capture"] is not None:
-            # Best effort to unblock a backend stuck in read().
-            state["capture"].release()
-            reader.join(timeout=1.0)
+        # VideoCapture is owned and released by drain_camera. Releasing it
+        # here from another thread while read() is active can corrupt native
+        # Media Foundation/DirectShow state. A stuck reader is a daemon and a
+        # later CameraFrameBuffer.configure() will refuse to overlap it.
 
 
 def iter_video_file(

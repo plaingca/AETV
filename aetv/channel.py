@@ -39,12 +39,35 @@ from .ofdm import pilot_sequence
 @dataclass
 class AETVChannelConfig:
     snr_db_range: tuple[float, float] = (-2.0, 10.0)  # low-SNR focused regime
+    snr_focus_range: tuple[float, float] | None = None
+    p_snr_focus: float = 0.0
     p_fading: float = 0.70  # 70% probability of Watterson multipath fading
     doppler_range_hz: tuple[float, float] = (0.1, 2.0)
     delay_range_ms: tuple[float, float] = (0.5, 4.0)
     clip_headroom_db: float = CLIP_HEADROOM_DB
     p_truncate: float = 0.0
     erasure_rate_max: float = 0.0
+
+
+def _sample_snr_db(
+    cfg: AETVChannelConfig,
+    batch: int,
+    device: torch.device,
+    generator: torch.Generator | None,
+) -> torch.Tensor:
+    """Sample the broad channel range with an optional OTA-focused mixture."""
+    lo, hi = cfg.snr_db_range
+    broad = lo + torch.rand(batch, 1, device=device, generator=generator) * (hi - lo)
+    if cfg.snr_focus_range is None or cfg.p_snr_focus <= 0.0:
+        return broad
+    focus_lo, focus_hi = cfg.snr_focus_range
+    focused = focus_lo + torch.rand(batch, 1, device=device, generator=generator) * (
+        focus_hi - focus_lo
+    )
+    choose_focus = (
+        torch.rand(batch, 1, device=device, generator=generator) < cfg.p_snr_focus
+    )
+    return torch.where(choose_focus, focused, broad)
 
 
 class AETVLatentChannel(nn.Module):
@@ -85,8 +108,7 @@ class AETVLatentChannel(nn.Module):
             weights = weights * erasure_mask.float()
 
         # Additive white Gaussian noise (AWGN)
-        lo, hi = self.cfg.snr_db_range
-        snr_db = lo + torch.rand(b, 1, device=device, generator=generator) * (hi - lo)
+        snr_db = _sample_snr_db(self.cfg, b, device, generator)
         sigma = 10.0 ** (-snr_db / 20.0)
         noise = torch.randn(z.shape, device=device, generator=generator) * sigma
 
@@ -279,8 +301,7 @@ class AETVWaveformChannel(nn.Module):
         tx_audio = self._clip_filter(samples)
 
         # Channel simulation: AWGN over reference bandwidth in target SNR range
-        lo, hi = self.cfg.snr_db_range
-        snr_db = lo + torch.rand(b, 1, device=device, generator=generator) * (hi - lo)
+        snr_db = _sample_snr_db(self.cfg, b, device, generator)
         snr_linear = 10.0 ** (snr_db / 10.0)
         signal_pwr = tx_audio.square().mean(dim=1, keepdim=True)
         # ``snr_db`` is referenced to noise in SNR_REF_BW_HZ. The generated
@@ -303,24 +324,33 @@ class AETVWaveformChannel(nn.Module):
         pilot_rx = rx_frames[:, :, 0, :]  # (B, N_FRAMES, NC)
         h_est = pilot_rx / (self.pilot[None, None, :] + 1e-9)
 
-        # Equalize data symbols (syms 1..4)
+        # Equalize data symbols (syms 1..4). A complete GOP is available to
+        # both training and production decode, so interpolate toward the next
+        # frame pilot instead of using a channel estimate up to 100 ms old.
         data_syms_rx = rx_frames[:, :, 1:, : g.latent_carriers]  # (B, N_FRAMES, 4, NC_LATENT)
-        h_latent = h_est[:, :, None, : g.latent_carriers]
-
-        gain_scale = (
-            h_est[:, :, : g.latent_carriers]
-            .abs()
-            .flatten(1)
-            .median(dim=1)
-            .values
-            .clamp_min(1e-9)[:, None, None, None]
+        h_current = h_est[:, :, : g.latent_carriers]
+        h_next = torch.cat([h_current[:, 1:], h_current[:, -1:]], dim=1)
+        fractions = (
+            torch.arange(1, DATA_SYMS_PER_FRAME + 1, device=device).float()
+            / SYMS_PER_FRAME
+        )[None, None, :, None]
+        h_latent = (
+            (1.0 - fractions) * h_current[:, :, None, :]
+            + fractions * h_next[:, :, None, :]
         )
-        denom = h_latent.abs().square() + 1e-3 * gain_scale.square()
+
+        differences = h_current[:, 1:] - h_current[:, :-1]
+        noise_variance = 0.5 * differences.abs().square().mean(dim=(1, 2))
+        total_power = h_current.abs().square().mean(dim=(1, 2))
+        noise_variance = torch.maximum(
+            noise_variance, total_power.clamp_min(1e-18) * 1e-9
+        )[:, None, None, None]
+        channel_power = h_latent.abs().square()
+        denom = channel_power.clamp_min(noise_variance * 1e-6)
         eq_data = data_syms_rx * torch.conj(h_latent) / denom
         eq_weights = torch.clamp(
-            h_latent.abs() / (h_latent.abs() + 0.1 * gain_scale), 0.0, 1.0
+            channel_power / (channel_power + noise_variance), 0.0, 1.0
         )
-        eq_weights = eq_weights.expand_as(data_syms_rx)
 
         # Unpack I and Q
         flat_eq = eq_data.reshape(b, -1)

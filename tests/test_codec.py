@@ -20,7 +20,7 @@ def test_resolve_checkpoint_from_environment(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(
-    not CHECKPOINT.is_file(), reason="models/v7-flex8k-severe.pt not installed"
+    not CHECKPOINT.is_file(), reason="models/v8-flex8k-ota-rxfix.pt not installed"
 )
 def test_v7_codec_and_modem_loopback():
     codec = AETVCodec(CHECKPOINT, device="cpu", mode="V7")

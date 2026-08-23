@@ -253,16 +253,17 @@ class FlexVitaSession:
         self._radio_mtu: int | None = None
         self.radio_mtu_enforced = False
 
-        # With "use current slice", bind to the existing SmartSDR/Maestro GUI
-        # client so the slice and its TX ownership are shared correctly. If no
-        # GUI exists, register independently (and require a frequency below to
-        # create our own slice).
+        # Bind to the existing SmartSDR/Maestro GUI whenever it exists so the
+        # visible TX slice, local-PTT permission, and DAX ownership stay in one
+        # client context. This is also required when a requested frequency is
+        # supplied: an independent API client can see and tune a GUI-owned
+        # slice without actually moving the radio's active transmit chain.
+        # If no GUI exists, a frequency still permits a standalone slice.
         self.bound_client = None
-        if frequency_mhz is None:
-            try:
-                self.bound_client = bind_to_gui_client(self.control)
-            except RuntimeError:
-                pass
+        try:
+            self.bound_client = bind_to_gui_client(self.control)
+        except RuntimeError:
+            pass
         self.client_id = self.bound_client or _response_payload(
             self.control.command("client gui")
         )
@@ -310,6 +311,22 @@ class FlexVitaSession:
         self.control.command(f"filt {idx} {filter_low} {filter_high}")
         self.control.command(f"dax audio set 1 slice={idx} tx=1")
         self.control.command(f"transmit set dax=1 rfpower={max(1, min(100, int(power)))}")
+        if frequency_mhz is not None:
+            self._verify_transmit_frequency(float(frequency_mhz))
+
+    def _verify_transmit_frequency(self, requested_mhz: float) -> None:
+        """Refuse to key if the active Flex TX chain did not follow the slice."""
+        lines = self.control.command("sub tx all")
+        lines += self.control._receive(0.5)
+        statuses = [line for line in lines if "|transmit freq=" in line]
+        if not statuses:
+            raise RuntimeError("Flex did not confirm its active transmit frequency")
+        actual_mhz = _status_float(statuses[-1], "freq")
+        if abs(actual_mhz - requested_mhz) > 1e-4:
+            raise RuntimeError(
+                f"Flex TX chain stayed on {actual_mhz:.6f} MHz after tuning the "
+                f"selected slice to {requested_mhz:.6f} MHz; transmission was blocked"
+            )
 
     @staticmethod
     def _parse_slices(lines: list[str]) -> dict[int, dict[str, str]]:

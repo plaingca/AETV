@@ -1,6 +1,6 @@
 # V7 severe-channel fine-tune
 
-The default V7 model is a 500-step stage-2 warm start from the published
+The V7 severe model is a 500-step stage-2 warm start from the published
 `models/v7-flex8k.pt` checkpoint. It trains against the corrected physical SNR
 calibration and calibrated Watterson fading in the production OFDM waveform
 channel.
@@ -30,7 +30,7 @@ resumed. Its complete recipe is:
 - checkpoints and held-out evaluation at steps 250 and 500
 
 Step 250 is installed as `v7-flex8k-severe-balanced.pt`; step 500 is installed
-as the default `v7-flex8k-severe.pt`.
+as `v7-flex8k-severe.pt`. V8 OTA-perceptual later superseded it as the default.
 
 ## Reference results
 

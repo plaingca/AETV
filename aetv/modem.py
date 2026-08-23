@@ -261,18 +261,16 @@ class _ContinuousTxConditioner:
         return y.astype(np.float32)
 
 
-def _payload_equalizer_scales(
+def _payload_noise_variances(
     h_pilots: np.ndarray,
     latent_carriers: int,
 ) -> np.ndarray:
-    """Return one robust channel-amplitude reference per GOP.
+    """Return pilot-observation noise power for each complete GOP.
 
-    Payload regularization must follow the received gain. Audio devices and RF
-    captures have arbitrary amplitude, so fixed absolute constants make the
-    recovered latents and confidence depend on AGC level. The checkpoint's
-    differentiable channel has a nominal pilot gain near one; normalizing the
-    constants by each GOP's median pilot gain preserves that contract while
-    remaining invariant to capture amplitude.
+    Adjacent pilots are 125 ms apart. Half their mean squared difference is an
+    unbiased AWGN estimate; real channel motion is intentionally counted too,
+    because it is uncertainty in a pilot used to equalize later data symbols.
+    The value scales with capture gain, preserving receive-level invariance.
     """
     pilots = np.asarray(h_pilots)
     if pilots.ndim != 2 or len(pilots) % FRAMES_PER_GOP:
@@ -280,19 +278,29 @@ def _payload_equalizer_scales(
     grouped = pilots[:, :latent_carriers].reshape(
         -1, FRAMES_PER_GOP, latent_carriers
     )
-    return np.maximum(np.median(np.abs(grouped), axis=(1, 2)), 1e-9)
+    differences = np.diff(grouped, axis=1)
+    noise = 0.5 * np.mean(np.abs(differences) ** 2, axis=(1, 2))
+    total = np.mean(np.abs(grouped) ** 2, axis=(1, 2))
+    return np.maximum(noise, np.maximum(total, 1e-18) * 1e-9)
 
 
 def _equalize_payload_symbol(
     received: np.ndarray,
     channel: np.ndarray,
-    scale: float,
+    noise_variance: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Scale-invariant checkpoint-compatible payload equalization."""
-    magnitude = np.abs(channel)
-    denominator = magnitude**2 + 1e-3 * scale**2
-    equalized = received * np.conj(channel) / denominator
-    weights = np.clip(magnitude / (magnitude + 0.1 * scale), 0.0, 1.0)
+    """Return a zero-forcing estimate plus its MMSE reliability.
+
+    The decoder consumes ``equalized * weights``. Keeping the unshrunk value
+    and supplying H^2/(H^2+N) as confidence therefore gives it the MMSE
+    posterior while also exposing reliability as a feature. Unlike the old
+    magnitude/median heuristic, confidence tends toward zero as pilot
+    reliability falls instead of remaining near 0.9.
+    """
+    power = np.abs(channel) ** 2
+    floor = max(float(noise_variance) * 1e-6, 1e-18)
+    equalized = received * np.conj(channel) / np.maximum(power, floor)
+    weights = np.clip(power / (power + float(noise_variance)), 0.0, 1.0)
     return equalized, weights
 
 
@@ -820,17 +828,12 @@ class StreamingDemodulator:
                     continue
                 self.buffer = self.buffer[payload_samples:]
                 self.samples_consumed += payload_samples
-                # A payload can be too marginal for the normal quality gate
-                # while still being unmistakably on-air.  Do not use the
-                # stricter 0.20 display-quality threshold to decide that the
-                # transmitter disappeared: weak OTA fades commonly sit around
-                # 0.15--0.19, while post-transmission noise clusters near the
-                # eight-pilot incoherent baseline (0.125).  Hold only the truly
-                # ambiguous intervals and release them if carrier evidence
-                # returns before the three-GOP end detector expires.
+                # Below this independent carrier-structure floor, decoded
+                # latents are indistinguishable from noise. Keep tracking for
+                # two intervals so a short fade does not end reception, but do
+                # not display those GOPs if carrier evidence later returns.
                 if result.pilot_coherence < 0.09:
                     self._tracking_bad_gops += 1
-                    self._tracking_pending.append((result, stream_sample))
                     self._debug(
                         "tracking_weak",
                         stream_sample=int(stream_sample),
@@ -849,28 +852,26 @@ class StreamingDemodulator:
                         self._tracking_pending.clear()
                     continue
                 self._tracking_bad_gops = 0
-                recovered = [*self._tracking_pending, (result, stream_sample)]
                 self._tracking_pending.clear()
-                for recovered_result, recovered_sample in recovered:
-                    missing_gops = self._accumulate_beacon(
-                        recovered_result, recovered_sample, payload_samples
-                    )
-                    self._debug(
-                        "gop_accepted",
-                        tracked=True,
-                        recovered_weak=(recovered_result is not result),
-                        stream_sample=int(recovered_sample),
-                        metric=float(recovered_result.sync_metric),
-                        freq_offset_hz=float(recovered_result.freq_offset),
-                        header_score=float(recovered_result.header_score),
-                        pilot_coherence=float(recovered_result.pilot_coherence),
-                        snr_db=float(recovered_result.snr_db),
-                        beacon_chips=int(len(self.beacon_chips)),
-                        beacon_repeated_chips=int(len(self.beacon_repeated_chips)),
-                        missing_gops=int(missing_gops),
-                        callsign=recovered_result.callsign,
-                    )
-                    results.append(recovered_result)
+                missing_gops = self._accumulate_beacon(
+                    result, stream_sample, payload_samples
+                )
+                self._debug(
+                    "gop_accepted",
+                    tracked=True,
+                    recovered_weak=False,
+                    stream_sample=int(stream_sample),
+                    metric=float(result.sync_metric),
+                    freq_offset_hz=float(result.freq_offset),
+                    header_score=float(result.header_score),
+                    pilot_coherence=float(result.pilot_coherence),
+                    snr_db=float(result.snr_db),
+                    beacon_chips=int(len(self.beacon_chips)),
+                    beacon_repeated_chips=int(len(self.beacon_repeated_chips)),
+                    missing_gops=int(missing_gops),
+                    callsign=result.callsign,
+                )
+                results.append(result)
                 continue
             if self.continuous and self._awaiting_blind:
                 # The receiver commonly starts before the transmitter.  A
@@ -1076,6 +1077,26 @@ class StreamingDemodulator:
                 self.buffer = self.buffer[discarded:]
                 self.samples_consumed += discarded
                 continue
+            if self.continuous and result.pilot_coherence < 0.09:
+                # A repeated low-SNR header can occasionally win the large
+                # acquisition search by chance. Do not hand its noise latents
+                # to the video decoder: require independent payload-pilot
+                # evidence before entering continuous tracking.
+                self._debug(
+                    "candidate_rejected",
+                    offset=int(acq.preamble_start),
+                    stream_sample=candidate_sample,
+                    metric=float(acq.metric),
+                    header_score=float(result.header_score),
+                    pilot_coherence=float(result.pilot_coherence),
+                    reason="payload pilot structure below 0.09 confirmation floor",
+                )
+                self.buffer = self.buffer[needed:]
+                self.samples_consumed += needed
+                self._awaiting_blind = True
+                self._awaiting_search_offset = 0
+                self._header_aided_allowed = False
+                continue
             self.buffer = self.buffer[needed:]
             self.samples_consumed += needed
             missing_gops = self._accumulate_beacon(
@@ -1109,13 +1130,15 @@ def _estimate_snr_db(h_pilot: np.ndarray, band: str = "W") -> float:
         return float("nan")
     diffs = np.diff(h_pilot, axis=0)
     noise_var = 0.5 * float(np.mean(np.abs(diffs) ** 2))
-    sig_var = float(np.mean(np.abs(h_pilot) ** 2))
-    if noise_var <= 0 or sig_var <= 0:
+    total_var = float(np.mean(np.abs(h_pilot) ** 2))
+    signal_var = max(0.0, total_var - noise_var)
+    if noise_var <= 0 or total_var <= 0:
         return float("nan")
     geom = BANDS[band]
-    snr_50hz = sig_var / noise_var
+    snr_50hz = signal_var / noise_var
     snr_ref = snr_50hz * (geom.carriers * RS / SNR_REF_BW_HZ)
-    return float(10.0 * np.log10(snr_ref))
+    # A finite floor keeps GUI/log serialization useful for noise-only input.
+    return float(10.0 * np.log10(max(snr_ref, 1e-6)))
 
 
 def _pilot_coherence(h_pilot: np.ndarray) -> float:
@@ -1365,7 +1388,7 @@ def demodulate_gop_stream(
         h_pilots.append(r_pilot / pilot_seq)
 
     h_pilot_arr = np.asarray(h_pilots)
-    equalizer_scales = _payload_equalizer_scales(
+    noise_variances = _payload_noise_variances(
         h_pilot_arr, geom.latent_carriers
     )
 
@@ -1382,7 +1405,7 @@ def demodulate_gop_stream(
 
         # Channel estimate H on pilot
         h_f = h_pilot_arr[f]
-        equalizer_scale = equalizer_scales[f // FRAMES_PER_GOP]
+        noise_variance = noise_variances[f // FRAMES_PER_GOP]
 
         # Equalize 4 data symbols in this frame
         for s in range(DATA_SYMS_PER_FRAME):
@@ -1392,8 +1415,17 @@ def demodulate_gop_stream(
             if alpha > 0:
                 r_sym *= np.exp(-1j * carrier_phase)
 
+            # A complete GOP is buffered before decode, so use the following
+            # frame's pilot to interpolate the channel at each data symbol.
+            # This removes up to 100 ms of avoidable pilot age on fading paths.
+            if f + 1 < total_frames and (f + 1) % FRAMES_PER_GOP:
+                fraction = (s + 1) / SYMS_PER_FRAME
+                h_data = (1.0 - fraction) * h_f + fraction * h_pilot_arr[f + 1]
+            else:
+                h_data = h_f
+
             eq_sym, weight = _equalize_payload_symbol(
-                r_sym, h_f, equalizer_scale
+                r_sym, h_data, noise_variance
             )
 
 
@@ -1508,7 +1540,7 @@ def demodulate_tracked_gop(
         r_pilots.append(r_pilot)
         h_pilots.append(r_pilot / pilot_seq)
     pilot_array = np.asarray(h_pilots)
-    equalizer_scale = _payload_equalizer_scales(
+    noise_variance = _payload_noise_variances(
         pilot_array, geom.latent_carriers
     )[0]
 
@@ -1520,8 +1552,16 @@ def demodulate_tracked_gop(
             received = ofdm.demod_window(
                 z_cfo, symbol_sample, band=mode.band
             )
+            if frame + 1 < FRAMES_PER_GOP:
+                fraction = (data_index + 1) / SYMS_PER_FRAME
+                h_data = (
+                    (1.0 - fraction) * h_f
+                    + fraction * pilot_array[frame + 1]
+                )
+            else:
+                h_data = h_f
             equalized, weight = _equalize_payload_symbol(
-                received, h_f, equalizer_scale
+                received, h_data, noise_variance
             )
             all_data_syms.append(equalized)
             all_data_weights.append(weight)

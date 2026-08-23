@@ -73,6 +73,10 @@ class KiwiReceiver:
     km: float | None = None
     mode: str = ""
     offline: str = "?"
+    predicted_snr_db: float | None = None
+    predicted_uncertainty_db: float | None = None
+    success_probability: float | None = None
+    prediction_engine: str = ""
 
     @property
     def usable(self) -> bool:
@@ -142,6 +146,12 @@ def parse_directory(blob: str) -> list[KiwiReceiver]:
             )
             if not gps:
                 continue
+            lat, lon = float(gps.group(1)), float(gps.group(2))
+            # Kiwi directory coordinates are operator-supplied. Impossible
+            # values must not wrap through great-circle trig and masquerade as
+            # plausible propagation paths.
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                continue
             try:
                 host = normalize_kiwi_host(str(entry.get("url", "")))
                 users = int(entry.get("users", 99))
@@ -153,8 +163,8 @@ def parse_directory(blob: str) -> list[KiwiReceiver]:
                 host=host,
                 name=str(entry.get("name", ""))[:60],
                 loc=str(entry.get("loc", ""))[:40],
-                lat=float(gps.group(1)),
-                lon=float(gps.group(2)),
+                lat=lat,
+                lon=lon,
                 ext_api=ext_api,
                 users=users,
                 users_max=users_max,
@@ -208,6 +218,9 @@ def probe_receiver(host: str, timeout: float = 8.0) -> KiwiReceiver | None:
     gps = re.match(r"\(?\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)", fields.get("gps", ""))
     if not gps:
         return None
+    lat, lon = float(gps.group(1)), float(gps.group(2))
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
     try:
         users = int(fields.get("users", "99"))
         users_max = int(fields.get("users_max", "0"))
@@ -218,8 +231,8 @@ def probe_receiver(host: str, timeout: float = 8.0) -> KiwiReceiver | None:
         host=host,
         name=fields.get("name", "")[:60],
         loc=fields.get("loc", "")[:40],
-        lat=float(gps.group(1)),
-        lon=float(gps.group(2)),
+        lat=lat,
+        lon=lon,
         ext_api=ext_api,
         users=users,
         users_max=users_max,

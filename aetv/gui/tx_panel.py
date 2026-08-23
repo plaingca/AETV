@@ -62,6 +62,7 @@ class TransmitPanel(QWidget):
         self._preview_stop = threading.Event()
         self._preview_thread: threading.Thread | None = None
         self._preview_restart_pending = False
+        self._webcam_tx_active = False
         self._camera_preview_queued = threading.Event()
         self._camera_load_active = False
         self._output_load_active = False
@@ -115,6 +116,18 @@ class TransmitPanel(QWidget):
             self.status.setText(problems[0])
             return
         source = "webcam" if self.cam_radio.isChecked() else self._file_path
+        if source == "webcam":
+            # Hand the camera from the Qt preview subscriber to TX before the
+            # encoder/CUDA worker starts.  Leaving queued QImage paints active
+            # during this transition has caused native Qt/Media Foundation
+            # heap corruption on Windows, which bypasses Python exceptions.
+            self._webcam_tx_active = True
+            self._preview_restart_pending = False
+            if not self._stop_preview_blocking():
+                self._webcam_tx_active = False
+                self.status.setText("Webcam preview did not stop; transmit was not started")
+                return
+            self._camera_preview_queued.clear()
         self.send_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         for button in self.channel_buttons.buttons():
@@ -150,6 +163,7 @@ class TransmitPanel(QWidget):
             self._workerFinished.emit()
 
     def _on_worker_finished(self) -> None:
+        self._webcam_tx_active = False
         if self.cam_radio.isChecked():
             self._start_preview()
 
@@ -251,7 +265,11 @@ class TransmitPanel(QWidget):
         self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
-        if self.cam_radio.isChecked() and not self.transmitting():
+        if (
+            self.cam_radio.isChecked()
+            and not self.transmitting()
+            and not self._webcam_tx_active
+        ):
             self._start_preview()
         else:
             self._stop_preview()
@@ -265,7 +283,7 @@ class TransmitPanel(QWidget):
             self._on_preview_stopped()
 
     def _start_preview(self) -> None:
-        if self.transmitting() or not self.cam_radio.isChecked():
+        if self.transmitting() or self._webcam_tx_active or not self.cam_radio.isChecked():
             return
         if self._preview_thread is not None and self._preview_thread.is_alive():
             return
@@ -308,12 +326,17 @@ class TransmitPanel(QWidget):
     def _stop_preview(self) -> None:
         self._preview_stop.set()
 
-    def stop_preview(self) -> None:
-        """Release the preview camera before the application closes."""
+    def _stop_preview_blocking(self, timeout: float = 1.0) -> bool:
+        """Stop only the preview consumer, leaving its camera producer live."""
         self._stop_preview()
         thread = self._preview_thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+            thread.join(timeout=timeout)
+        return thread is None or not thread.is_alive()
+
+    def stop_preview(self) -> None:
+        """Release the preview camera before the application closes."""
+        self._stop_preview_blocking(timeout=2.0)
         self._camera_frames.close()
 
     def _choose_file(self) -> None:
@@ -435,4 +458,6 @@ class TransmitPanel(QWidget):
 
     def _show_camera_preview(self, frame) -> None:
         self._camera_preview_queued.clear()
+        if self._webcam_tx_active or self.transmitting():
+            return
         self.preview.set_rgb(frame)

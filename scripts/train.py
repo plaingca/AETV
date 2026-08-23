@@ -71,6 +71,15 @@ def temporal_delta_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tens
     return F.l1_loss(recon[:, :, 1:] - recon[:, :, :-1], target[:, :, 1:] - target[:, :, :-1])
 
 
+def temporal_acceleration_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Match second-order frame differences, directly penalizing flicker/judder."""
+    if recon.shape[2] < 3:
+        return recon.new_zeros(())
+    recon_accel = recon[:, :, 2:] - 2.0 * recon[:, :, 1:-1] + recon[:, :, :-2]
+    target_accel = target[:, :, 2:] - 2.0 * target[:, :, 1:-1] + target[:, :, :-2]
+    return F.l1_loss(recon_accel, target_accel)
+
+
 _SQRT_HALF = 0.7071067811865476
 
 
@@ -594,7 +603,9 @@ def main():
     ap.add_argument("--dwt-levels", type=int, default=3, help="DWT pyramid levels")
     ap.add_argument("--grad-weight", type=float, default=0.5, help="Spatial edge-map L1 weight")
     ap.add_argument("--temporal-weight", type=float, default=0.7, help="Inter-frame delta L1 weight")
+    ap.add_argument("--temporal-accel-weight", type=float, default=0.0, help="Second-order temporal L1 weight for flicker/judder suppression")
     ap.add_argument("--lpips-weight", type=float, default=0.06, help="Multi-layer VGG perceptual weight on the transmitted render (0.0 to disable)")
+    ap.add_argument("--temporal-lpips-weight", type=float, default=0.0, help="VGG perceptual weight on signed inter-frame differences")
     ap.add_argument(
         "--adv-confidence-power",
         type=float,
@@ -615,6 +626,12 @@ def main():
         help="Weight on |noisy recon - clean recon|; targets decoder insensitivity to channel corruption",
     )
     ap.add_argument(
+        "--clean-anchor-weight",
+        type=float,
+        default=0.0,
+        help="Auxiliary clean-render fidelity weight during channel fine-tuning",
+    )
+    ap.add_argument(
         "--max-nonfinite",
         type=int,
         default=50,
@@ -629,6 +646,9 @@ def main():
     ap.add_argument("--latent-channels", type=int, default=12, help="Latent channels")
     ap.add_argument("--snr-min", type=float, default=-2.0, help="Minimum channel SNR (dB)")
     ap.add_argument("--snr-max", type=float, default=10.0, help="Maximum channel SNR (dB)")
+    ap.add_argument("--snr-focus-min", type=float, default=None, help="Optional OTA-focused mixture minimum SNR (dB)")
+    ap.add_argument("--snr-focus-max", type=float, default=None, help="Optional OTA-focused mixture maximum SNR (dB)")
+    ap.add_argument("--p-snr-focus", type=float, default=0.0, help="Probability of sampling from the OTA-focused SNR range")
     ap.add_argument("--p-fading", type=float, default=0.70, help="Probability of Watterson frequency-selective fading")
     ap.add_argument("--init-checkpoint", type=str, default=None, help="Initial checkpoint path (optional)")
     ap.add_argument(
@@ -660,8 +680,19 @@ def main():
     # the *effective* values. Stage 2 overrides two of them, and a banner that
     # reported the raw arguments claimed p_truncate=0.3 on a stage-2 run that
     # was training with no truncation at all.
+    if (args.snr_focus_min is None) != (args.snr_focus_max is None):
+        ap.error("--snr-focus-min and --snr-focus-max must be supplied together")
+    if not 0.0 <= args.p_snr_focus <= 1.0:
+        ap.error("--p-snr-focus must be between 0 and 1")
+    focus_range = (
+        None
+        if args.snr_focus_min is None
+        else (args.snr_focus_min, args.snr_focus_max)
+    )
     channel_cfg = AETVChannelConfig(
         snr_db_range=(args.snr_min, args.snr_max),
+        snr_focus_range=focus_range,
+        p_snr_focus=args.p_snr_focus,
         p_fading=args.p_fading,
         p_truncate=args.p_truncate if args.stage == 1 else 0.0,
         erasure_rate_max=0.08 if args.stage == 1 else 0.0,
@@ -669,16 +700,22 @@ def main():
 
     print(f"=== Native AETV Full 1-Epoch Training: Mode {mode_spec.name} ({mode_spec.description}) ===", flush=True)
     print(f"Video Spec: {mode_spec.width}x{mode_spec.height} @ {mode_spec.fps} fps, Budget: {mode_spec.latents_per_gop} latents/GOP", flush=True)
-    print(f"Plan: 250,000 steps (1,000,000 clips), Eval every {args.eval_interval} steps, TB every {args.tb_interval} steps", flush=True)
+    print(
+        f"Plan: {args.steps:,} steps ({args.steps * args.batch:,} sampled clips), "
+        f"Eval every {args.eval_interval} steps, TB every {args.tb_interval} steps",
+        flush=True,
+    )
     print(f"Model Width: {args.model_width}, Latent Channels: {args.latent_channels} | Device: {device} | AMP: {args.amp}", flush=True)
     print(
         f"Loss Config: mse={args.mse_weight} l1={args.l1_weight} dwt={args.dwt_weight}"
         f"(L{args.dwt_levels}) grad={args.grad_weight} temporal={args.temporal_weight} "
-        f"perceptual={args.lpips_weight} consistency={args.consistency_weight} "
+        f"temporal_accel={args.temporal_accel_weight} perceptual={args.lpips_weight} "
+        f"temporal_perceptual={args.temporal_lpips_weight} "
+        f"consistency={args.consistency_weight} clean_anchor={args.clean_anchor_weight} "
         f"adv={args.adv_weight} fm={args.fm_weight} lecam={args.lecam_weight}\n"
-        "Attachment: every fidelity/perceptual/adversarial term scores the "
-        "transmitted (noisy-latent) render; the clean render is the "
-        "consistency target only\n"
+        "Attachment: transmitted-render losses score the noisy latent; the "
+        "clean render is a detached consistency target and, when enabled, a "
+        "jointly optimized fidelity anchor\n"
         f"Adversarial confidence scaling: conf^{args.adv_confidence_power} from "
         "measured latent SNR (1.0 clean, 0.5 at 0 dB)",
         flush=True,
@@ -689,6 +726,7 @@ def main():
         f"Channel: stage {args.stage} "
         f"({'AETVLatentChannel, 0/1 weights' if args.stage == 1 else 'AETVWaveformChannel, continuous pilot-EQ weights'}) "
         f"snr={channel_cfg.snr_db_range[0]}..{channel_cfg.snr_db_range[1]} dB "
+        f"focus={channel_cfg.snr_focus_range} p_focus={channel_cfg.p_snr_focus} "
         f"p_fading={channel_cfg.p_fading} p_truncate={channel_cfg.p_truncate} "
         f"erasure_max={channel_cfg.erasure_rate_max}",
         flush=True,
@@ -723,7 +761,7 @@ def main():
 
     # Initialize Shallow VGG Perceptual Loss (relu1_2, relu2_2, relu3_3)
     lpips_fn = None
-    if args.lpips_weight > 0.0:
+    if args.lpips_weight > 0.0 or args.temporal_lpips_weight > 0.0:
         print(
             "Initializing multi-layer VGG16 perceptual loss "
             "(relu1_2, relu2_2, relu3_3, relu4_3, relu5_3; channel-normalized)...",
@@ -902,11 +940,15 @@ def main():
             out_shape = (video.shape[2], video.shape[3], video.shape[4])
             recon = model.decoder(noisy_z, weights, output_shape=out_shape)
 
-            # Clean-latent render, used only as the consistency target, so no
-            # gradient: the term is a one-way pull of the noisy render toward
-            # the clean one and must not drag the clean one down to meet it.
+            # Clean-latent render is either a detached consistency target or,
+            # when requested, a jointly optimized fidelity anchor that prevents
+            # channel adaptation from buying robustness by softening the codec.
             recon_clean = None
-            if channel_mix > 0.0 and args.consistency_weight > 0.0:
+            if channel_mix > 0.0 and args.clean_anchor_weight > 0.0:
+                recon_clean = model.decoder(
+                    clean_z, torch.ones_like(clean_z), output_shape=out_shape
+                )
+            elif channel_mix > 0.0 and args.consistency_weight > 0.0:
                 with torch.no_grad():
                     recon_clean = model.decoder(
                         clean_z.detach(), torch.ones_like(clean_z), output_shape=out_shape
@@ -998,6 +1040,7 @@ def main():
             loss_l1 = (recon - video).abs().mean()
             loss_grad = spatial_gradient_loss(recon, video)
             loss_temporal = temporal_delta_loss(recon, video)
+            loss_temporal_accel = temporal_acceleration_loss(recon, video)
 
             loss_dwt = torch.tensor(0.0, device=device)
             if args.dwt_weight > 0.0:
@@ -1012,6 +1055,12 @@ def main():
             if lpips_fn is not None:
                 loss_lpips = lpips_fn(recon, video)
 
+            loss_temporal_lpips = torch.tensor(0.0, device=device)
+            if lpips_fn is not None and args.temporal_lpips_weight > 0.0:
+                recon_delta = (0.5 * (recon[:, :, 1:] - recon[:, :, :-1]) + 0.5).clamp(0, 1)
+                video_delta = (0.5 * (video[:, :, 1:] - video[:, :, :-1]) + 0.5).clamp(0, 1)
+                loss_temporal_lpips = lpips_fn(recon_delta, video_delta)
+
             # Decoder insensitivity to channel corruption: the noisy-latent
             # reconstruction should land where the clean-latent one did. The
             # target is detached so the term is satisfied by pulling the noisy
@@ -1019,6 +1068,17 @@ def main():
             loss_consistency = torch.tensor(0.0, device=device)
             if recon_clean is not None:
                 loss_consistency = F.l1_loss(recon, recon_clean.detach())
+
+            loss_clean_anchor = torch.tensor(0.0, device=device)
+            if recon_clean is not None and args.clean_anchor_weight > 0.0:
+                loss_clean_anchor = (
+                    args.mse_weight * F.mse_loss(recon_clean, video)
+                    + args.l1_weight * F.l1_loss(recon_clean, video)
+                    + args.grad_weight * spatial_gradient_loss(recon_clean, video)
+                    + args.temporal_weight * temporal_delta_loss(recon_clean, video)
+                    + args.temporal_accel_weight
+                    * temporal_acceleration_loss(recon_clean, video)
+                )
 
             loss_adv = torch.tensor(0.0, device=device)
             loss_fm = torch.tensor(0.0, device=device)
@@ -1045,8 +1105,11 @@ def main():
                 + args.dwt_weight * loss_dwt
                 + args.grad_weight * loss_grad
                 + args.temporal_weight * loss_temporal
+                + args.temporal_accel_weight * loss_temporal_accel
                 + args.lpips_weight * loss_lpips
+                + args.temporal_lpips_weight * loss_temporal_lpips
                 + args.consistency_weight * loss_consistency
+                + args.clean_anchor_weight * loss_clean_anchor
                 # Only the realism prior is confidence-scaled. Feature matching
                 # is |phi_D(recon) - phi_D(target)|, a reference term against
                 # the real frames, so it cannot be satisfied by invention and
@@ -1073,8 +1136,11 @@ def main():
                     ("dwt", loss_dwt),
                     ("grad", loss_grad),
                     ("temporal", loss_temporal),
+                    ("temporal_accel", loss_temporal_accel),
                     ("perceptual", loss_lpips),
+                    ("temporal_perceptual", loss_temporal_lpips),
                     ("consistency", loss_consistency),
+                    ("clean_anchor", loss_clean_anchor),
                     ("adv", loss_adv),
                     ("fm", loss_fm),
                     ("adv_conf", adv_conf),
@@ -1104,7 +1170,28 @@ def main():
             # stay bound until the next iteration rebinds them -- so the next
             # forward pass would hold two graphs and roughly double peak VRAM.
             # Measured as a 6.9 -> 12.4 GiB spike on the step after a skip.
-            del total_loss, recon, recon_clean, noisy_z, clean_z, weights
+            del (
+                total_loss,
+                recon,
+                recon_clean,
+                noisy_z,
+                clean_z,
+                weights,
+                loss_mse,
+                loss_l1,
+                loss_dwt,
+                loss_grad,
+                loss_temporal,
+                loss_temporal_accel,
+                loss_lpips,
+                loss_temporal_lpips,
+                loss_consistency,
+                loss_clean_anchor,
+                loss_adv,
+                loss_fm,
+                adv_conf,
+            )
+            torch.cuda.empty_cache()
             continue
 
         (total_loss / args.accum).backward()
@@ -1138,10 +1225,13 @@ def main():
             writer.add_scalar("train/loss_gradient", loss_grad.item(), step)
             writer.add_scalar("train/loss_dwt", loss_dwt.item(), step)
             writer.add_scalar("train/loss_temporal", loss_temporal.item(), step)
+            writer.add_scalar("train/loss_temporal_accel", loss_temporal_accel.item(), step)
             writer.add_scalar("train/loss_perceptual", loss_lpips.item(), step)
+            writer.add_scalar("train/loss_temporal_perceptual", loss_temporal_lpips.item(), step)
             writer.add_scalar("train/adv_confidence", adv_conf.item(), step)
             writer.add_scalar("train/latent_snr_db", 10.0 * math.log10(max(1e-8, latent_snr.item())), step)
             writer.add_scalar("train/loss_consistency", loss_consistency.item(), step)
+            writer.add_scalar("train/loss_clean_anchor", loss_clean_anchor.item(), step)
             writer.add_scalar("train/loss_adv", loss_adv.item(), step)
             writer.add_scalar("train/loss_feature_matching", loss_fm.item(), step)
             # Only on steps the discriminator actually trained: on the other

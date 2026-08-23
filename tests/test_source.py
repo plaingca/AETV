@@ -6,8 +6,20 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from aetv.source import CameraFrameBuffer
+
+
+class _StuckThread:
+    def __init__(self):
+        self.joins = []
+
+    def is_alive(self):
+        return True
+
+    def join(self, timeout=None):
+        self.joins.append(timeout)
 
 
 def test_camera_buffer_opens_once_for_preview_and_transmit(monkeypatch):
@@ -53,3 +65,16 @@ def test_camera_preview_skips_to_latest_buffered_frame(monkeypatch):
     assert newest >= first + 4
     preview.close()
     buffer.close()
+
+
+def test_camera_buffer_never_overlaps_a_stuck_native_worker():
+    buffer = CameraFrameBuffer()
+    worker = _StuckThread()
+    buffer._thread = worker
+    buffer._key = (0, "old")
+
+    with pytest.raises(RuntimeError, match="refusing to open a second camera backend"):
+        buffer.configure(SimpleNamespace(name="new"), camera=1)
+
+    assert buffer._thread is worker
+    assert worker.joins == [3.0]

@@ -1,6 +1,7 @@
 import struct
 
 import numpy as np
+import pytest
 
 from aetv.flex import (
     FlexVitaSession,
@@ -100,6 +101,114 @@ def test_flex_session_uses_documented_filter_command(monkeypatch):
     assert "client set enforce_network_mtu=1 network_mtu=1200" in commands
     assert not any("filter_lo=" in command for command in commands)
     assert not any(command.startswith("client program") for command in commands)
+
+
+def test_requested_frequency_stays_bound_to_gui_tx_slice(monkeypatch):
+    commands = []
+
+    class FakeControl:
+        def __init__(self, host, port):
+            self.host = host
+            self.frequency = 14.1
+
+        def command(self, body):
+            commands.append(body)
+            if body == "sub client all":
+                return [
+                    "S1|client 0x123 connected local_ptt=1 "
+                    "client_id=abc-def program=SmartSDR-Win"
+                ]
+            if body.startswith("client bind"):
+                return ["R1|0||"]
+            if body == "sub slice all":
+                return ["S1|slice 0 in_use=1 tx=1 mode=DIGU"]
+            if body.startswith("slice tune"):
+                self.frequency = float(body.split()[-1])
+            if body == "sub tx all":
+                return [f"S1|transmit freq={self.frequency:.6f}"]
+            return ["R1|0||"]
+
+        def _receive(self, seconds):
+            return []
+
+        def close(self):
+            pass
+
+    class FakeUdp:
+        def setsockopt(self, *args):
+            pass
+
+        def bind(self, address):
+            pass
+
+        def settimeout(self, value):
+            pass
+
+        def getsockname(self):
+            return ("0.0.0.0", 55000)
+
+        def sendto(self, data, address):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("aetv.flex.FlexClient", FakeControl)
+    monkeypatch.setattr("aetv.flex.socket.socket", lambda *args: FakeUdp())
+    session = FlexVitaSession("192.0.2.1", frequency_mhz=7.088)
+    session.close()
+    bind_index = commands.index("client bind client_id=abc-def")
+    tune_index = commands.index("slice tune 0 7.088000")
+    assert bind_index < tune_index
+    assert "sub tx all" in commands
+
+
+def test_requested_frequency_blocks_tx_when_flex_tx_chain_does_not_follow(monkeypatch):
+    class FakeControl:
+        def __init__(self, host, port):
+            self.host = host
+
+        def command(self, body):
+            if body == "sub client all":
+                return [
+                    "S1|client 0x123 connected local_ptt=1 "
+                    "client_id=abc-def program=SmartSDR-Win"
+                ]
+            if body == "sub slice all":
+                return ["S1|slice 0 in_use=1 tx=1 mode=DIGU"]
+            if body == "sub tx all":
+                return ["S1|transmit freq=14.100000"]
+            return ["R1|0||"]
+
+        def _receive(self, seconds):
+            return []
+
+        def close(self):
+            pass
+
+    class FakeUdp:
+        def setsockopt(self, *args):
+            pass
+
+        def bind(self, address):
+            pass
+
+        def settimeout(self, value):
+            pass
+
+        def getsockname(self):
+            return ("0.0.0.0", 55000)
+
+        def sendto(self, data, address):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("aetv.flex.FlexClient", FakeControl)
+    monkeypatch.setattr("aetv.flex.socket.socket", lambda *args: FakeUdp())
+    with pytest.raises(RuntimeError, match="TX chain stayed on 14.100000 MHz"):
+        FlexVitaSession("192.0.2.1", frequency_mhz=7.088)
 
 
 def test_flex_tx_packet_uses_flexlib_reduced_bandwidth_wire_format():

@@ -61,6 +61,12 @@ class StationSettings:
     kiwi_lat: float = 49.26
     kiwi_lon: float = -123.11
     kiwi_max_km: float = 2500.0
+    kiwi_auto_select: bool = True
+    prop_candidate_frequencies_mhz: str = "3.588, 7.088, 14.088, 18.098, 21.088, 24.928, 28.088"
+    ft8_probe_frequencies_mhz: str = "3.573, 7.074, 10.136, 14.074, 18.100, 21.074, 24.915, 28.074"
+    prop_antenna_pattern: str = "unknown"  # unknown | dipole | directional
+    prop_antenna_azimuth_deg: float = 0.0  # broadside for dipole, boresight otherwise
+    prop_antenna_gain_dbi: float = 0.0
 
     cat_backend: str = "none"  # none | hamlib | flex | rts | dtr
     hamlib_model: int = 0
@@ -110,6 +116,8 @@ class StationSettings:
                 self.kiwi_host = normalize_kiwi_host(self.kiwi_host)
             except ValueError as error:
                 problems.append(str(error))
+        if self.prop_antenna_pattern not in {"unknown", "dipole", "directional"}:
+            problems.append(f"unknown propagation antenna pattern {self.prop_antenna_pattern!r}")
         if self.cat_backend == "flex" and not self.flex_host:
             problems.append("Flex host is empty")
         if self.cat_backend == "hamlib" and self.hamlib_model <= 0:

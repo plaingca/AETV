@@ -25,7 +25,7 @@ digital codec plus modem does.
 ## Install
 
 You need Python 3.10+, [uv](https://docs.astral.sh/uv/), FFmpeg on `PATH`,
-and the severe-channel Flex-8k weights in `models/v7-flex8k-severe.pt`
+and the OTA receiver-adapted Flex-8k weights in `models/v8-flex8k-ota-rxfix.pt`
 (see `models/README.md`).
 
 ```powershell
@@ -52,9 +52,9 @@ uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available
 Set **Torch device** to `cuda` in AETV Settings. The status bar includes the
 GPU name when the checkpoint is actually running there.
 
-Place `v7-flex8k-severe.pt` in `models/`. The balanced fine-tune can be kept
-beside it as `v7-flex8k-severe-balanced.pt`, and the original published model
-as `v7-flex8k.pt` (see [`models/README.md`](models/README.md)), then:
+Place `v8-flex8k-ota-rxfix.pt` in `models/`. The earlier OTA and severe-channel alternatives
+can be kept beside it, and the original published model as `v7-flex8k.pt` (see
+[`models/README.md`](models/README.md)), then:
 
 ```powershell
 uv run aetv gui
@@ -92,9 +92,20 @@ available for other station layouts.
 
 `aetv devices` lists soundcards. `aetv kiwi-list` reads the canonical
 [KiwiSDR directory](http://rx.linkfanel.net/) and lists nearby receivers.
+Selecting **Public KiwiSDR** in the GUI automatically ranks and selects the
+best currently usable path, with the recommendation and confidence visible in
+the Receive pane. **Path planner…** shows predicted and station-calibrated AETV
+SNR over the next twelve hours. It uses
+the official ITU-R P.533/P.372 runtime when installed and automatically saves
+calibration residuals from matching-callsign OTA decodes. See
+[`docs/propagation-planner.md`](docs/propagation-planner.md).
+For rapid station calibration, **Receive → FT8 propagation calibration…** can
+send an individually confirmed CQ on each selected band and import its
+time/frequency-matched PSK Reporter SNR reports after five minutes.
 Radio setup details are in
 [`docs/ham-guide.md`](docs/ham-guide.md). Frequency and mode are checked,
-never set — tune the radio first.
+never set for normal AETV transmission—tune the radio first. The separately
+confirmed FT8 calibration action tunes its displayed Flex dial and DIGU mode.
 
 The transmit pane's **Route** buttons also provide deterministic local modem
 loopbacks. **Clean**, **12/6/0 dB**, and **MPP 12/6/0** bypass PTT and the audio
@@ -110,7 +121,7 @@ on-air/audio-output route. SNR is signal power relative to white noise in a
 ```powershell
 uv sync --extra train
 uv run aetv train -- --mode V7 --stage 2 --out runs/v7 --steps 10000 --amp
-uv run aetv eval -- --checkpoint models/v7-flex8k-severe.pt --out runs/eval --clips 8
+uv run aetv eval -- --checkpoint models/v8-flex8k-ota-rxfix.pt --out runs/eval --clips 8
 ```
 
 The trainer streams OpenVid-1M. Use `--init-checkpoint` to continue a
@@ -175,7 +186,7 @@ starting a worktree task. Codex creates a worktree-local `.venv` from the
 locked dependencies and exposes **Test**, **Build**, and **Run GUI** actions.
 
 The ignored model checkpoints are not duplicated into every worktree. Tests
-that require the default `models/v7-flex8k-severe.pt` skip there; use a local
+that require the default `models/v8-flex8k-ota-rxfix.pt` skip there; use a local
 task when validating it or copy the checkpoint into that specific worktree.
 
 ## License

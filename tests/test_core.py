@@ -46,6 +46,8 @@ from aetv.modem import (
     modulate_gop_chunks,
 )
 from aetv.modem import (
+    _equalize_payload_symbol,
+    _estimate_snr_db,
     _header_candidates,
     _header_carriers,
     _pilot_coherence,
@@ -307,6 +309,29 @@ def test_pilot_structure_rejects_unstructured_noise():
     assert _pilot_coherence(smooth) > 0.99
 
 
+def test_pilot_snr_estimator_subtracts_noise_from_total_power():
+    rng = np.random.default_rng(20260823)
+    # U-band physical reference SNR is per-carrier SNR times 8000/2500.
+    target_db = 0.0
+    carrier_snr = 10 ** (target_db / 10.0) / (8000.0 / 2500.0)
+    noise_power = 1.0 / carrier_snr
+    noise = np.sqrt(noise_power / 2.0) * (
+        rng.standard_normal((256, 160))
+        + 1j * rng.standard_normal((256, 160))
+    )
+    estimate = _estimate_snr_db(1.0 + noise, band="U")
+    assert estimate == pytest.approx(target_db, abs=0.7)
+
+
+def test_payload_confidence_tracks_pilot_noise_power():
+    received = np.ones(16, dtype=np.complex128)
+    channel = np.ones(16, dtype=np.complex128)
+    _, clean_weights = _equalize_payload_symbol(received, channel, 0.01)
+    _, noisy_weights = _equalize_payload_symbol(received, channel, 10.0)
+    assert np.mean(clean_weights) > 0.98
+    assert np.mean(noisy_weights) < 0.10
+
+
 def test_continuous_v7_receiver_can_join_after_initial_header():
     mode = AETV_MODES["V7"]
     rng = np.random.default_rng(20260826)
@@ -448,6 +473,22 @@ def test_aetv_latent_channel_stage1():
     loss = (noisy_z * weights).sum()
     loss.backward()
     assert z.grad is not None and torch.isfinite(z.grad).all()
+
+
+def test_aetv_channel_ota_focus_mixture_can_override_broad_range():
+    generator = torch.Generator().manual_seed(7)
+    channel = AETVLatentChannel(
+        AETVChannelConfig(
+            snr_db_range=(-20.0, -20.0),
+            snr_focus_range=(20.0, 20.0),
+            p_snr_focus=1.0,
+        )
+    )
+    z = torch.zeros(8, 4096)
+    noisy, _ = channel(z, generator=generator)
+    # 20 dB amplitude SNR produces sigma=0.1 and variance ~=0.01. Sampling
+    # the broad -20 dB range instead would produce variance ~=100.
+    assert noisy.square().mean().item() == pytest.approx(0.01, rel=0.08)
 
 
 def test_aetv_waveform_channel_stage2():

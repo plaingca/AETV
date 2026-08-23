@@ -1,0 +1,10 @@
+{
+  "path": "models\\v8-flex8k-ota-rxfix.pt",
+  "mode": "V7",
+  "step": 250,
+  "source_run": "v8-ota-perceptual-c3-rxfix",
+  "bytes": 215759999,
+  "sha256": "294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f",
+  "model_width": 128,
+  "latent_channels": 3
+}

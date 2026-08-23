@@ -60,6 +60,8 @@ class MainWindow(QMainWindow):
         self._tx_finished_while_stopping_rx = False
         self._resume_rx = False
         self._emulation_active = False
+        self._path_planner = None
+        self._ft8_calibration = None
         self._build()
         self._load_codec()
 
@@ -110,8 +112,10 @@ class MainWindow(QMainWindow):
         self.rx.statusChanged.connect(self.rx_status.setText)
         self.rx.stopFinished.connect(self._on_rx_stopped_for_tx)
         self.rx.logMessage.connect(self._log)
+        self.rx.pathPlannerRequested.connect(self.open_path_planner)
         self.tx.logMessage.connect(self._log)
         self.tx.pttChanged.connect(self.ptt_lamp.set_keyed)
+        self.tx.pttChanged.connect(self.rx.on_local_ptt_changed)
         self.tx.transmitStarted.connect(self._on_tx_started)
         self.tx.transmitFinished.connect(self._on_tx_finished)
         self.tx.loopbackVideo.connect(self.rx.show_emulated)
@@ -150,6 +154,13 @@ class MainWindow(QMainWindow):
         stop.triggered.connect(self.rx.stop)
         receive_menu.addAction(start)
         receive_menu.addAction(stop)
+        receive_menu.addSeparator()
+        planner = QAction("Kiwi path planner…", self)
+        planner.triggered.connect(self.open_path_planner)
+        receive_menu.addAction(planner)
+        ft8_calibration = QAction("FT8 propagation calibration…", self)
+        ft8_calibration.triggered.connect(self.open_ft8_calibration)
+        receive_menu.addAction(ft8_calibration)
 
         transmit_menu = self.menuBar().addMenu("&Transmit")
         send = QAction("&Send", self)
@@ -188,8 +199,8 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self,
             "AETV checkpoint",
-            message + "\n\nCopy the severe-channel Flex-8k weights to "
-            "models/v7-flex8k-severe.pt.",
+            message + "\n\nCopy the OTA receiver-adapted Flex-8k weights to "
+            "models/v8-flex8k-ota-rxfix.pt.",
         )
 
     def open_settings(self) -> None:
@@ -206,6 +217,39 @@ class MainWindow(QMainWindow):
         self._log("settings saved")
         if self.station.codec is None or self.station.codec.mode.name != self.settings.mode:
             self._load_codec()
+
+    def open_path_planner(self) -> None:
+        from aetv.gui.path_planner import PathPlannerDialog
+
+        if self._path_planner is None:
+            self._path_planner = PathPlannerDialog(self.station, self.rx, self)
+            self._path_planner.finished.connect(
+                lambda _result: setattr(self, "_path_planner", None)
+            )
+        self._path_planner.show()
+        self._path_planner.raise_()
+        self._path_planner.activateWindow()
+
+    def open_ft8_calibration(self) -> None:
+        from aetv.gui.ft8_calibration import Ft8CalibrationDialog
+
+        if self._ft8_calibration is None:
+            self._ft8_calibration = Ft8CalibrationDialog(self.station, self)
+            self._ft8_calibration.calibrationImported.connect(
+                self._on_ft8_calibration_imported
+            )
+            self._ft8_calibration.finished.connect(
+                lambda _result: setattr(self, "_ft8_calibration", None)
+            )
+        self._ft8_calibration.show()
+        self._ft8_calibration.raise_()
+        self._ft8_calibration.activateWindow()
+
+    def _on_ft8_calibration_imported(self, count: int) -> None:
+        self._log(f"FT8 propagation calibration updated with {count} observations")
+        self.rx.refresh_propagation_calibration()
+        if self._path_planner is not None:
+            self._path_planner.refresh()
 
     def _refresh_station_label(self) -> None:
         backend = self.settings.cat_backend if not self.settings.audio_only else "audio-only"
@@ -285,6 +329,14 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._ft8_calibration is not None and self._ft8_calibration.busy():
+            QMessageBox.warning(
+                self,
+                "AETV",
+                "An FT8 calibration operation is active. Wait for it to finish before quitting.",
+            )
+            event.ignore()
+            return
         if self.tx.transmitting():
             answer = QMessageBox.question(
                 self,

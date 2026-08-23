@@ -1,0 +1,10 @@
+{
+  "path": "models\\v8-flex8k-ota-perceptual.pt",
+  "mode": "V7",
+  "step": 250,
+  "source_run": "v8-ota-perceptual-c2",
+  "bytes": 215761913,
+  "sha256": "425f112924693170c61cebb6ab5865bd526714a4afae9aec88a37709441b5d47",
+  "model_width": 128,
+  "latent_channels": 3
+}

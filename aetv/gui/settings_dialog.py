@@ -194,6 +194,12 @@ class SettingsDialog(QDialog):
         settings.kiwi_lat = float(self.kiwi_lat.value())
         settings.kiwi_lon = float(self.kiwi_lon.value())
         settings.kiwi_max_km = float(self.kiwi_max_km.value())
+        settings.kiwi_auto_select = self.kiwi_auto_select.isChecked()
+        settings.prop_candidate_frequencies_mhz = self.prop_candidate_frequencies.text().strip()
+        settings.ft8_probe_frequencies_mhz = self.ft8_probe_frequencies.text().strip()
+        settings.prop_antenna_pattern = self.prop_antenna_pattern.currentData()
+        settings.prop_antenna_azimuth_deg = float(self.prop_antenna_azimuth.value())
+        settings.prop_antenna_gain_dbi = float(self.prop_antenna_gain.value())
         settings.receive_dir = self.receive_dir.text().strip()
         settings.autosave = self.autosave.isChecked()
         settings.debug_capture = self.debug_capture.isChecked()
@@ -210,7 +216,7 @@ class SettingsDialog(QDialog):
             self.mode.addItem(f"{name} — {spec.description}", name)
         self.mode.setCurrentIndex(max(0, self.mode.findData(self._settings.mode)))
         self.checkpoint = QLineEdit(self._settings.checkpoint)
-        self.checkpoint.setPlaceholderText("models/v7-flex8k-severe.pt")
+        self.checkpoint.setPlaceholderText("models/v8-flex8k-ota-rxfix.pt")
         browse = QPushButton("File…")
         browse.clicked.connect(self._browse_checkpoint)
         ck = QWidget()
@@ -412,6 +418,40 @@ class SettingsDialog(QDialog):
         self.kiwi_max_km.setRange(50.0, 20000.0)
         self.kiwi_max_km.setValue(self._settings.kiwi_max_km)
         self.kiwi_max_km.setSuffix(" km")
+        self.kiwi_auto_select = QCheckBox(
+            "Automatically rank and use the best available Kiwi path"
+        )
+        self.kiwi_auto_select.setChecked(self._settings.kiwi_auto_select)
+        self.prop_candidate_frequencies = QLineEdit(
+            self._settings.prop_candidate_frequencies_mhz
+        )
+        self.prop_candidate_frequencies.setPlaceholderText(
+            "3.588, 7.088, 14.088, 21.088, 28.088"
+        )
+        self.ft8_probe_frequencies = QLineEdit(
+            self._settings.ft8_probe_frequencies_mhz
+        )
+        self.ft8_probe_frequencies.setPlaceholderText(
+            "3.573, 7.074, 14.074, 21.074, 28.074"
+        )
+        self.prop_antenna_pattern = QComboBox()
+        self.prop_antenna_pattern.addItem("Unknown / learn from probes", "unknown")
+        self.prop_antenna_pattern.addItem("Horizontal dipole", "dipole")
+        self.prop_antenna_pattern.addItem("Directional beam", "directional")
+        pattern_index = self.prop_antenna_pattern.findData(
+            self._settings.prop_antenna_pattern
+        )
+        self.prop_antenna_pattern.setCurrentIndex(max(0, pattern_index))
+        self.prop_antenna_azimuth = QDoubleSpinBox()
+        self.prop_antenna_azimuth.setRange(0.0, 359.9)
+        self.prop_antenna_azimuth.setDecimals(1)
+        self.prop_antenna_azimuth.setSuffix("°")
+        self.prop_antenna_azimuth.setValue(self._settings.prop_antenna_azimuth_deg)
+        self.prop_antenna_gain = QDoubleSpinBox()
+        self.prop_antenna_gain.setRange(-20.0, 30.0)
+        self.prop_antenna_gain.setDecimals(1)
+        self.prop_antenna_gain.setSuffix(" dBi")
+        self.prop_antenna_gain.setValue(self._settings.prop_antenna_gain_dbi)
         form.addRow("Host", self.kiwi_host)
         form.addRow("Ident / user", self.kiwi_user)
         form.addRow("Password", self.kiwi_password)
@@ -419,11 +459,19 @@ class SettingsDialog(QDialog):
         form.addRow("Your latitude", self.kiwi_lat)
         form.addRow("Your longitude", self.kiwi_lon)
         form.addRow("Search radius", self.kiwi_max_km)
+        form.addRow("RF planning dials", self.prop_candidate_frequencies)
+        form.addRow("FT8 probe dials", self.ft8_probe_frequencies)
+        form.addRow(self.kiwi_auto_select)
+        form.addRow("TX antenna pattern", self.prop_antenna_pattern)
+        form.addRow("Broadside / boresight", self.prop_antenna_azimuth)
+        form.addRow("Peak antenna gain", self.prop_antenna_gain)
         note = QLabel(
             "The receive pane can refresh the public Kiwi list and pick a "
             "receiver that still has an API channel. Enter the same suppressed-"
             "carrier dial frequency used by the transmitter; AETV automatically "
-            "centres Kiwi IQ 5 kHz higher so the full waveform fits."
+            "centres Kiwi IQ 5 kHz higher so the full waveform fits. The planning "
+            "dials are propagation candidates only: edit them for your licence, "
+            "regional band plan, occupied bandwidth, and clear-channel checks."
         )
         note.setWordWrap(True)
         form.addRow(note)
