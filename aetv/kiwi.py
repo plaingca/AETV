@@ -423,6 +423,10 @@ class KiwiStatus:
     message: str = ""
 
 
+class KiwiExternalApiDisabled(RuntimeError):
+    """The receiver permits browser listening but no external IQ clients."""
+
+
 class KiwiCapture:
     """Background IQ capture into a passband ring buffer.
 
@@ -488,7 +492,9 @@ class KiwiCapture:
             except Exception as error:
                 self.status.connected = False
                 self.status.message = str(error)
-                self._retry_delay = 1.0
+                self._retry_delay = (
+                    30.0 if isinstance(error, KiwiExternalApiDisabled) else 1.0
+                )
                 self._on_error(f"Kiwi {self.host}: {error}")
                 self._on_status(self.status)
             finally:
@@ -502,6 +508,18 @@ class KiwiCapture:
             import websockets
         except ImportError as error:
             raise RuntimeError("websockets is required for KiwiSDR receive") from error
+
+        # Browser availability and external API availability are separate on a
+        # KiwiSDR. A receiver may show free browser channels while refusing the
+        # raw IQ socket used by AETV. Detect that explicitly instead of leaving
+        # the GUI in an endless, silent reconnect loop. A supplied password is
+        # allowed through because an operator may grant authenticated access.
+        receiver = await asyncio.to_thread(probe_receiver, self.host, 5.0)
+        if receiver is not None and receiver.ext_api <= 0 and not self.password:
+            raise KiwiExternalApiDisabled(
+                "external API is disabled (browser slots do not permit AETV IQ); "
+                "choose an API-enabled Kiwi or enter an operator password"
+            )
 
         # Current Kiwi builds use /<token>/SND. Some receivers used in AETV's
         # original OTA trials only accepted /ws/kiwi/<timestamp>/SND, so fall

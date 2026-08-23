@@ -423,6 +423,7 @@ class ReceivePanel(QWidget):
         self.input_device = QComboBox()
         self.kiwi_host = QLineEdit()
         self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
+        self.kiwi_host.textEdited.connect(self._on_manual_kiwi_host_edited)
         self.kiwi_host.editingFinished.connect(self._normalize_kiwi_entry)
         self.kiwi_list = QComboBox()
         self.kiwi_list.setMinimumWidth(180)
@@ -541,6 +542,8 @@ class ReceivePanel(QWidget):
         settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
         self.kiwi_host.setText(settings.kiwi_host)
         settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
+        if settings.rx_source == "kiwi":
+            settings.freq_mhz = settings.kiwi_dial_mhz
         settings.kiwi_auto_select = self.auto_kiwi.isChecked()
 
     def _on_auto_kiwi_toggled(self, enabled: bool) -> None:
@@ -549,6 +552,11 @@ class ReceivePanel(QWidget):
             self._refresh_kiwis(force_auto=True)
 
     def _on_kiwi_dial_changed(self) -> None:
+        frequency = float(self.kiwi_dial.value())
+        self.station.settings.kiwi_dial_mhz = frequency
+        # This field is explicitly the AETV TX dial. Keep CAT/Flex and the
+        # remote IQ receiver together when the operator edits it manually.
+        self.station.settings.freq_mhz = frequency
         self._recommended_receiver = None
         if self.auto_kiwi.isChecked() and self.source.currentData() == "kiwi":
             self._refresh_kiwis(force_auto=True)
@@ -757,10 +765,25 @@ class ReceivePanel(QWidget):
     def _apply_kiwi_choice(self, index: int) -> None:
         host = self.kiwi_list.itemData(index)
         if host:
+            # Activating a specific list entry is an explicit operator choice.
+            # Pin it until automatic path selection is deliberately re-enabled.
+            self.auto_kiwi.setChecked(False)
+            self._kiwi_force_auto = False
             self.kiwi_host.setText(str(host))
             self.station.settings.kiwi_host = str(host)
             self._probe_receiver = next(
                 (item for item in self._receivers if item.host == str(host)), None
+            )
+
+    def _on_manual_kiwi_host_edited(self, _text: str) -> None:
+        """Treat typed receiver addresses as pinned operator selections."""
+        self.auto_kiwi.setChecked(False)
+        self._kiwi_force_auto = False
+        self._recommended_receiver = None
+        self.station.settings.kiwi_auto_select = False
+        if not self.listening():
+            self.status.setText(
+                "manual Kiwi pinned; automatic path selection is off"
             )
 
     def set_probe_receiver(self, receiver: KiwiReceiver) -> None:

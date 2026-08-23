@@ -1,6 +1,8 @@
 import asyncio
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from aetv.kiwi import (
     IQ_GPS_HEADER,
@@ -11,6 +13,8 @@ from aetv.kiwi import (
     probe_receiver,
 )
 from aetv.kiwi import KiwiCapture
+from aetv.kiwi import KiwiReceiver
+from aetv.gui.rx_panel import ReceivePanel
 
 
 def test_receiverbook_directory_is_parsed_without_global_probing():
@@ -125,3 +129,69 @@ def test_kiwi_tune_finishes_with_keepalive_without_deprecated_override():
     asyncio.run(capture._tune(socket, 11998.881265))
     assert not any("OVERRIDE inactivity_timeout" in message for message in socket.sent)
     assert socket.sent[-1] == "SET keepalive"
+
+
+def test_browser_only_kiwi_reports_external_api_error(monkeypatch):
+    receiver = KiwiReceiver(
+        "browser-only.example:8073",
+        ext_api=0,
+        users=1,
+        users_max=4,
+        free=3,
+        offline="no",
+    )
+    monkeypatch.setattr("aetv.kiwi.probe_receiver", lambda *_args: receiver)
+    capture = KiwiCapture(
+        receiver.host, 7.13, 1600, 8000, ring=None
+    )
+    with pytest.raises(RuntimeError, match="external API is disabled"):
+        asyncio.run(capture._session())
+
+
+def test_typing_kiwi_host_pins_manual_selection():
+    class Toggle:
+        checked = True
+
+        def setChecked(self, checked):
+            self.checked = checked
+
+    class Status:
+        text = ""
+
+        def setText(self, text):
+            self.text = text
+
+    toggle = Toggle()
+    status = Status()
+    panel = SimpleNamespace(
+        auto_kiwi=toggle,
+        _kiwi_force_auto=True,
+        _recommended_receiver=object(),
+        station=SimpleNamespace(
+            settings=SimpleNamespace(kiwi_auto_select=True)
+        ),
+        listening=lambda: False,
+        status=status,
+    )
+    ReceivePanel._on_manual_kiwi_host_edited(panel, "108.180.193.61:8073")
+    assert not toggle.checked
+    assert not panel._kiwi_force_auto
+    assert panel._recommended_receiver is None
+    assert not panel.station.settings.kiwi_auto_select
+    assert "manual Kiwi pinned" in status.text
+
+
+def test_manual_kiwi_tx_dial_keeps_flex_frequency_aligned():
+    panel = SimpleNamespace(
+        kiwi_dial=SimpleNamespace(value=lambda: 7.13),
+        station=SimpleNamespace(
+            settings=SimpleNamespace(kiwi_dial_mhz=21.088, freq_mhz=21.088)
+        ),
+        _recommended_receiver=object(),
+        auto_kiwi=SimpleNamespace(isChecked=lambda: False),
+        source=SimpleNamespace(currentData=lambda: "kiwi"),
+    )
+    ReceivePanel._on_kiwi_dial_changed(panel)
+    assert panel.station.settings.kiwi_dial_mhz == 7.13
+    assert panel.station.settings.freq_mhz == 7.13
+    assert panel._recommended_receiver is None
