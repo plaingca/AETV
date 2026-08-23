@@ -80,6 +80,29 @@ def temporal_acceleration_loss(recon: torch.Tensor, target: torch.Tensor) -> tor
     return F.l1_loss(recon_accel, target_accel)
 
 
+def temporal_energy_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Match visible motion magnitude without rewarding spatial noise."""
+    if recon.shape[2] < 2:
+        return recon.new_zeros(())
+    recon_delta = recon[:, :, 1:] - recon[:, :, :-1]
+    target_delta = target[:, :, 1:] - target[:, :, :-1]
+    return F.l1_loss(
+        recon_delta.abs().mean(dim=(-2, -1)),
+        target_delta.abs().mean(dim=(-2, -1)),
+    )
+
+
+def temporal_cosine_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Reward inter-frame changes in the correct signed direction."""
+    if recon.shape[2] < 2:
+        return recon.new_zeros(())
+    recon_delta = (recon[:, :, 1:] - recon[:, :, :-1]).flatten(1)
+    target_delta = (target[:, :, 1:] - target[:, :, :-1]).flatten(1)
+    return (1.0 - F.cosine_similarity(
+        recon_delta, target_delta, dim=1, eps=1e-6
+    )).mean()
+
+
 _SQRT_HALF = 0.7071067811865476
 
 
@@ -572,7 +595,7 @@ def run_evaluation(
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=list(AETV_MODES.keys()), default="V7", help="AETV mode (V0-V7)")
+    ap.add_argument("--mode", choices=list(AETV_MODES.keys()), default="V7", help="AETV mode (V0-V8)")
     ap.add_argument("--stage", type=int, choices=(1, 2), default=1, help="1=Latent AWGN/truncation, 2=OFDM Waveform channel")
     ap.add_argument("--out", type=str, default="runs/aetv-v1-epoch1", help="Output directory for checkpoints & TB logs")
     ap.add_argument("--hf-dataset", type=str, default="lance-format/Openvid-1M", help="Hugging Face dataset")
@@ -604,6 +627,8 @@ def main():
     ap.add_argument("--grad-weight", type=float, default=0.5, help="Spatial edge-map L1 weight")
     ap.add_argument("--temporal-weight", type=float, default=0.7, help="Inter-frame delta L1 weight")
     ap.add_argument("--temporal-accel-weight", type=float, default=0.0, help="Second-order temporal L1 weight for flicker/judder suppression")
+    ap.add_argument("--temporal-energy-weight", type=float, default=0.0, help="Per-frame motion-energy matching weight")
+    ap.add_argument("--temporal-cosine-weight", type=float, default=0.0, help="Signed temporal-delta cosine fidelity weight")
     ap.add_argument("--lpips-weight", type=float, default=0.06, help="Multi-layer VGG perceptual weight on the transmitted render (0.0 to disable)")
     ap.add_argument("--temporal-lpips-weight", type=float, default=0.0, help="VGG perceptual weight on signed inter-frame differences")
     ap.add_argument(
@@ -644,6 +669,7 @@ def main():
     ap.add_argument("--p-truncate", type=float, default=0.30, help="Probability of progressive group truncation")
     ap.add_argument("--model-width", type=int, default=192, help="Base model channels")
     ap.add_argument("--latent-channels", type=int, default=12, help="Latent channels")
+    ap.add_argument("--compact", action="store_true", help="Preserve one latent time slice per video frame")
     ap.add_argument("--snr-min", type=float, default=-2.0, help="Minimum channel SNR (dB)")
     ap.add_argument("--snr-max", type=float, default=10.0, help="Maximum channel SNR (dB)")
     ap.add_argument("--snr-focus-min", type=float, default=None, help="Optional OTA-focused mixture minimum SNR (dB)")
@@ -712,6 +738,8 @@ def main():
         f"temporal_accel={args.temporal_accel_weight} perceptual={args.lpips_weight} "
         f"temporal_perceptual={args.temporal_lpips_weight} "
         f"consistency={args.consistency_weight} clean_anchor={args.clean_anchor_weight} "
+        f"temporal_energy={args.temporal_energy_weight} "
+        f"temporal_cosine={args.temporal_cosine_weight} "
         f"adv={args.adv_weight} fm={args.fm_weight} lecam={args.lecam_weight}\n"
         "Attachment: transmitted-render losses score the noisy latent; the "
         "clean render is a detached consistency target and, when enabled, a "
@@ -737,6 +765,7 @@ def main():
         mode=mode_spec,
         width=args.model_width,
         latent_channels=args.latent_channels,
+        compact=args.compact,
         causal=mode_spec.causal,
     ).to(device)
 
@@ -1041,6 +1070,8 @@ def main():
             loss_grad = spatial_gradient_loss(recon, video)
             loss_temporal = temporal_delta_loss(recon, video)
             loss_temporal_accel = temporal_acceleration_loss(recon, video)
+            loss_temporal_energy = temporal_energy_loss(recon, video)
+            loss_temporal_cosine = temporal_cosine_loss(recon, video)
 
             loss_dwt = torch.tensor(0.0, device=device)
             if args.dwt_weight > 0.0:
@@ -1106,6 +1137,8 @@ def main():
                 + args.grad_weight * loss_grad
                 + args.temporal_weight * loss_temporal
                 + args.temporal_accel_weight * loss_temporal_accel
+                + args.temporal_energy_weight * loss_temporal_energy
+                + args.temporal_cosine_weight * loss_temporal_cosine
                 + args.lpips_weight * loss_lpips
                 + args.temporal_lpips_weight * loss_temporal_lpips
                 + args.consistency_weight * loss_consistency
@@ -1137,6 +1170,8 @@ def main():
                     ("grad", loss_grad),
                     ("temporal", loss_temporal),
                     ("temporal_accel", loss_temporal_accel),
+                    ("temporal_energy", loss_temporal_energy),
+                    ("temporal_cosine", loss_temporal_cosine),
                     ("perceptual", loss_lpips),
                     ("temporal_perceptual", loss_temporal_lpips),
                     ("consistency", loss_consistency),

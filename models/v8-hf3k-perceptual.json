@@ -1,0 +1,10 @@
+{
+  "path": "models\\v8-hf3k-perceptual.pt",
+  "mode": "V8",
+  "step": 2000,
+  "source_run": "v8-hf3k-motion4",
+  "bytes": 215759629,
+  "sha256": "35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707",
+  "model_width": 128,
+  "latent_channels": 3
+}

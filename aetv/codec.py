@@ -13,10 +13,16 @@ from .config import AETV_MODES, AETVModeSpec
 from .models import AETVAutoencoder
 
 DEFAULT_CHECKPOINT = Path("models") / "v8-flex8k-ota-rxfix.pt"
+MODE_DEFAULT_CHECKPOINTS = {
+    "V8": Path("models") / "v8-hf3k-perceptual.pt",
+}
 DEFAULT_MODE = "V7"
 
 
-def resolve_checkpoint(path: str | Path | None = None) -> Path:
+def resolve_checkpoint(
+    path: str | Path | None = None,
+    mode: str | None = None,
+) -> Path:
     """Return the checkpoint path, or raise with install instructions."""
     if path:
         candidates = [Path(path).expanduser()]
@@ -24,10 +30,11 @@ def resolve_checkpoint(path: str | Path | None = None) -> Path:
         candidates = []
         if configured := os.environ.get("AETV_CHECKPOINT"):
             candidates.append(Path(configured).expanduser())
+        preferred = MODE_DEFAULT_CHECKPOINTS.get(mode or DEFAULT_MODE, DEFAULT_CHECKPOINT)
         candidates.extend(
             (
-                DEFAULT_CHECKPOINT,
-                Path(__file__).resolve().parent.parent / DEFAULT_CHECKPOINT,
+                preferred,
+                Path(__file__).resolve().parent.parent / preferred,
             )
         )
     for candidate in candidates:
@@ -36,8 +43,8 @@ def resolve_checkpoint(path: str | Path | None = None) -> Path:
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(
         f"AETV checkpoint not found (searched: {searched}).\n"
-        "Copy the OTA receiver-adapted Flex-8k weights to models/v8-flex8k-ota-rxfix.pt, set "
-        "AETV_CHECKPOINT, or pass --checkpoint."
+        f"Install the default {mode or DEFAULT_MODE} weights, set AETV_CHECKPOINT, "
+        "or pass --checkpoint."
     )
 
 
@@ -61,7 +68,7 @@ class AETVCodec:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
-        self.checkpoint_path = resolve_checkpoint(checkpoint)
+        self.checkpoint_path = resolve_checkpoint(checkpoint, mode=mode)
         payload = torch.load(self.checkpoint_path, map_location="cpu", weights_only=False)
         args = payload.get("args", {}) or {}
         mode_name = mode or payload.get("mode") or args.get("mode") or DEFAULT_MODE
@@ -74,6 +81,7 @@ class AETVCodec:
             mode=self.mode,
             width=int(args.get("model_width", 128)),
             latent_channels=int(args.get("latent_channels", 3)),
+            compact=bool(args.get("compact", False)),
             causal=self.mode.causal,
         ).to(self.device)
         state = payload.get("model_state_dict") or payload.get("model")

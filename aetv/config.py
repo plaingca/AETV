@@ -192,7 +192,7 @@ BANDS = {"N": BAND_N, "W": BAND_W, "U": BAND_U}
 class AETVModeSpec:
     name: str  # e.g. "V0", "V1", etc.
     index: int
-    band: str  # "N" or "W"
+    band: str  # "N", "W", or "U"
     width: int
     height: int
     fps: float
@@ -311,6 +311,18 @@ AETV_MODES: dict[str, AETVModeSpec] = {
         latents_per_gop=LATENTS_PER_GOP_U,  # 10112
         causal=False,
         description="Flex-8k: 256x144 16:9 @ 12 fps (128:1 sweet spot), 8 kHz wide channel (24 kHz audio)",
+    ),
+    "V8": AETVModeSpec(
+        name="V8",
+        index=8,
+        band="W",
+        width=192,
+        height=108,
+        fps=6.0,
+        gop_frames=6,
+        latents_per_gop=LATENTS_PER_GOP_W,  # 2816
+        causal=False,
+        description="HF-3k experimental: 192x108 16:9 @ 6 fps, standard SSB channel",
     ),
 }
 
