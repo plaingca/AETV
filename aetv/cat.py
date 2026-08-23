@@ -6,18 +6,25 @@ and a watchdog; backends must still be safe to call twice with False.
 
 Backends:
 - none: VOX / audio-only, no radio commands
-- rigctld: Hamlib TCP (the same daemon WSJT-X and fldigi already use)
+- hamlib: Hamlib C API loaded in-process (no daemon)
+- rigctld: legacy Hamlib TCP compatibility
 - flex: FlexRadio 6000 SmartSDR TCP, PTT only (tune the slice yourself)
 - rts / dtr: serial-line PTT for a SignaLink-style interface
 """
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import os
+import shutil
 import socket
+import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
-from .flex import FlexClient, bind_to_gui_client, check_frequency
+from .flex import FlexVitaSession
 
 
 class CatError(RuntimeError):
@@ -97,8 +104,184 @@ class RigctldClient:
             pass
 
 
+@dataclass(frozen=True)
+class HamlibModel:
+    model_id: int
+    manufacturer: str
+    model: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.manufacturer} {self.model} ({self.model_id})"
+
+
+def _rigctl_path() -> str | None:
+    bundled = Path(__file__).with_name("bin") / ("rigctl.exe" if os.name == "nt" else "rigctl")
+    return str(bundled) if bundled.is_file() else shutil.which("rigctl")
+
+
+def list_hamlib_models() -> list[HamlibModel]:
+    """Return Hamlib's installed rig list for the settings picker."""
+    executable = _rigctl_path()
+    if not executable:
+        return []
+    try:
+        proc = subprocess.run(
+            [executable, "-l"], capture_output=True, text=True, timeout=8, check=False
+        )
+    except OSError:
+        return []
+    models: list[HamlibModel] = []
+    for line in proc.stdout.splitlines():
+        fields = line.split(None, 4)
+        if not fields or not fields[0].isdigit() or len(fields) < 3:
+            continue
+        models.append(HamlibModel(int(fields[0]), fields[1], fields[2]))
+    return models
+
+
+def _find_hamlib_library() -> str:
+    names = ["hamlib", "libhamlib-4", "libhamlib"]
+    candidates: list[str] = []
+    local_bin = Path(__file__).with_name("bin")
+    for name in ("libhamlib-4.dll", "hamlib.dll", "libhamlib.so.4", "libhamlib.dylib"):
+        candidates.append(str(local_bin / name))
+    executable = _rigctl_path()
+    if executable:
+        exe_dir = Path(executable).resolve().parent
+        candidates.extend(str(exe_dir / name) for name in ("libhamlib-4.dll", "hamlib.dll"))
+    if os.name == "nt":
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        candidates.extend(
+            str(path) for path in program_files.glob("FreeDV*/bin/libhamlib-4.dll")
+        )
+    candidates.extend(filter(None, (ctypes.util.find_library(name) for name in names)))
+    for candidate in candidates:
+        if Path(candidate).is_file() or not Path(candidate).is_absolute():
+            try:
+                if os.name == "nt" and Path(candidate).is_absolute():
+                    os.add_dll_directory(str(Path(candidate).parent))
+                ctypes.CDLL(candidate)
+                return candidate
+            except OSError:
+                continue
+    raise CatError(
+        "Hamlib library not found. Install Hamlib 4.x (rigctl), or place its library in aetv/bin."
+    )
+
+
+class HamlibDirect:
+    """In-process Hamlib rig control. No separately managed rigctld daemon."""
+
+    # Hamlib's special value meaning the current VFO.
+    _VFO_CURR = 0x20000000
+
+    def __init__(self, model: int, device: str, baud: int = 0):
+        if int(model) <= 0:
+            raise CatError("choose a Hamlib radio model")
+        if not device and int(model) != 1:
+            raise CatError("choose the radio's serial or network device")
+        self.model = int(model)
+        self.device = device
+        self.baud = int(baud)
+        library = _find_hamlib_library()
+        self._dll_dir = (
+            os.add_dll_directory(str(Path(library).parent))
+            if os.name == "nt" and Path(library).is_absolute() else None
+        )
+        self.lib = ctypes.CDLL(library)
+        self._configure_api()
+        self.rig = self.lib.rig_init(self.model)
+        if not self.rig:
+            raise CatError(f"Hamlib could not initialize model {self.model}")
+        try:
+            if device:
+                self._set_conf("rig_pathname", device)
+            if self.baud:
+                self._set_conf("serial_speed", str(self.baud))
+            self._check(self.lib.rig_open(self.rig), "open radio")
+        except Exception:
+            self.lib.rig_cleanup(self.rig)
+            self.rig = None
+            raise
+
+    def _configure_api(self) -> None:
+        lib = self.lib
+        if hasattr(lib, "rig_set_debug"):
+            lib.rig_set_debug.argtypes = [ctypes.c_int]
+            lib.rig_set_debug.restype = None
+            lib.rig_set_debug(0)
+        lib.rig_init.argtypes = [ctypes.c_int]
+        lib.rig_init.restype = ctypes.c_void_p
+        lib.rig_cleanup.argtypes = [ctypes.c_void_p]
+        lib.rig_cleanup.restype = ctypes.c_int
+        lib.rig_open.argtypes = [ctypes.c_void_p]
+        lib.rig_open.restype = ctypes.c_int
+        lib.rig_close.argtypes = [ctypes.c_void_p]
+        lib.rig_close.restype = ctypes.c_int
+        lib.rig_token_lookup.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        lib.rig_token_lookup.restype = ctypes.c_int
+        lib.rig_set_conf.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]
+        lib.rig_set_conf.restype = ctypes.c_int
+        lib.rig_set_ptt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        lib.rig_set_ptt.restype = ctypes.c_int
+        lib.rig_get_freq.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+        lib.rig_get_freq.restype = ctypes.c_int
+        lib.rig_get_mode.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
+        ]
+        lib.rig_get_mode.restype = ctypes.c_int
+        lib.rigerror.argtypes = [ctypes.c_int]
+        lib.rigerror.restype = ctypes.c_char_p
+
+    def _check(self, code: int, action: str) -> None:
+        if code < 0:
+            message = self.lib.rigerror(code).decode("utf-8", "replace")
+            raise CatError(f"Hamlib could not {action}: {message}")
+
+    def _set_conf(self, name: str, value: str) -> None:
+        token = self.lib.rig_token_lookup(self.rig, name.encode("ascii"))
+        if token <= 0:
+            raise CatError(f"Hamlib model does not expose {name}")
+        self._check(self.lib.rig_set_conf(self.rig, token, value.encode("utf-8")), f"set {name}")
+
+    def set_ptt(self, on: bool) -> None:
+        self._check(self.lib.rig_set_ptt(self.rig, self._VFO_CURR, 1 if on else 0), "set PTT")
+
+    def get_frequency_hz(self) -> float:
+        value = ctypes.c_double()
+        self._check(self.lib.rig_get_freq(self.rig, self._VFO_CURR, ctypes.byref(value)), "read frequency")
+        return float(value.value)
+
+    def get_mode(self) -> str:
+        mode = ctypes.c_int()
+        width = ctypes.c_int()
+        self._check(
+            self.lib.rig_get_mode(self.rig, self._VFO_CURR, ctypes.byref(mode), ctypes.byref(width)),
+            "read mode",
+        )
+        return str(mode.value)
+
+    def describe(self) -> str:
+        try:
+            return f"Hamlib {self.get_frequency_hz() / 1e6:.6f} MHz — {self.device}"
+        except Exception:
+            return f"Hamlib model {self.model} — {self.device}"
+
+    def close(self) -> None:
+        if not self.rig:
+            return
+        try:
+            self.set_ptt(False)
+        except Exception:
+            pass
+        self.lib.rig_close(self.rig)
+        self.lib.rig_cleanup(self.rig)
+        self.rig = None
+
+
 class FlexPtt:
-    """Key a Flex 6000 that is already on frequency and in the right mode."""
+    """Native FlexRadio PTT using an independent SmartSDR API session."""
 
     def __init__(
         self,
@@ -111,54 +294,26 @@ class FlexPtt:
     ):
         if not host:
             raise CatError("Flex host is empty")
+        if power is not None and not 1 <= int(power) <= 100:
+            raise CatError("Flex power must be between 1 and 100 W")
         self.host = host
-        self.radio = FlexClient(host)
-        self._original: dict | None = None
-        bound = bind_to_gui_client(self.radio)
-        lines = self.radio.command("sub tx all")
-        lines += self.radio._receive(0.5)
-        status = next((line for line in lines if "|transmit freq=" in line), None)
-        if status is None:
-            self.radio.close()
-            raise CatError("Flex did not provide transmit status")
-        self.freq_mhz, self.mode = check_frequency(status, freq_mhz, require_mode)
-        self.bound_client = bound
-        from .flex import _status_value
-
-        self._original = {
-            "rfpower": _status_value(status, "rfpower"),
-            "filter_low": _status_value(status, "lo"),
-            "filter_high": _status_value(status, "hi"),
-            "dax": _status_value(status, "dax"),
-        }
-        parts = ["dax=1", f"filter_low={filter_low}", f"filter_high={filter_high}"]
-        if power is not None:
-            if not 1 <= int(power) <= 100:
-                raise CatError("Flex power must be between 1 and 100 W")
-            parts.append(f"rfpower={int(power)}")
-        self.radio.command("transmit set " + " ".join(parts))
+        self.session = FlexVitaSession(
+            host,
+            frequency_mhz=freq_mhz,
+            mode=require_mode or "DIGU",
+            power=power or 5,
+            filter_low=filter_low,
+            filter_high=filter_high,
+        )
 
     def set_ptt(self, on: bool) -> None:
-        self.radio.command(f"xmit {1 if on else 0}")
+        self.session.set_ptt(on)
 
     def describe(self) -> str:
-        return f"Flex {self.host}  {self.freq_mhz:.6f} MHz {self.mode}"
+        return self.session.describe()
 
     def close(self) -> None:
-        try:
-            self.radio.command("xmit 0")
-        except Exception:
-            pass
-        if self._original is not None:
-            try:
-                original = self._original
-                self.radio.command(
-                    f"transmit set rfpower={original['rfpower']} dax={original['dax']} "
-                    f"filter_low={original['filter_low']} filter_high={original['filter_high']}"
-                )
-            except Exception:
-                pass
-        self.radio.close()
+        self.session.close()
 
 
 class SerialLinePtt:
@@ -204,6 +359,9 @@ class CatConfig:
     backend: str = "none"
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
+    hamlib_model: int = 0
+    hamlib_device: str = ""
+    hamlib_baud: int = 0
     flex_host: str = ""
     flex_power: int | None = 5
     flex_filter_low: int = 800
@@ -220,6 +378,8 @@ def open_ptt(config: CatConfig):
         return NullPtt()
     if name == "rigctld":
         return RigctldClient(config.rigctld_host, config.rigctld_port)
+    if name in {"hamlib", "hamlib-direct"}:
+        return HamlibDirect(config.hamlib_model, config.hamlib_device, config.hamlib_baud)
     if name == "flex":
         return FlexPtt(
             config.flex_host,

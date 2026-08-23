@@ -1,9 +1,8 @@
 """Thread-safe circular audio buffer shared by capture, decode, and the waterfall.
 
-Copied in spirit from SSTVAE: the audio callback must never block on a
-full-buffer copy. `snapshot` publishes two integers under the lock and
-copies outside it. The waterfall uses `tail` so a 20 fps display does
-not clone tens of seconds of history every frame.
+The audio callback must never block on a full-buffer copy. `snapshot` publishes
+two integers under the lock and copies outside it. The waterfall uses `tail` so
+a 20 fps display does not clone tens of seconds of history every frame.
 """
 
 from __future__ import annotations
@@ -64,6 +63,28 @@ class RingBuffer:
             if start >= 0:
                 return self.buf[start : self.write_pos].copy()
             return np.concatenate([self.buf[start:], self.buf[: self.write_pos]])
+
+    def read_since(self, cursor: int) -> tuple[np.ndarray, int, bool]:
+        """Return samples written since an absolute cursor.
+
+        ``overrun`` is true when the producer wrapped before the consumer read
+        the data.  This is the incremental path used by the streaming decoder.
+        """
+        with self.lock:
+            total = self.total_written
+            available_start = max(0, total - self.n)
+            overrun = int(cursor) < available_start
+            start_total = max(int(cursor), available_start)
+            count = total - start_total
+            if count <= 0:
+                return np.zeros(0, dtype=np.float64), total, overrun
+            start = (self.write_pos - count) % self.n
+            if start + count <= self.n:
+                data = self.buf[start : start + count].copy()
+            else:
+                first = self.n - start
+                data = np.concatenate([self.buf[start:], self.buf[: count - first]])
+            return data, total, overrun
 
     def clear(self) -> None:
         with self.lock:

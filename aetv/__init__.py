@@ -32,7 +32,13 @@ from .models import (
     SpatioTemporalDiscriminator3D,
     SpatioTemporalPatchGAN3D,
 )
-from .modem import AETVDemodResult, demodulate_gop_stream, modulate_gop_stream
+from .modem import (
+    AETVDemodResult,
+    StreamingDemodulator,
+    demodulate_gop_stream,
+    modulate_gop_chunks,
+    modulate_gop_stream,
+)
 from .sync import Acquisition, SyncError, acquire
 
 __all__ = [
@@ -69,6 +75,8 @@ __all__ = [
     "SpatioTemporalPatchGAN3D",
     "AETVDemodResult",
     "modulate_gop_stream",
+    "modulate_gop_chunks",
+    "StreamingDemodulator",
     "demodulate_gop_stream",
     "Acquisition",
     "SyncError",

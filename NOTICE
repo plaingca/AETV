@@ -1,8 +1,38 @@
-AETV is derived from the SSTVAE project (https://github.com/arodland/SSTVAE).
-The OFDM numerology, Golay(24,12) codec, and Watterson channel model follow
-that work. The Flex-8k video mode, training recipe, and ham inference harness
-are new to this repository.
+AETV — attribution and distribution notice
+==========================================
 
-The Artistic License 2.0 applies. Do not commit copyrighted test video.
+AETV began as part of Andrew Rodland's SSTVAE project:
+https://github.com/arodland/SSTVAE
+
+This standalone project retains and adapts SSTVAE's analog latent-over-OFDM
+modem, framing and synchronization, Golay(24,12) coding, and Watterson channel
+simulation. AETV adds the moving-video codec, Flex-8k waveform and V7 mode,
+video training and evaluation pipeline, and ham-station application. No
+SSTVAE application branding or restricted icon artwork is included here.
+
+SSTVAE and AETV are licensed under the Artistic License 2.0. Copyright in
+individual contributions remains with the respective contributors.
+
+The radio-autoencoder concept, two-stage training approach, and PAPR approach
+were inspired by FreeDV RADE, developed by David Rowe, Jean-Marc Valin, and
+the FreeDV team: https://freedv.org/radio-autoencoder/
+
+The compact spatiotemporal video backbone takes architectural inspiration
+from LTX-Video by Lightricks: https://github.com/Lightricks/LTX-Video
+No LTX-Video code or model weights are distributed with AETV.
+
+Training uses the OpenVid-1M dataset from NJU-PCALab:
+https://github.com/NJU-PCALab/OpenVid-1M
+The dataset is not distributed in this repository and remains subject to its
+own license and terms.
+
+FlexRadio network integration follows FlexRadio Systems' published SmartSDR
+TCP/IP API and Waveform SDK documentation. SmartSDR, DAX, and FlexRadio are
+trademarks or products of FlexRadio Systems; no FlexRadio SDK code is
+distributed with AETV. Hamlib support uses the Hamlib public C API and requires
+a compatible Hamlib 4.x shared library under the LGPL terms supplied by that
+project: https://github.com/Hamlib/Hamlib
+
+Do not commit copyrighted test video or third-party model weights.
 Identify every transmission with your callsign; this software does not
 replace a license or a band-plan check.

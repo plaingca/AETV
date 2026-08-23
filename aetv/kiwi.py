@@ -16,12 +16,16 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
+import socket
 import struct
 import threading
 import time
 import urllib.request
+import urllib.parse
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 
@@ -29,7 +33,30 @@ from .audio_io import StreamResampler, resample_ratio
 
 LIST_URL = "http://rx.linkfanel.net/kiwisdr_com.js"
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AETV/0.1"
-SND_HEADER = 10
+SND_HEADER = 7
+IQ_GPS_HEADER = 10
+
+
+def normalize_kiwi_host(value: str) -> str:
+    """Turn a pasted Kiwi URL or host into the canonical ``host:port`` form."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    candidate = text if "://" in text else f"//{text}"
+    parsed = urllib.parse.urlsplit(candidate)
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https", "ws", "wss"}:
+        raise ValueError("KiwiSDR address must be an http, https, ws, or wss URL")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("KiwiSDR address must contain a hostname or IP address")
+    try:
+        port = parsed.port or 8073
+    except ValueError as error:
+        raise ValueError("KiwiSDR URL has an invalid port") from error
+    if not 1 <= port <= 65535:
+        raise ValueError("KiwiSDR port must be between 1 and 65535")
+    display_host = f"[{host}]" if ":" in host else host
+    return f"{display_host}:{port}"
 
 
 @dataclass
@@ -66,9 +93,29 @@ def great_circle_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float
 
 
 def fetch_public_list() -> str:
-    request = urllib.request.Request(LIST_URL, headers={"User-Agent": BROWSER_UA})
-    with urllib.request.urlopen(request, timeout=90) as response:
-        return response.read().decode("utf-8", "replace")
+    """Fetch the canonical KiwiSDR directory.
+
+    rx.linkfanel.net currently advertises IPv6 even where its IPv6 HTTP path
+    may not answer. Prefer a resolved IPv4 address while retaining the
+    canonical hostname in the Host header, then fall back to the ordinary URL.
+    """
+    parsed = urllib.parse.urlsplit(LIST_URL)
+    headers = {"User-Agent": BROWSER_UA, "Connection": "close"}
+    try:
+        addresses = socket.getaddrinfo(
+            parsed.hostname, parsed.port or 80, socket.AF_INET, socket.SOCK_STREAM
+        )
+        ipv4 = addresses[0][4][0]
+        direct_url = urllib.parse.urlunsplit(
+            (parsed.scheme, f"{ipv4}:{parsed.port}" if parsed.port else ipv4, parsed.path, parsed.query, "")
+        )
+        request = urllib.request.Request(direct_url, headers={**headers, "Host": parsed.netloc})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read().decode("utf-8", "replace")
+    except Exception:
+        request = urllib.request.Request(LIST_URL, headers=headers)
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.read().decode("utf-8", "replace")
 
 
 def parse_hosts(blob: str) -> list[str]:
@@ -80,7 +127,73 @@ def parse_hosts(blob: str) -> list[str]:
     return sorted(hosts)
 
 
+def parse_directory(blob: str) -> list[KiwiReceiver]:
+    """Parse the canonical Kiwi directory without contacting each SDR."""
+    match = re.search(r"var\s+kiwisdr_com\s*=\s*(\[.*?\])\s*;", blob, re.DOTALL)
+    if match:
+        # The feed is JavaScript and currently includes a trailing array comma.
+        payload = re.sub(r",(\s*)\]$", r"\1]", match.group(1))
+        entries = json.loads(payload)
+        found: dict[str, KiwiReceiver] = {}
+        for entry in entries:
+            gps = re.match(
+                r"\(?\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)",
+                str(entry.get("gps", "")),
+            )
+            if not gps:
+                continue
+            try:
+                host = normalize_kiwi_host(str(entry.get("url", "")))
+                users = int(entry.get("users", 99))
+                users_max = int(entry.get("users_max", 0))
+                ext_api = int(entry.get("ext_api", 0))
+            except (TypeError, ValueError):
+                continue
+            found[host] = KiwiReceiver(
+                host=host,
+                name=str(entry.get("name", ""))[:60],
+                loc=str(entry.get("loc", ""))[:40],
+                lat=float(gps.group(1)),
+                lon=float(gps.group(2)),
+                ext_api=ext_api,
+                users=users,
+                users_max=users_max,
+                free=max(0, users_max - users),
+                mode=str(entry.get("mode", "")),
+                offline=str(entry.get("offline", "?")),
+            )
+        return list(found.values())
+
+    # Retain compatibility with saved responses from the former directory.
+    match = re.search(r"var\s+receivers\s*=\s*(\[.*?\]);", blob, re.DOTALL)
+    if not match:
+        raise RuntimeError("Kiwi directory returned an unrecognized response")
+    groups = json.loads(match.group(1))
+    found: dict[str, KiwiReceiver] = {}
+    for group in groups:
+        coordinates = group.get("location", {}).get("coordinates", [])
+        if len(coordinates) < 2:
+            continue
+        lon, lat = float(coordinates[0]), float(coordinates[1])
+        for entry in group.get("receivers", []):
+            if str(entry.get("type", "")).lower() != "kiwisdr":
+                continue
+            parsed = urllib.parse.urlparse(str(entry.get("url", "")))
+            host = parsed.netloc
+            if not host:
+                continue
+            found[host] = KiwiReceiver(
+                host=host,
+                name=str(entry.get("label", ""))[:60],
+                loc=str(group.get("label", ""))[:40],
+                lat=lat,
+                lon=lon,
+            )
+    return list(found.values())
+
+
 def probe_receiver(host: str, timeout: float = 8.0) -> KiwiReceiver | None:
+    host = normalize_kiwi_host(host)
     try:
         request = urllib.request.Request(f"http://{host}/status", headers={"User-Agent": BROWSER_UA})
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -120,31 +233,43 @@ def find_receivers(
     lat: float,
     lon: float,
     max_km: float = 2500.0,
-    timeout: float = 8.0,
+    timeout: float = 3.0,
     workers: int = 32,
     on_progress=None,
+    max_probes: int = 0,
 ) -> list[KiwiReceiver]:
-    """Probe the public list. Returns reachable receivers, nearest first."""
+    """Return nearby entries from the canonical, live KiwiSDR directory.
+
+    ``max_probes`` can request live status refreshes, but defaults to zero so
+    discovery does not wait on dozens of unreachable receivers.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     blob = fetch_public_list()
-    hosts = parse_hosts(blob)
-    found: list[KiwiReceiver] = []
+    candidates = parse_directory(blob)
+    for item in candidates:
+        item.km = great_circle_km(lat, lon, item.lat, item.lon)
+    nearby = sorted(
+        (item for item in candidates if item.km <= max_km),
+        key=lambda item: item.km,
+    )
+    probe_targets = nearby[:max_probes] if max_probes > 0 else []
+    found = {item.host: item for item in nearby}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(probe_receiver, host, timeout): host for host in hosts}
+        futures = {pool.submit(probe_receiver, item.host, timeout): item for item in probe_targets}
         done = 0
         for future in as_completed(futures):
             done += 1
             info = future.result()
             if on_progress is not None:
-                on_progress(done, len(hosts), info)
-            if info is None:
-                continue
-            info.km = great_circle_km(lat, lon, info.lat, info.lon)
-            if info.km <= max_km:
-                found.append(info)
-    found.sort(key=lambda item: (not item.usable, item.km if item.km is not None else 1e9))
-    return found
+                on_progress(done, len(probe_targets), info)
+            if info is not None:
+                info.km = great_circle_km(lat, lon, info.lat, info.lon)
+                if info.km <= max_km:
+                    found[info.host] = info
+    result = list(found.values())
+    result.sort(key=lambda item: (not item.usable, item.km if item.km is not None else 1e9))
+    return result
 
 
 def kiwi_center_khz(dial_mhz: float, fcenter_hz: float) -> float:
@@ -180,20 +305,66 @@ def iq_to_passband(
     return audio, next_phase
 
 
+class _FractionalResampler:
+    """Small streaming rate correction using continuous linear interpolation.
+
+    The preceding polyphase stage does the anti-alias filtering and nearly all
+    of the rate conversion. This stage only corrects the Kiwi's fractional
+    crystal-rate error (normally tens of ppm), so linear interpolation has
+    negligible passband loss while avoiding multi-second FIR buffering.
+    """
+
+    def __init__(self, src_rate: float, dst_rate: float):
+        self.step = float(src_rate) / float(dst_rate)
+        self._buf = np.zeros(0, dtype=np.float64)
+        self._pos = 0.0
+
+    def __call__(self, chunk: np.ndarray) -> np.ndarray:
+        self._buf = np.concatenate(
+            [self._buf, np.asarray(chunk, dtype=np.float64).reshape(-1)]
+        )
+        available = (len(self._buf) - 1) - self._pos
+        count = int(math.ceil(available / self.step)) if available > 0 else 0
+        if count <= 0:
+            return np.zeros(0, dtype=np.float64)
+        positions = self._pos + self.step * np.arange(count, dtype=np.float64)
+        positions = positions[positions < len(self._buf) - 1]
+        if positions.size == 0:
+            return np.zeros(0, dtype=np.float64)
+        indices = np.arange(len(self._buf), dtype=np.float64)
+        output = np.interp(positions, indices, self._buf)
+        next_pos = float(positions[-1] + self.step)
+        consumed = min(int(math.floor(next_pos)), len(self._buf) - 1)
+        self._buf = self._buf[consumed:]
+        self._pos = next_pos - consumed
+        return output
+
+
 class IqToPassband:
     """Streaming version of `iq_to_passband` with continuous phase and FIR state."""
 
-    def __init__(self, src_rate: int, dst_rate: int, offset_hz: float):
-        self.src_rate = int(src_rate)
+    def __init__(self, src_rate: float, dst_rate: int, offset_hz: float):
+        self.src_rate = float(src_rate)
         self.dst_rate = int(dst_rate)
         self.offset_hz = float(offset_hz)
         self.phase = 0.0
-        if src_rate != dst_rate:
-            up, down = resample_ratio(src_rate, dst_rate)
+        if not math.isclose(src_rate, dst_rate):
+            # Keep the expensive filtered ratio deliberately small. A second,
+            # fractional stage below removes the remaining clock error using
+            # the exact rate advertised by this particular KiwiSDR.
+            coarse = Fraction(dst_rate / src_rate).limit_denominator(64)
+            up, down = coarse.numerator, coarse.denominator
             self._i = StreamResampler(up, down)
             self._q = StreamResampler(up, down)
+            coarse_rate = self.src_rate * up / down
+            if not math.isclose(coarse_rate, self.dst_rate, rel_tol=1e-10):
+                self._fine_i = _FractionalResampler(coarse_rate, self.dst_rate)
+                self._fine_q = _FractionalResampler(coarse_rate, self.dst_rate)
+            else:
+                self._fine_i = self._fine_q = None
         else:
             self._i = self._q = None
+            self._fine_i = self._fine_q = None
 
     def __call__(self, iq: np.ndarray) -> np.ndarray:
         iq = np.asarray(iq)
@@ -205,6 +376,9 @@ class IqToPassband:
         else:
             i = self._i(iq.real)
             q = self._q(iq.imag)
+            if self._fine_i is not None:
+                i = self._fine_i(i)
+                q = self._fine_q(q)
         if len(i) == 0:
             return np.zeros(0, dtype=np.float32)
         increment = 2.0 * math.pi * self.offset_hz / self.dst_rate
@@ -219,7 +393,9 @@ def _decode_snd_iq(payload: bytes) -> np.ndarray:
     if len(payload) < 4:
         return np.zeros(0, dtype=np.complex64)
     if len(payload) % 2 == 0:
-        samples = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
+        # Normal Kiwi network samples are big-endian. Little-endian is only
+        # used by the separate "camp" relay mode, which AETV does not use.
+        samples = np.frombuffer(payload, dtype=">i2").astype(np.float32) / 32768.0
         if samples.size >= 2 and samples.size % 2 == 0:
             return samples[0::2] + 1j * samples[1::2]
     return np.zeros(0, dtype=np.complex64)
@@ -253,18 +429,23 @@ class KiwiCapture:
         password: str = "",
         on_status=None,
         on_error=None,
+        on_discontinuity=None,
+        on_iq=None,
     ):
-        self.host = host.strip()
+        self.host = normalize_kiwi_host(host)
         self.dial_mhz = float(dial_mhz)
         self.fcenter_hz = float(fcenter_hz)
         self.dst_rate = int(dst_rate)
         self.ring = ring
         self.user = user or "aetv"
-        self.password = password or "#"
+        self.password = password or ""
         self._on_status = on_status or (lambda status: None)
         self._on_error = on_error or (lambda msg: None)
+        self._on_discontinuity = on_discontinuity or (lambda: None)
+        self._on_iq = on_iq or (lambda _iq, _rate, _sequence: None)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._retry_delay = 0.05
         self.status = KiwiStatus(host=self.host)
 
     @property
@@ -288,14 +469,19 @@ class KiwiCapture:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            self._session_had_samples = False
             try:
                 asyncio.run(self._session())
             except Exception as error:
                 self.status.connected = False
                 self.status.message = str(error)
+                self._retry_delay = 1.0
                 self._on_error(f"Kiwi {self.host}: {error}")
                 self._on_status(self.status)
-            if self._stop.wait(0.05):
+            finally:
+                if self._session_had_samples and not self._stop.is_set():
+                    self._on_discontinuity()
+            if self._stop.wait(self._retry_delay):
                 break
 
     async def _session(self) -> None:
@@ -304,10 +490,31 @@ class KiwiCapture:
         except ImportError as error:
             raise RuntimeError("websockets is required for KiwiSDR receive") from error
 
-        stamp = int(time.time() * 1000)
-        uri = f"ws://{self.host}/ws/kiwi/{stamp}/SND"
+        # Current Kiwi builds use /<token>/SND. Some receivers used in AETV's
+        # original OTA trials only accepted /ws/kiwi/<timestamp>/SND, so fall
+        # back when the first socket closes before it reports a sample rate.
+        token = int(time.time() + os.getpid()) & 0xFFFFFFFF
+        paths = [
+            f"ws://{self.host}/{token}/SND",
+            f"ws://{self.host}/ws/kiwi/{int(time.time() * 1000)}/SND",
+        ]
+        first_error = None
+        for uri in paths:
+            self.status.connected = False
+            try:
+                await self._session_uri(websockets, uri)
+                return
+            except Exception as error:
+                if self.status.connected:
+                    raise
+                first_error = first_error or error
+        if first_error is not None:
+            raise first_error
+
+    async def _session_uri(self, websockets, uri: str) -> None:
         converter = None
-        kiwi_rate = 12000
+        kiwi_rate = 12000.0
+        last_sequence = None
         async with websockets.connect(
             uri,
             origin=f"http://{self.host}",
@@ -315,61 +522,116 @@ class KiwiCapture:
             open_timeout=12,
             close_timeout=2,
             max_size=2**22,
+            ping_interval=None,
         ) as ws:
-            await ws.send(f"SET auth t=kiwi p={self.password} ipl=#")
-            while not self._stop.is_set():
-                try:
-                    message = await asyncio.wait_for(ws.recv(), timeout=8.0)
-                except asyncio.TimeoutError:
-                    continue
-                if isinstance(message, str):
-                    self._handle_msg(message)
-                    if "sample_rate" in message or message.startswith("MSG"):
-                        match = re.search(r"sample_rate=([0-9.]+)", message)
-                        if match:
-                            kiwi_rate = int(round(float(match.group(1))))
-                        if converter is None:
-                            await self._tune(ws)
+            await ws.send(f"SET auth t=kiwi p={self.password}")
+            keepalive = asyncio.create_task(self._keepalive(ws))
+            try:
+                while not self._stop.is_set():
+                    try:
+                        message = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if isinstance(message, str):
+                        raw = message.encode("utf-8", "replace")
+                    else:
+                        raw = bytes(message)
+                    if len(raw) < 3:
+                        continue
+                    tag, body = raw[:3], raw[3:]
+                    if tag == b"MSG":
+                        text = body[1:].decode("utf-8", "replace") if body else ""
+                        self._handle_msg(text)
+                        audio_rate = re.search(r"(?:^|\s)audio_rate=([0-9.]+)", text)
+                        if audio_rate:
+                            await ws.send(
+                                f"SET AR OK in={int(round(float(audio_rate.group(1))))} out=48000"
+                            )
+                        match = re.search(r"(?:^|\s)sample_rate=([0-9.]+)", text)
+                        if match and converter is None:
+                            kiwi_rate = float(match.group(1))
+                            await self._tune(ws, kiwi_rate)
                             converter = IqToPassband(
                                 kiwi_rate,
                                 self.dst_rate,
                                 offset_hz=self.dial_mhz * 1e6 - self.center_khz * 1e3,
                             )
                             self.status.connected = True
+                            self._retry_delay = 0.05
                             self.status.sample_rate = float(kiwi_rate)
-                            self.status.message = f"IQ {self.center_khz:.2f} kHz"
+                            self.status.message = (
+                                f"Kiwi tuned: TX dial {self.dial_mhz:.6f} MHz · "
+                                f"IQ center {self.center_khz:.3f} kHz"
+                            )
                             self._on_status(self.status)
-                    if "too_busy" in message or "too busy" in message.lower():
-                        self.status.connected = False
-                        self.status.message = "too busy; reconnecting"
-                        self._on_status(self.status)
-                        return
-                    continue
-                if converter is None or len(message) <= SND_HEADER:
-                    continue
-                flags_seq = message[:SND_HEADER]
-                if len(flags_seq) >= 7:
-                    smeter = struct.unpack_from(">H", flags_seq, 5)[0]
+                        if "too_busy" in text or "too busy" in text.lower():
+                            self.status.connected = False
+                            limit = re.search(r"(?:^|\s)too_busy=(\d+)", text)
+                            limit_text = limit.group(1) if limit else "configured"
+                            self._retry_delay = 5.0
+                            self.status.message = (
+                                f"external API slots full (limit {limit_text}); "
+                                "retrying in 5 s or choose another Kiwi"
+                            )
+                            self._on_status(self.status)
+                            return
+                        continue
+                    if tag != b"SND" or converter is None or len(body) <= SND_HEADER:
+                        continue
+                    sequence = struct.unpack_from("<I", body, 1)[0]
+                    if last_sequence is not None and sequence != ((last_sequence + 1) & 0xFFFFFFFF):
+                        # TCP preserves packets, so this means the Kiwi deleted IQ
+                        # samples. Never splice those timelines into one modem GOP.
+                        self._on_discontinuity()
+                        converter = IqToPassband(
+                            kiwi_rate,
+                            self.dst_rate,
+                            offset_hz=self.dial_mhz * 1e6 - self.center_khz * 1e3,
+                        )
+                    last_sequence = sequence
+                    smeter = struct.unpack_from(">H", body, 5)[0]
                     self.status.rssi_db = smeter / 10.0 - 127.0
-                iq = _decode_snd_iq(message[SND_HEADER:])
-                if iq.size:
-                    audio = converter(iq)
-                    if audio.size:
-                        self.ring.write(audio)
+                    payload = body[SND_HEADER:]
+                    # IQ mode prefixes every sample block with GNSS timing fields
+                    # (solution flags, GPS seconds and nanoseconds).
+                    if len(payload) <= IQ_GPS_HEADER:
+                        continue
+                    iq = _decode_snd_iq(payload[IQ_GPS_HEADER:])
+                    if iq.size:
+                        self._on_iq(iq, kiwi_rate, sequence)
+                        audio = converter(iq)
+                        if audio.size:
+                            self.ring.write(audio)
+                            self._session_had_samples = True
+            finally:
+                keepalive.cancel()
+                await asyncio.gather(keepalive, return_exceptions=True)
 
-    async def _tune(self, ws) -> None:
+    async def _keepalive(self, ws) -> None:
+        """Keep a Kiwi allocation alive independently of SND packet flow."""
+        while not self._stop.is_set():
+            await asyncio.sleep(1.0)
+            await ws.send("SET keepalive")
+
+    async def _tune(self, ws, kiwi_rate: float) -> None:
         center = self.center_khz
-        await ws.send("SET AR OK in=12000 out=48000")
-        await ws.send("SET squelch=0 maxdB=0 mindB=-110")
-        await ws.send("SET compression=0")
+        await ws.send(f"SET AR OK in={int(round(kiwi_rate))} out=48000")
+        await ws.send("SET squelch=0 max=0")
+        await ws.send("SET genattn=0")
+        await ws.send("SET gen=0 mix=-1")
         await ws.send(
-            f"SET mod=iq low_cut=-5000 high_cut=5000 freq={center:.3f}"
+            f"SET mod=iq low_cut=-5500 high_cut=5500 freq={center:.3f}"
         )
+        await ws.send("SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=50")
+        await ws.send("SET compression=0")
         await ws.send(f"SET ident_user={self.user}")
-        await ws.send("SET OVERRIDE inactivity_timeout=0")
+        await ws.send("SET keepalive")
 
     def _handle_msg(self, message: str) -> None:
-        if "too_busy" in message or "badp" in message or "password" in message.lower():
+        badp = re.search(r"(?:^|\s)badp=(\d+)", message)
+        if badp and badp.group(1) == "0":
+            return
+        if badp or "password" in message.lower():
             self.status.message = message.strip()[:160]
             self._on_status(self.status)
 

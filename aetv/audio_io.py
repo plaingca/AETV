@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import threading
+import json
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from math import gcd
 from pathlib import Path
@@ -83,8 +87,7 @@ def list_devices() -> list[dict]:
     return devices
 
 
-def list_audio_devices(kind: str) -> list[DeviceInfo]:
-    """Input or output devices, skipping cards with no channels that way."""
+def _list_audio_devices_direct(kind: str) -> list[DeviceInfo]:
     if kind not in {"input", "output"}:
         raise ValueError(f"kind must be input or output, got {kind!r}")
     sd = _sd()
@@ -107,6 +110,33 @@ def list_audio_devices(kind: str) -> list[DeviceInfo]:
             )
         )
     return out
+
+
+def list_audio_devices(kind: str) -> list[DeviceInfo]:
+    """List devices without allowing a broken Windows driver to kill the GUI.
+
+    PortAudio enumerates every installed host API. Some stale ASIO/webcam audio
+    drivers crash inside native code rather than raising an exception, so the
+    Windows probe is isolated in a short-lived helper process.
+    """
+    if os.name != "nt" or os.environ.get("AETV_AUDIO_PROBE_CHILD") == "1":
+        return _list_audio_devices_direct(kind)
+    code = (
+        "import json; from dataclasses import asdict; "
+        "from aetv.audio_io import _list_audio_devices_direct; "
+        f"print(json.dumps([asdict(x) for x in _list_audio_devices_direct({kind!r})]))"
+    )
+    env = os.environ.copy()
+    env["AETV_AUDIO_PROBE_CHILD"] = "1"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=12, env=env
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return []
+        return [DeviceInfo(**item) for item in json.loads(proc.stdout)]
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []
 
 
 def resolve_device(name_or_index: str | int | None, kind: str) -> str | int | None:
@@ -233,6 +263,39 @@ def play_cancellable(
                 break
             done.wait(0.05)
     return not cancelled.is_set()
+
+
+def play_chunk_stream(
+    chunks,
+    rate: int,
+    device: str | int | None = None,
+    should_stop=None,
+    on_chunk=None,
+) -> bool:
+    """Write a lazy sequence of waveform chunks to one PortAudio stream."""
+    sd = _sd()
+    device = resolve_device(device, "output")
+    target_rate = rate
+    if device is not None:
+        info = sd.query_devices(device)
+        target_rate = int(info.get("default_samplerate") or rate)
+    resampler = (
+        None if target_rate == rate else StreamResampler(*resample_ratio(rate, target_rate))
+    )
+    with sd.OutputStream(
+        samplerate=target_rate, channels=1, dtype="float32", device=device
+    ) as stream:
+        for index, chunk in enumerate(chunks):
+            if should_stop is not None and should_stop():
+                return False
+            samples = np.asarray(chunk, dtype=np.float32).reshape(-1)
+            if resampler is not None:
+                samples = resampler(samples).astype(np.float32)
+            if samples.size:
+                stream.write(samples.reshape(-1, 1))
+            if on_chunk is not None:
+                on_chunk(index + 1)
+    return not (should_stop is not None and should_stop())
 
 
 def record_audio(

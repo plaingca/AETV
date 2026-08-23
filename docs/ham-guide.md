@@ -19,34 +19,47 @@ uv sync --extra gui
 uv run aetv gui
 ```
 
-The window is the SSTVAE-style shack layout: a receive waterfall across
-the top, decoded video on the left, webcam or file transmit on the
-right. Settings persist under `%APPDATA%\AETV\settings.json` on Windows
+The AETV station window has a receive waterfall across the top, decoded video
+on the left, and webcam or file transmit on the right. Settings persist under
+`%APPDATA%\AETV\settings.json` on Windows
 and `~/.config/AETV/settings.json` elsewhere.
 
-**Receive** can be a local soundcard (Flex DAX RX, a virtual cable, or
-any input) or a public KiwiSDR. **Find Kiwis** probes the public list
-and keeps receivers that still advertise an API channel — `ext_api=0`
+**Receive** can come directly from a FlexRadio over VITA-49, from a local
+soundcard or from a public KiwiSDR. **Find Kiwis** reads the canonical
+[KiwiSDR directory](http://rx.linkfanel.net/) and shows nearby receivers
+with their advertised API availability — `ext_api=0`
 grants a socket for about ten seconds and then drops it. V7 is taken as
 IQ centred on *USB dial + 5 kHz*; mixing after upsample is required so
 the top of the 8 kHz waveform is not aliased.
 
-**Transmit** encodes one-second GOPs from a webcam or a video file,
-plays the Flex-8k waveform into the selected output device, and keys
-the rig only for that duration. PTT is released in a `finally` block
-and a watchdog unkeys if playback overruns.
+**Transmit** captures one-second GOPs from a webcam or video file. Once PTT is
+up, webcam capture, encoding, modulation, and radio output run as a rolling
+pipeline instead of preparing the whole camera clip first. Acquisition and
+mode header are sent once; payload GOPs then occupy exactly one RF second each.
+A late receiver uses cyclic-prefix timing, pilots, and the continuous beacon
+to recover without inserting gaps into the transmitted video. PTT is released
+in a `finally` block and a watchdog unkeys if the pipeline overruns.
+
+With **Save TX waveform, Kiwi IQ, and modem debug logs** enabled, AETV writes
+timestamped `.tx.wav`, `.iq.wav`, metadata JSON, and modem JSONL files under
+the received-video folder's `debug` directory. Compare a TX/RX pair offline:
+
+```powershell
+uv run python scripts/analyze_ota_debug.py --tx path\trial.tx.wav --iq path\trial.iq.wav
+```
 
 **CAT / PTT**
 
 | Method | Use |
 |---|---|
 | None | VOX or a manual PTT switch |
-| Hamlib `rigctld` | The same TCP daemon WSJT-X already uses (`127.0.0.1:4532`) |
-| FlexRadio 6000 | SmartSDR TCP; binds the GUI client, checks frequency/mode, keys `xmit` |
+| Hamlib direct | Pick a model and COM/network device; AETV loads Hamlib in-process |
+| FlexRadio 6000 | Discovered automatically; native TCP PTT plus VITA-49 UDP RX/TX audio |
 | Serial RTS / DTR | SignaLink-style interfaces |
 
-Frequency and mode are checked, never set. Use **Audio-only** in
-settings to confirm the DAX meter moves before you put RF on the air.
+For Hamlib rigs, tune and select the operating mode at the radio. AETV's native
+Flex session can create or tune its own DIGU slice when a frequency is entered.
+Use **Audio-only** to test the audio path before you put RF on the air.
 Test CAT / Test PTT run on a worker thread so the dialog cannot hang
 the UI.
 
@@ -54,7 +67,7 @@ the UI.
 
 The published mode is **V7** on a Flex 6000-series radio:
 
-- Sample rate 24 kHz into DAX TX
+- Sample rate 24 kHz over native VITA-49 or a soundcard
 - 160 OFDM carriers, 50 Hz spacing, first carrier 1000 Hz
 - Transmit filter about 800-9200 Hz
 - 256x144 color at 12 frames per second, one GOP per second

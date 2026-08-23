@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -53,9 +53,6 @@ class TransmitPanel(QWidget):
         self._previewArrived.connect(self._show_preview, Qt.ConnectionType.QueuedConnection)
         self._file_path = ""
         self._build()
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setInterval(400)
-        self._preview_timer.timeout.connect(self._kick_preview)
 
     def control_strip(self) -> QWidget:
         return self._strip
@@ -173,35 +170,57 @@ class TransmitPanel(QWidget):
         layout.addWidget(self.preview, 1)
         layout.addWidget(self._strip, 0)
         self.sync_from_config()
-        self._preview_timer.start()
+        self.camera.currentIndexChanged.connect(self._restart_preview)
+        self.mode.currentIndexChanged.connect(self._restart_preview)
+        self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
         if self.cam_radio.isChecked() and not self.transmitting():
-            self._preview_timer.start()
+            self._start_preview()
         else:
             self._stop_preview()
 
-    def _kick_preview(self) -> None:
+    def _restart_preview(self, _index: int) -> None:
+        if not hasattr(self, "cam_radio"):
+            return
+        self._stop_preview()
+        self._start_preview()
+
+    def _start_preview(self) -> None:
         if self.transmitting() or not self.cam_radio.isChecked():
             return
         if self._preview_thread is not None and self._preview_thread.is_alive():
             return
         self._preview_stop.clear()
-        self._preview_thread = threading.Thread(target=self._preview_once, daemon=True, name="webcam-preview")
+        mode_name = self.mode.currentData() or self.station.settings.mode
+        camera = int(self.camera.currentData() or 0)
+        self._preview_thread = threading.Thread(
+            target=self._preview_loop,
+            args=(mode_name, camera),
+            daemon=True,
+            name="webcam-preview",
+        )
         self._preview_thread.start()
 
-    def _preview_once(self) -> None:
+    def _preview_loop(self, mode_name: str, camera: int) -> None:
         try:
-            mode = AETV_MODES[self.station.settings.mode]
-            camera = int(self.camera.currentData() or 0)
-            frame = next(iter_webcam(mode, camera=camera, duration_s=1.0 / mode.fps))
-            if not self._preview_stop.is_set():
+            for frame in iter_webcam(AETV_MODES[mode_name], camera=camera):
+                if self._preview_stop.is_set():
+                    break
                 self._previewArrived.emit(frame)
-        except Exception:
-            pass
+        except Exception as error:
+            if not self._preview_stop.is_set():
+                self._errorArrived.emit(f"Webcam preview unavailable: {error}")
 
     def _stop_preview(self) -> None:
         self._preview_stop.set()
+        thread = self._preview_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def stop_preview(self) -> None:
+        """Release the preview camera before the application closes."""
+        self._stop_preview()
 
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -260,7 +279,7 @@ class TransmitPanel(QWidget):
             if state.phase != TxPhase.IDLE:
                 self.transmitFinished.emit()
             if self.cam_radio.isChecked():
-                self._preview_timer.start()
+                self._start_preview()
 
     def _on_error(self, message: str) -> None:
         self.status.setText(message)

@@ -5,11 +5,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from aetv.codec import DEFAULT_CHECKPOINT, AETVCodec
+from aetv.codec import DEFAULT_CHECKPOINT, AETVCodec, resolve_checkpoint
 from aetv.config import AETV_MODES
 from aetv.modem import demodulate_gop_stream, modulate_gop_stream
 
 CHECKPOINT = DEFAULT_CHECKPOINT
+
+
+def test_resolve_checkpoint_from_environment(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "custom.pt"
+    checkpoint.touch()
+    monkeypatch.setenv("AETV_CHECKPOINT", str(checkpoint))
+    assert resolve_checkpoint() == checkpoint.resolve()
 
 
 @pytest.mark.skipif(not CHECKPOINT.is_file(), reason="models/v7-flex8k.pt not installed")
@@ -17,7 +24,13 @@ def test_v7_codec_and_modem_loopback():
     codec = AETVCodec(CHECKPOINT, device="cpu", mode="V7")
     assert codec.mode.name == "V7"
     assert codec.mode.latents_per_gop == AETV_MODES["V7"].latents_per_gop
-    frames = np.random.randint(0, 256, (codec.mode.gop_frames, codec.mode.height, codec.mode.width, 3), dtype=np.uint8)
+    rng = np.random.default_rng(0)
+    frames = rng.integers(
+        0,
+        256,
+        (codec.mode.gop_frames, codec.mode.height, codec.mode.width, 3),
+        dtype=np.uint8,
+    )
     latents = codec.encode_gop(frames)
     assert latents.shape == (codec.mode.latents_per_gop,)
     audio = modulate_gop_stream([latents], mode_name="V7", callsign="N0CALL")

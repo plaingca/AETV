@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .video_backbone import VideoDecoder, VideoEncoder, VideoSSTVAE
+from .video_backbone import VideoDecoder, VideoEncoder
 from .config import AETV_MODES, AETVModeSpec, LATENTS_PER_GOP_N, LATENTS_PER_GOP_W
 
 
@@ -388,5 +388,4 @@ class SpatioTemporalPatchGAN3D(nn.Module):
 
 # Backwards compatibility alias
 SpatioTemporalDiscriminator3D = SpatioTemporalPatchGAN3D
-
 

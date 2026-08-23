@@ -13,7 +13,7 @@ FS = 8000  # audio sample rate, Hz
 # --- OFDM waveform numerology (Display-Friendly 8 fps) --------------------
 RS = 50  # carrier spacing == symbol rate of one carrier, Hz
 M = FS // RS  # useful symbol length, samples (160 samples = 20 ms)
-NCP = 40  # cyclic prefix, samples (5.0 ms @ 8 kHz, up from 32 in SSTVAE)
+NCP = 40  # cyclic prefix, samples (5.0 ms @ 8 kHz)
 NSYM = M + NCP  # full symbol length, samples (200 samples = 25 ms, 40 sym/s)
 
 # --- Framing ---------------------------------------------------------------
@@ -53,10 +53,11 @@ BEACON_CARRIER_U = NC_U - 1  # index 159
 NC_LATENT_U = NC_U - 2  # 158
 LATENTS_PER_FRAME_U = NC_LATENT_U * DATA_SYMS_PER_FRAME * 2  # 158 * 4 * 2 = 1264 real values
 LATENTS_PER_GOP_U = FRAMES_PER_GOP * LATENTS_PER_FRAME_U  # 8 * 1264 = 10112 real values
-FS_U = 24000  # 24 kHz audio sample rate for Ultra-Wide / Flex-6600 DAX
+FS_U = 24000  # 24 kHz audio sample rate for Ultra-Wide / Flex VITA-49
 
 # --- Beacon side-channel ---------------------------------------------------
-# 4 chips per frame = 32 chips / second
+# Base beacon rate is 4 chips/frame = 32 chips/s. U/V7 uses I/Q on its
+# beacon and spare guard carriers for four lanes = 128 chips/s.
 BEACON_CHIPS_PER_FRAME = DATA_SYMS_PER_FRAME  # 4
 BEACON_SYNC = (1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1)  # Barker-13
 BEACON_COUNTER_BITS = 10  # mod 1024 (128 s wrap @ 8 frames/s)
@@ -88,7 +89,7 @@ LEADOUT_SAMPLES = 800
 CLIP_HEADROOM_DB = 0.5
 TX_BANDPASS_N = (850.0, 2200.0)  # Hz
 TX_BANDPASS_W = (350.0, 2750.0)  # Hz
-TX_BANDPASS_U = (800.0, 9200.0)  # Hz
+TX_BANDPASS_U = (500.0, 9500.0)  # Hz; margin around 1000..8950 Hz carriers
 DEMOD_BACKOFF = 8  # samples
 SNR_REF_BW_HZ = 2500.0
 PROTOCOL_VERSION = 3
@@ -292,7 +293,7 @@ AETV_MODES: dict[str, AETVModeSpec] = {
         gop_frames=10,
         latents_per_gop=LATENTS_PER_GOP_U,  # 10112
         causal=False,
-        description="Flex-8k: 128x128 color @ 10 fps, 8 kHz wide channel (24 kHz DAX)",
+        description="Flex-8k: 128x128 color @ 10 fps, 8 kHz wide channel (24 kHz audio)",
     ),
     "V7": AETVModeSpec(
         name="V7",
@@ -304,10 +305,9 @@ AETV_MODES: dict[str, AETVModeSpec] = {
         gop_frames=12,
         latents_per_gop=LATENTS_PER_GOP_U,  # 10112
         causal=False,
-        description="Flex-8k: 256x144 16:9 @ 12 fps (128:1 sweet spot), 8 kHz wide channel (24 kHz DAX)",
+        description="Flex-8k: 256x144 16:9 @ 12 fps (128:1 sweet spot), 8 kHz wide channel (24 kHz audio)",
     ),
 }
 
 
 AETV_MODES_BY_INDEX: dict[int, AETVModeSpec] = {m.index: m for m in AETV_MODES.values()}
-

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from .config import AETV_MODES
+from .kiwi import normalize_kiwi_host
 
 CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{1,8}$")
 
@@ -48,9 +49,9 @@ class StationSettings:
     audio_input: str = ""
     audio_output: str = ""
     tx_level: float = 0.7
-    rx_source: str = "soundcard"  # soundcard | kiwi
+    rx_source: str = "soundcard"  # soundcard | flex | kiwi
     buffer_seconds: float = 90.0
-    decode_every_s: float = 2.0
+    decode_every_s: float = 0.1
 
     kiwi_host: str = ""
     kiwi_password: str = ""
@@ -60,11 +61,15 @@ class StationSettings:
     kiwi_lon: float = -123.11
     kiwi_max_km: float = 2500.0
 
-    cat_backend: str = "none"  # none | rigctld | flex | rts | dtr
+    cat_backend: str = "none"  # none | hamlib | flex | rts | dtr
+    hamlib_model: int = 0
+    hamlib_device: str = ""
+    hamlib_baud: int = 0
     rigctld_host: str = "127.0.0.1"
     rigctld_port: int = 4532
     flex_host: str = ""
     flex_power: int = 5
+    flex_native_audio: bool = True
     freq_mhz: float | None = None
     require_mode: str = "DIGU"
     serial_port: str = ""
@@ -76,6 +81,7 @@ class StationSettings:
     gops: int = 10
     receive_dir: str = ""
     autosave: bool = True
+    debug_capture: bool = True
     window_layout: str = "split"
 
     def validate(self) -> list[str]:
@@ -89,13 +95,22 @@ class StationSettings:
             problems.append("TX level must be between 0.05 and 1.0")
         if self.gops < 1:
             problems.append("GOP count must be >= 1")
-        if self.cat_backend not in {"none", "rigctld", "flex", "rts", "dtr"}:
+        if self.cat_backend not in {"none", "hamlib", "rigctld", "flex", "rts", "dtr"}:
             problems.append(f"unknown CAT backend {self.cat_backend!r}")
-        if self.rx_source not in {"soundcard", "kiwi"}:
+        if self.rx_source not in {"soundcard", "flex", "kiwi"}:
             problems.append(f"unknown receive source {self.rx_source!r}")
         if self.rx_source == "kiwi" and not self.kiwi_host:
             problems.append("KiwiSDR host is empty")
+        elif self.kiwi_host:
+            try:
+                self.kiwi_host = normalize_kiwi_host(self.kiwi_host)
+            except ValueError as error:
+                problems.append(str(error))
         if self.cat_backend == "flex" and not self.flex_host:
+            problems.append("Flex host is empty")
+        if self.cat_backend == "hamlib" and self.hamlib_model <= 0:
+            problems.append("Hamlib radio model is not selected")
+        if self.rx_source == "flex" and not self.flex_host:
             problems.append("Flex host is empty")
         if self.cat_backend in {"rts", "dtr"} and not self.serial_port:
             problems.append("serial PTT port is empty")
@@ -119,6 +134,17 @@ def load_settings(path: Path | None = None) -> StationSettings:
     allowed = {item.name for item in fields(StationSettings)}
     clean = {key: value for key, value in raw.items() if key in allowed}
     settings = StationSettings(**clean)
+    if settings.kiwi_host:
+        try:
+            settings.kiwi_host = normalize_kiwi_host(settings.kiwi_host)
+        except ValueError:
+            pass
+    if (
+        settings.cat_backend == "flex"
+        and settings.flex_native_audio
+        and settings.rx_source == "soundcard"
+    ):
+        settings.rx_source = "flex"
     if not settings.receive_dir:
         settings.receive_dir = str(default_receive_dir())
     return settings

@@ -8,26 +8,135 @@ transmission overruns its known duration.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+import queue
+import re
+import wave
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import numpy as np
 
-from .audio_io import open_input_stream, play_cancellable
+from .audio_io import (
+    StreamResampler,
+    open_input_stream,
+    play_cancellable,
+    play_chunk_stream,
+    resample_ratio,
+)
 from .cat import CatConfig, NullPtt, open_ptt
 from .codec import AETVCodec, resolve_checkpoint
 from .config import AETV_MODES
 from .kiwi import KiwiCapture
-from .modem import demodulate_gop_stream, modulate_gop_stream
+from .flex import FlexVitaSession
+from .modem import (
+    StreamingDemodulator,
+    modulate_continuous_chunks,
+    modulate_gop_chunks,
+    modulate_gop_stream,
+)
 from .ringbuffer import RingBuffer
 from .settings import StationSettings
 from .source import collect_gops, iter_video_file, iter_webcam, write_mp4
 from .sync import SyncError
 
 WATCHDOG_MARGIN_S = 15.0
+
+
+def _debug_prefix(settings: StationSettings, label: str) -> Path:
+    folder = settings.receive_path() / "debug"
+    folder.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    millis = (time.time_ns() // 1_000_000) % 1000
+    return folder / f"{stamp}-{millis:03d}_{safe}"
+
+
+class _PcmWaveRecorder:
+    """Incrementally save float audio without retaining a transmission in RAM."""
+
+    def __init__(self, path: Path, rate: int, channels: int = 1):
+        self.path = Path(path)
+        self.rate = int(rate)
+        self.channels = int(channels)
+        self.samples = 0
+        self._wave = wave.open(str(self.path), "wb")
+        self._wave.setnchannels(self.channels)
+        self._wave.setsampwidth(2)
+        self._wave.setframerate(self.rate)
+
+    def write(self, values: np.ndarray) -> None:
+        array = np.asarray(values)
+        if self.channels == 1:
+            array = array.reshape(-1)
+            self.samples += len(array)
+        else:
+            array = array.reshape(-1, self.channels)
+            self.samples += len(array)
+        pcm = np.rint(np.clip(array, -1.0, 1.0) * 32767.0).astype("<i2")
+        self._wave.writeframesraw(pcm.tobytes())
+
+    def close(self) -> None:
+        self._wave.close()
+
+
+class _JsonlRecorder:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._file = self.path.open("w", encoding="utf-8")
+        self._lock = threading.Lock()
+
+    def write(self, event: dict) -> None:
+        with self._lock:
+            self._file.write(json.dumps(event, allow_nan=True, sort_keys=True) + "\n")
+            self._file.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._file.close()
+
+
+class _KiwiIqRecorder:
+    def __init__(self, prefix: Path, metadata: dict):
+        self.prefix = Path(prefix)
+        self.metadata = dict(metadata)
+        self.writer: _PcmWaveRecorder | None = None
+        self.blocks = 0
+        self.discontinuities: list[dict] = []
+
+    def write(self, iq: np.ndarray, rate: float, sequence: int) -> None:
+        if self.writer is None:
+            self.writer = _PcmWaveRecorder(
+                self.prefix.with_suffix(".iq.wav"), round(rate), channels=2
+            )
+            self.metadata["kiwi_sample_rate_exact"] = float(rate)
+            self.metadata["wav_sample_rate"] = round(rate)
+        interleaved = np.column_stack((np.real(iq), np.imag(iq)))
+        self.writer.write(interleaved)
+        self.blocks += 1
+        self.metadata["last_sequence"] = int(sequence)
+
+    def discontinuity(self, reason: str) -> None:
+        samples = self.writer.samples if self.writer is not None else 0
+        self.discontinuities.append(
+            {"sample": samples, "time": time.time(), "reason": reason}
+        )
+
+    def close(self) -> None:
+        if self.writer is not None:
+            self.writer.close()
+            self.metadata["iq_samples"] = self.writer.samples
+            self.metadata["iq_wav"] = str(self.writer.path)
+        self.metadata["blocks"] = self.blocks
+        self.metadata["discontinuities"] = self.discontinuities
+        self.metadata["stopped_at"] = time.time()
+        self.prefix.with_suffix(".iq.json").write_text(
+            json.dumps(self.metadata, indent=2, allow_nan=True) + "\n",
+            encoding="utf-8",
+        )
 
 
 class TxPhase(str, Enum):
@@ -107,6 +216,9 @@ class Station:
             backend="none" if self.settings.audio_only else self.settings.cat_backend,
             rigctld_host=self.settings.rigctld_host,
             rigctld_port=self.settings.rigctld_port,
+            hamlib_model=self.settings.hamlib_model,
+            hamlib_device=self.settings.hamlib_device,
+            hamlib_baud=self.settings.hamlib_baud,
             flex_host=self.settings.flex_host,
             flex_power=self.settings.flex_power,
             flex_filter_low=int(geom.tx_bandpass[0]),
@@ -130,6 +242,7 @@ class TxEngine:
         self.state = TxState()
         self.last_wav: np.ndarray | None = None
         self.last_frames: np.ndarray | None = None
+        self.gop_timings: list[dict] = []
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -144,33 +257,119 @@ class TxEngine:
 
     def transmit(self, source: str) -> bool:
         self._cancel.clear()
+        self.gop_timings = []
         settings = self.station.settings
+        tx_recorder: _PcmWaveRecorder | None = None
+        tx_metadata: dict = {}
+        tx_prefix: Path | None = None
         try:
             codec = self.station.require_codec()
-            frames = self._capture(source, codec)
-            if frames is None:
-                self._set(TxPhase.CANCELLED, 0.0, "cancelled")
-                return False
-            self.last_frames = frames
-            self._on_preview(frames)
-            latents = self._encode(frames, codec)
-            if latents is None:
-                self._set(TxPhase.CANCELLED, 0.0, "cancelled")
-                return False
-            self._set(TxPhase.MODULATING, 0.0, "modulating Flex-8k waveform")
-            audio = modulate_gop_stream(latents, mode_name=codec.mode.name, callsign=settings.callsign)
-            peak = float(np.max(np.abs(audio))) if audio.size else 0.0
-            if peak > 0:
-                audio = audio * (settings.tx_level / peak)
-            self.last_wav = audio
-            if self._cancel.is_set():
-                self._set(TxPhase.CANCELLED, 0.0, "cancelled")
-                return False
-            return self._keyed_send(audio, codec.mode.geometry.fs)
+            n_gops = settings.gops
+            if source.lower() in {"webcam", "cam", "camera"}:
+                encoded_gops = self._live_webcam_gops(codec, n_gops)
+            else:
+                frames = self._capture(source, codec)
+                if frames is None:
+                    self._set(TxPhase.CANCELLED, 0.0, "cancelled")
+                    return False
+                self.last_frames = frames
+                self._on_preview(frames)
+                n_gops = frames.shape[0] // codec.mode.gop_frames
+
+                def encoded_gops():
+                    for index in range(n_gops):
+                        if self._cancel.is_set():
+                            return
+                        phase = (
+                            TxPhase.SENDING
+                            if self.state.phase in {TxPhase.KEYING, TxPhase.SENDING}
+                            else TxPhase.ENCODING
+                        )
+                        self._set(
+                            phase,
+                            index / max(1, n_gops),
+                            f"encoding GOP {index + 1}/{n_gops}",
+                        )
+                        start = index * codec.mode.gop_frames
+                        with self.station.codec_lock:
+                            encode_started = time.perf_counter()
+                            latent = codec.encode_gop(
+                                frames[start : start + codec.mode.gop_frames]
+                            )
+                        self.gop_timings.append(
+                            {
+                                "gop": index + 1,
+                                "device": str(getattr(codec, "device", "unknown")),
+                                "encode_s": time.perf_counter() - encode_started,
+                            }
+                        )
+                        yield latent
+
+                encoded_gops = encoded_gops()
+
+            chunks = modulate_continuous_chunks(
+                encoded_gops, mode_name=codec.mode.name, callsign=settings.callsign
+            )
+
+            if settings.debug_capture:
+                tx_prefix = _debug_prefix(settings, f"tx_{codec.mode.name}_{settings.callsign}")
+                tx_recorder = _PcmWaveRecorder(
+                    tx_prefix.with_suffix(".tx.wav"), codec.mode.geometry.fs
+                )
+                tx_metadata = {
+                    "started_at": time.time(),
+                    "source": source,
+                    "mode": codec.mode.name,
+                    "callsign": settings.callsign,
+                    "sample_rate": codec.mode.geometry.fs,
+                    "requested_gops": n_gops,
+                    "framing": "continuous",
+                    "payload_gop_seconds": 1.0,
+                    "expected_waveform_seconds": n_gops + 0.34,
+                    "tx_level": settings.tx_level,
+                    "frequency_mhz": settings.freq_mhz,
+                    "flex_host": settings.flex_host,
+                    "waveform": str(tx_recorder.path),
+                    "gop_timings": self.gop_timings,
+                }
+                self.station.log(f"TX waveform debug: {tx_recorder.path}")
+
+            def leveled_chunks():
+                for index, audio in enumerate(chunks):
+                    phase = (
+                        TxPhase.SENDING
+                        if self.state.phase in {TxPhase.KEYING, TxPhase.SENDING}
+                        else TxPhase.MODULATING
+                    )
+                    self._set(
+                        phase,
+                        index / max(1, n_gops),
+                        f"streaming GOP {index + 1}/{n_gops}",
+                    )
+                    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+                    if peak > 0:
+                        audio = audio * (settings.tx_level / peak)
+                    self.last_wav = audio
+                    if tx_recorder is not None:
+                        tx_recorder.write(audio)
+                    yield audio
+
+            return self._keyed_send_stream(leveled_chunks(), codec.mode.geometry.fs, n_gops)
         except Exception as error:
             self._on_error(str(error))
             self._set(TxPhase.FAILED, self.state.progress, str(error))
             return False
+        finally:
+            if tx_recorder is not None:
+                tx_recorder.close()
+                tx_metadata["samples"] = tx_recorder.samples
+                tx_metadata["duration_s"] = tx_recorder.samples / tx_recorder.rate
+                tx_metadata["stopped_at"] = time.time()
+                assert tx_prefix is not None
+                tx_prefix.with_suffix(".tx.json").write_text(
+                    json.dumps(tx_metadata, indent=2, allow_nan=True) + "\n",
+                    encoding="utf-8",
+                )
 
     def _capture(self, source: str, codec) -> np.ndarray | None:
         mode = codec.mode
@@ -221,7 +420,9 @@ class TxEngine:
         )
         try:
             self._set(TxPhase.KEYING, 0.0, ptt.describe())
-            self._key(ptt, True)
+            if not self._key(ptt, True):
+                self._set(TxPhase.FAILED, 0.0, "PTT on failed")
+                return False
             watchdog.start()
             if self._cancel.wait(settings.ptt_lead_s):
                 self._set(TxPhase.CANCELLED, 0.0, "cancelled")
@@ -254,14 +455,209 @@ class TxEngine:
         self._set(TxPhase.DONE, 1.0, "sent")
         return True
 
-    def _key(self, ptt, on: bool) -> None:
+    def _keyed_send_stream(self, chunks, fs: int, n_gops: int) -> bool:
+        """Key once while GOPs are encoded, modulated, and written incrementally."""
+        settings = self.station.settings
+        # Build a small rolling buffer before keying. The previous path first
+        # pulled the lazy generator *after* xmit=1, leaving the transmitter
+        # keyed with no audio while a CPU encoded the first GOP. A producer
+        # keeps later GOPs moving while the consumer paces radio audio.
+        ready: queue.Queue = queue.Queue(maxsize=3)
+        producer_stop = threading.Event()
+        sentinel = object()
+
+        def produce() -> None:
+            terminal = sentinel
+            try:
+                for chunk in chunks:
+                    while not producer_stop.is_set():
+                        try:
+                            ready.put(chunk, timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
+                    if producer_stop.is_set():
+                        return
+            except Exception as error:
+                terminal = error
+            finally:
+                while not producer_stop.is_set():
+                    try:
+                        ready.put(terminal, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+
+        self._set(TxPhase.ENCODING, 0.0, "preparing first live GOP before PTT")
+        producer = threading.Thread(target=produce, name="aetv-tx-producer", daemon=True)
+        producer.start()
+        first = ready.get()
+        if isinstance(first, Exception):
+            self._on_error(str(first))
+            self._set(TxPhase.FAILED, 0.0, str(first))
+            producer_stop.set()
+            producer.join(timeout=5.0)
+            return False
+        if first is sentinel:
+            self._set(TxPhase.FAILED, 0.0, "encoder produced no GOP audio")
+            producer_stop.set()
+            producer.join(timeout=5.0)
+            return False
+
+        def prepared_chunks():
+            yield first
+            index = 1
+            while True:
+                wait_started = time.perf_counter()
+                item = ready.get()
+                wait_s = time.perf_counter() - wait_started
+                if item is sentinel:
+                    return
+                if isinstance(item, Exception):
+                    raise item
+                if index < len(self.gop_timings):
+                    self.gop_timings[index]["tx_buffer_wait_s"] = wait_s
+                if wait_s >= 0.02:
+                    self.station.log(
+                        f"TX buffer warning: waited {wait_s * 1000:.0f} ms for GOP {index + 1}"
+                    )
+                index += 1
+                yield item
+
+        chunks = prepared_chunks()
+        flex_session = None
+        if (
+            self._ptt_override is None
+            and not settings.audio_only
+            and settings.cat_backend == "flex"
+            and settings.flex_native_audio
+        ):
+            flex_session = FlexVitaSession(
+                settings.flex_host,
+                frequency_mhz=settings.freq_mhz,
+                mode=settings.require_mode or "DIGU",
+                power=settings.flex_power,
+                filter_low=int(AETV_MODES[settings.mode].geometry.tx_bandpass[0]),
+                filter_high=int(AETV_MODES[settings.mode].geometry.tx_bandpass[1]),
+            )
+            # Stream creation and DAX ownership must complete while receiving;
+            # otherwise the first VITA packets can arrive before the radio has
+            # associated this client with its transmit-audio stream.
+            flex_session.prepare_tx()
+            ptt = flex_session
+        elif self._ptt_override is not None:
+            ptt = self._ptt_override
+        elif settings.audio_only:
+            ptt = NullPtt()
+        else:
+            ptt = open_ptt(self.station.cat_config())
+        # Each synchronized chunk is about 1.34 seconds. Encoding time does not
+        # count against this generous watchdog allowance.
+        watchdog = _PttWatchdog(
+            ptt,
+            timeout_s=settings.ptt_lead_s + n_gops * 3.0 + settings.ptt_tail_s + WATCHDOG_MARGIN_S,
+            on_fire=lambda: self._on_error("PTT watchdog fired; forcing receive"),
+        )
+        try:
+            self._set(TxPhase.KEYING, 0.0, ptt.describe())
+            if not self._key(ptt, True):
+                self._set(TxPhase.FAILED, 0.0, "PTT on failed")
+                return False
+            watchdog.start()
+            if self._cancel.wait(settings.ptt_lead_s):
+                return False
+            self._set(TxPhase.SENDING, 0.0, "encoding and sending live GOPs")
+            if flex_session is not None:
+                completed = flex_session.send_audio_stream(
+                    chunks,
+                    fs,
+                    should_stop=self._cancel.is_set,
+                    on_chunk=lambda count: self._report_progress(
+                        count / max(1, n_gops)
+                    ),
+                )
+            else:
+                completed = play_chunk_stream(
+                    chunks,
+                    fs,
+                    device=settings.audio_output or None,
+                    should_stop=self._cancel.is_set,
+                    on_chunk=lambda count: self._report_progress(count / max(1, n_gops)),
+                )
+            if not completed:
+                self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+                return False
+            self._set(TxPhase.UNKEYING, 1.0, "unkeying")
+            self._cancel.wait(settings.ptt_tail_s)
+        except Exception as error:
+            self._on_error(str(error))
+            self._set(TxPhase.FAILED, self.state.progress, str(error))
+            return False
+        finally:
+            producer_stop.set()
+            watchdog.cancel()
+            self._key(ptt, False)
+            try:
+                ptt.close()
+            except Exception:
+                pass
+            producer.join(timeout=30.0)
+        self._set(TxPhase.DONE, 1.0, "sent")
+        return True
+
+    def _live_webcam_gops(self, codec, n_gops: int):
+        """Capture, encode, and yield camera GOPs while the prior GOP transmits."""
+        mode = codec.mode
+        camera_frames = iter_webcam(mode, camera=self.station.settings.camera_index)
+        try:
+            for index in range(n_gops):
+                capture_started = time.perf_counter()
+                frames = []
+                for _ in range(mode.gop_frames):
+                    if self._cancel.is_set():
+                        return
+                    frames.append(next(camera_frames))
+                gop = np.stack(frames, axis=0)
+                self.last_frames = gop
+                self._on_preview(gop)
+                phase = (
+                    TxPhase.SENDING
+                    if self.state.phase in {TxPhase.KEYING, TxPhase.SENDING}
+                    else TxPhase.CAPTURING
+                )
+                self._set(
+                    phase,
+                    index / max(1, n_gops),
+                    f"live GOP {index + 1}/{n_gops}: encoding",
+                )
+                with self.station.codec_lock:
+                    encode_started = time.perf_counter()
+                    latent = codec.encode_gop(gop)
+                self.gop_timings.append(
+                    {
+                        "gop": index + 1,
+                        "device": str(getattr(codec, "device", "unknown")),
+                        "capture_s": encode_started - capture_started,
+                        "encode_s": time.perf_counter() - encode_started,
+                        "prepare_s": time.perf_counter() - capture_started,
+                    }
+                )
+                yield latent
+        finally:
+            close = getattr(camera_frames, "close", None)
+            if close is not None:
+                close()
+
+    def _key(self, ptt, on: bool) -> bool:
         try:
             ptt.set_ptt(on)
+            return True
         except Exception as error:
             if on:
                 self._on_error(f"PTT on failed: {error}")
             else:
                 self._on_error(f"PTT OFF FAILED: {error} — the rig may still be transmitting")
+            return False
 
     def _report_progress(self, frac: float) -> None:
         self.state.progress = float(frac)
@@ -306,10 +702,17 @@ class RxEngine:
         self._thread: threading.Thread | None = None
         self._stream = None
         self._kiwi: KiwiCapture | None = None
+        self._flex: FlexVitaSession | None = None
         self.ring: RingBuffer | None = None
         self.state = RxState()
         self.last_video: np.ndarray | None = None
         self._shown_gops = 0
+        self._stream_decoder: StreamingDemodulator | None = None
+        self._kiwi_discontinuity = threading.Event()
+        self._read_cursor = 0
+        self._last_result = None
+        self._debug_log: _JsonlRecorder | None = None
+        self._iq_recorder: _KiwiIqRecorder | None = None
 
     @property
     def listening(self) -> bool:
@@ -322,7 +725,30 @@ class RxEngine:
         settings = self.station.settings
         self._stop.clear()
         self._shown_gops = 0
+        self.last_video = None
+        self._last_result = None
         self.ring = RingBuffer(settings.buffer_seconds, codec.mode.geometry.fs)
+        if settings.debug_capture:
+            prefix = _debug_prefix(settings, f"rx_{settings.rx_source}")
+            self._debug_log = _JsonlRecorder(prefix.with_suffix(".modem.jsonl"))
+            self.station.log(f"RX modem debug: {self._debug_log.path}")
+            if settings.rx_source == "kiwi":
+                self._iq_recorder = _KiwiIqRecorder(
+                    prefix,
+                    {
+                        "started_at": time.time(),
+                        "host": settings.kiwi_host,
+                        "dial_mhz": settings.kiwi_dial_mhz,
+                        "iq_center_khz": codec.mode.geometry.fcenter_hz / 1000.0
+                        + settings.kiwi_dial_mhz * 1000.0,
+                        "mode": codec.mode.name,
+                        "destination_rate": codec.mode.geometry.fs,
+                    },
+                )
+                self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
+        self._stream_decoder = self._new_demodulator(codec.mode.band)
+        self._kiwi_discontinuity.clear()
+        self._read_cursor = 0
         self._on_ring(self.ring)
         self.state = RxState(listening=True, source=settings.rx_source, message="starting")
         self._on_state(self.state)
@@ -337,8 +763,25 @@ class RxEngine:
                 password=settings.kiwi_password,
                 on_status=self._on_kiwi_status,
                 on_error=self._on_error,
+                on_discontinuity=self._on_kiwi_discontinuity,
+                on_iq=self._record_kiwi_iq,
             )
             self._kiwi.start()
+        elif settings.rx_source == "flex":
+            self._flex = FlexVitaSession(
+                settings.flex_host,
+                frequency_mhz=settings.freq_mhz,
+                mode=settings.require_mode or "DIGU",
+                power=settings.flex_power,
+                filter_low=int(codec.mode.geometry.tx_bandpass[0]),
+                filter_high=int(codec.mode.geometry.tx_bandpass[1]),
+            )
+            if codec.mode.geometry.fs == 24000:
+                write_flex = self.ring.write
+            else:
+                resample_flex = StreamResampler(*resample_ratio(24000, codec.mode.geometry.fs))
+                write_flex = lambda chunk: self.ring.write(resample_flex(chunk))
+            self._flex.start_rx(write_flex)
         else:
             self._stream, _rate = open_input_stream(
                 settings.audio_input or None,
@@ -361,11 +804,22 @@ class RxEngine:
             except Exception:
                 pass
             self._stream = None
+        if self._flex is not None:
+            self._flex.close()
+            self._flex = None
         thread = self._thread
         if thread is not None:
             thread.join(timeout=4.0)
         self._thread = None
+        if self.station.settings.autosave and self.last_video is not None and self._last_result is not None:
+            self._autosave(self.last_video, self._last_result)
         self.ring = None
+        if self._iq_recorder is not None:
+            self._iq_recorder.close()
+            self._iq_recorder = None
+        if self._debug_log is not None:
+            self._debug_log.close()
+            self._debug_log = None
         self._on_ring(None)
         self.state = RxState(listening=False, message="stopped")
         self._on_state(self.state)
@@ -375,26 +829,91 @@ class RxEngine:
         self.state.source = "kiwi"
         self._on_state(self.state)
 
+    def _record_kiwi_iq(self, iq: np.ndarray, rate: float, sequence: int) -> None:
+        if self._iq_recorder is not None:
+            self._iq_recorder.write(iq, rate, sequence)
+
+    def _on_kiwi_discontinuity(self) -> None:
+        if self._iq_recorder is not None:
+            self._iq_recorder.discontinuity("Kiwi sequence gap or reconnect")
+        self._kiwi_discontinuity.set()
+
+    def _record_modem_debug(self, event: dict) -> None:
+        if self._debug_log is not None:
+            self._debug_log.write(event)
+
+    def _new_demodulator(self, band: str) -> StreamingDemodulator:
+        return StreamingDemodulator(
+            band,
+            on_debug=self._record_modem_debug,
+            continuous=True,
+            mode_name=self.station.settings.mode,
+        )
+
     def _loop(self) -> None:
         codec = self.station.require_codec()
-        while not self._stop.wait(self.station.settings.decode_every_s):
+        interval = max(0.05, float(self.station.settings.decode_every_s))
+        next_poll = time.monotonic()
+        while True:
+            if self._stop.wait(max(0.0, next_poll - time.monotonic())):
+                break
+            next_poll += interval
             ring = self.ring
             if ring is None:
                 break
-            audio, _total = ring.snapshot()
-            if audio.size < codec.mode.geometry.fs:
-                self.state.message = "listening"
+            if self._kiwi_discontinuity.is_set():
+                self._kiwi_discontinuity.clear()
+                self._stream_decoder = self._new_demodulator(codec.mode.band)
+                # Drop every sample written before the reset. The interrupted
+                # GOP cannot be repaired live; the next independently framed
+                # GOP will provide a fresh preamble and mode header.
+                _discarded, self._read_cursor, _overrun = ring.read_since(2**63 - 1)
+                self.state.message = "Kiwi stream gap; reacquiring next GOP"
                 self._on_state(self.state)
                 continue
+            audio, self._read_cursor, overrun = ring.read_since(self._read_cursor)
+            if overrun:
+                self._stream_decoder = self._new_demodulator(codec.mode.band)
+                self.state.message = "receive buffer overrun; reacquiring"
+            if audio.size == 0:
+                continue
             try:
-                with self.station.codec_lock:
-                    result = demodulate_gop_stream(audio, band=codec.mode.band, drift_track="off")
-                    if len(result.gops_latents) <= self._shown_gops:
-                        self._update_from_result(result, decoded=None)
-                        continue
-                    decoded = []
+                demodulator = self._stream_decoder
+                if demodulator is None:
+                    demodulator = self._stream_decoder = self._new_demodulator(codec.mode.band)
+                demod_started = time.perf_counter()
+                results = demodulator.feed(audio)
+                demod_s = time.perf_counter() - demod_started
+                for result in results:
                     for latents, weights in zip(result.gops_latents, result.gops_weights):
-                        decoded.append(codec.decode_gop(latents, weights))
+                        decode_started = time.perf_counter()
+                        with self.station.codec_lock:
+                            decoded = codec.decode_gop(latents, weights)
+                        decode_s = time.perf_counter() - decode_started
+                        with ring.lock:
+                            backlog_s = max(
+                                0.0,
+                                (ring.total_written - self._read_cursor) / ring.fs,
+                            )
+                        self._record_modem_debug(
+                            {
+                                "event": "gop_decoded",
+                                "time": time.time(),
+                                "device": str(codec.device),
+                                "decode_ms": 1000.0 * decode_s,
+                                "demod_batch_ms": 1000.0 * demod_s,
+                                "rx_backlog_s": backlog_s,
+                            }
+                        )
+                        self._shown_gops += 1
+                        self._last_result = result
+                        if self.last_video is None:
+                            self.last_video = decoded
+                        else:
+                            self.last_video = np.concatenate([self.last_video, decoded], axis=0)
+                            max_frames = codec.mode.gop_frames * 300
+                            self.last_video = self.last_video[-max_frames:]
+                        self._update_from_result(result, decoded)
             except SyncError as error:
                 self.state.message = str(error)
                 self._on_state(self.state)
@@ -402,24 +921,21 @@ class RxEngine:
             except Exception as error:
                 self._on_error(str(error))
                 continue
-            video = np.concatenate(decoded, axis=0)
-            self.last_video = video
-            self._shown_gops = len(result.gops_latents)
-            self._update_from_result(result, video)
-            if self.station.settings.autosave:
-                self._autosave(video, result)
+            if next_poll < time.monotonic():
+                next_poll = time.monotonic()
 
     def _update_from_result(self, result, decoded) -> None:
+        identity = f"de {result.callsign}" if result.callsign else "beacon acquiring"
         self.state = RxState(
             listening=True,
             source=self.station.settings.rx_source,
-            gops=len(result.gops_latents),
-            frames=result.frames_received,
+            gops=self._shown_gops,
+            frames=self._shown_gops * AETV_MODES[self.station.settings.mode].gop_frames,
             freq_offset=result.freq_offset,
             sync_metric=result.sync_metric,
             snr_db=result.snr_db,
             callsign=result.callsign,
-            message=f"de {result.callsign or '????'}  {len(result.gops_latents)} GOP  SNR {result.snr_db:.1f} dB",
+            message=f"{identity}  {self._shown_gops} GOP  SNR {result.snr_db:.1f} dB",
         )
         self._on_state(self.state)
         if decoded is not None:

@@ -169,9 +169,7 @@ def cmd_devices(_args) -> int:
 
 
 def cmd_train(args) -> int:
-    from pathlib import Path as P
-
-    script = P(__file__).resolve().parent.parent / "scripts" / "train.py"
+    script = _script_path("train.py")
     return _exec_script(script, args.train_args)
 
 
@@ -199,13 +197,21 @@ def cmd_kiwi_list(args) -> int:
 
 
 def cmd_eval(args) -> int:
-    from pathlib import Path as P
-
-    script = P(__file__).resolve().parent.parent / "scripts" / "eval.py"
+    script = _script_path("eval.py")
     forwarded = list(args.eval_args)
     if args.checkpoint and "--checkpoint" not in forwarded:
         forwarded = ["--checkpoint", args.checkpoint, *forwarded]
     return _exec_script(script, forwarded)
+
+
+def _script_path(name: str) -> Path:
+    """Find a research script in either a source checkout or an installed wheel."""
+    package_dir = Path(__file__).resolve().parent
+    candidates = (package_dir / "_scripts" / name, package_dir.parent / "scripts" / name)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(f"AETV installation is missing its {name} script")
 
 
 def _exec_script(script: Path, extra: list[str]) -> int:

@@ -572,7 +572,7 @@ def main():
     ap.add_argument("--eval-interval", type=int, default=2000, help="Steps between modem evaluation runs")
     ap.add_argument("--tb-interval", type=int, default=50, help="Steps between TensorBoard scalar log updates")
     ap.add_argument("--checkpoint-interval", type=int, default=5000, help="Steps between saving model checkpoints")
-    ap.add_argument("--clean-warmup", type=int, default=0, help="Steps with 100% clean reconstruction warmup")
+    ap.add_argument("--clean-warmup", type=int, default=0, help="Steps with 100%% clean reconstruction warmup")
     ap.add_argument("--channel-ramp", type=int, default=1500, help="Steps to ramp channel noise from 0 to full")
     ap.add_argument("--batch", type=int, default=4, help="Batch size")
     ap.add_argument("--accum", type=int, default=1, help="Gradient accumulation steps")

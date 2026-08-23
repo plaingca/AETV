@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import numpy as np
@@ -11,18 +12,32 @@ import torch
 from .config import AETV_MODES, AETVModeSpec
 from .models import AETVAutoencoder
 
-DEFAULT_CHECKPOINT = Path(__file__).resolve().parent.parent / "models" / "v7-flex8k.pt"
+DEFAULT_CHECKPOINT = Path("models") / "v7-flex8k.pt"
 DEFAULT_MODE = "V7"
 
 
 def resolve_checkpoint(path: str | Path | None = None) -> Path:
     """Return the checkpoint path, or raise with install instructions."""
-    candidate = Path(path) if path else DEFAULT_CHECKPOINT
-    if candidate.is_file():
-        return candidate
+    if path:
+        candidates = [Path(path).expanduser()]
+    else:
+        candidates = []
+        if configured := os.environ.get("AETV_CHECKPOINT"):
+            candidates.append(Path(configured).expanduser())
+        candidates.extend(
+            (
+                DEFAULT_CHECKPOINT,
+                Path(__file__).resolve().parent.parent / DEFAULT_CHECKPOINT,
+            )
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(
-        f"AETV checkpoint not found at {candidate}.\n"
-        "Copy the published Flex-8k weights to models/v7-flex8k.pt, or pass --checkpoint."
+        f"AETV checkpoint not found (searched: {searched}).\n"
+        "Copy the published Flex-8k weights to models/v7-flex8k.pt, set "
+        "AETV_CHECKPOINT, or pass --checkpoint."
     )
 
 
@@ -70,7 +85,9 @@ class AETVCodec:
     def encode_gop(self, frames: np.ndarray) -> np.ndarray:
         """Encode (T, H, W, 3) uint8 or float frames to a GOP latent vector."""
         video = _to_nchw(frames, self.mode).to(self.device)
-        with torch.no_grad():
+        # This is the hot live path; the station model is never mutated.
+        # inference_mode also removes autograd's view/version bookkeeping.
+        with torch.inference_mode():
             latents = self.model.encoder(video)
         return latents.squeeze(0).float().cpu().numpy()
 
@@ -85,7 +102,7 @@ class AETVCodec:
             w = torch.ones_like(z)
         else:
             w = torch.from_numpy(np.asarray(weights, dtype=np.float32))[None].to(self.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             recon = self.model.decoder(
                 z,
                 w,

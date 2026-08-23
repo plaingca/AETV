@@ -16,16 +16,15 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "pillow>=10.0",
+    "torch>=2.2",
 ]
 
 [project.optional-dependencies]
 ham = [
-    "torch>=2.2",
     "sounddevice>=0.4.6",
     "opencv-python>=4.8",
 ]
 gui = [
-    "torch>=2.2",
     "sounddevice>=0.4.6",
     "opencv-python>=4.8",
     "pyside6>=6.6",
@@ -33,7 +32,6 @@ gui = [
     "pyserial>=3.5",
 ]
 train = [
-    "torch>=2.2",
     "torchvision>=0.17",
     "lpips>=0.1.4",
     "datasets>=2.18",
@@ -42,7 +40,6 @@ train = [
 ]
 dev = [
     "pytest>=8.0",
-    "torch>=2.2",
 ]
 
 [project.scripts]
@@ -50,7 +47,10 @@ aetv = "aetv.cli:main"
 aetv-gui = "aetv.gui.app:main"
 
 [project.urls]
-Homepage = "https://github.com/arodland/AETV"
+Homepage = "https://github.com/plaingca/AETV"
+Documentation = "https://github.com/plaingca/AETV#readme"
+Issues = "https://github.com/plaingca/AETV/issues"
+Source = "https://github.com/plaingca/AETV"
 
 [build-system]
 requires = ["hatchling"]
@@ -58,6 +58,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["aetv"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/train.py" = "aetv/_scripts/train.py"
+"scripts/eval.py" = "aetv/_scripts/eval.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

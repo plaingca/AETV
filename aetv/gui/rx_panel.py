@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QDoubleSpinBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from aetv.audio_io import AudioUnavailable, list_audio_devices
-from aetv.kiwi import KiwiReceiver, find_receivers
+from aetv.kiwi import KiwiReceiver, find_receivers, normalize_kiwi_host, probe_receiver
 from aetv.station import RxEngine, RxState
 from aetv.gui.widgets import ElidingLabel, VideoView
 
@@ -23,15 +24,25 @@ from aetv.gui.widgets import ElidingLabel, VideoView
 class _KiwiListThread(QThread):
     finished_list = Signal(object, str)
 
-    def __init__(self, lat: float, lon: float, max_km: float, parent=None):
+    def __init__(self, lat: float, lon: float, max_km: float, configured_host: str = "", parent=None):
         super().__init__(parent)
         self._lat = lat
         self._lon = lon
         self._max_km = max_km
+        try:
+            self._configured_host = normalize_kiwi_host(configured_host)
+        except ValueError:
+            self._configured_host = ""
 
     def run(self) -> None:
         try:
             receivers = find_receivers(self._lat, self._lon, max_km=self._max_km)
+            if self._configured_host and not any(
+                item.host == self._configured_host for item in receivers
+            ):
+                configured = probe_receiver(self._configured_host, timeout=4.0)
+                if configured is not None:
+                    receivers.insert(0, configured)
             self.finished_list.emit(receivers, "")
         except Exception as error:
             self.finished_list.emit([], str(error))
@@ -82,10 +93,16 @@ class ReceivePanel(QWidget):
         self.source.setCurrentIndex(max(0, self.source.findData(settings.rx_source)))
         self._fill_inputs()
         self.kiwi_host.setText(settings.kiwi_host)
+        self.kiwi_dial.setValue(settings.kiwi_dial_mhz)
         self._sync_source_visibility()
 
     def start(self) -> bool:
-        self._apply_panel_settings()
+        try:
+            self._apply_panel_settings()
+        except ValueError as error:
+            self.status.setText(str(error))
+            self.statusChanged.emit(str(error))
+            return False
         problems = self.station.settings.validate()
         if self.station.settings.rx_source == "kiwi" and not self.station.settings.kiwi_host:
             problems.append("pick a KiwiSDR or type a host:port")
@@ -94,6 +111,7 @@ class ReceivePanel(QWidget):
             self.statusChanged.emit(problems[0])
             return False
         try:
+            self.preview.clear()
             self.engine.start()
         except Exception as error:
             self.status.setText(str(error))
@@ -130,16 +148,23 @@ class ReceivePanel(QWidget):
         self.progress.setValue(0)
         self.source = QComboBox()
         self.source.addItem("Soundcard", "soundcard")
-        self.source.addItem("KiwiSDR", "kiwi")
+        self.source.addItem("FlexRadio (network)", "flex")
+        self.source.addItem("Public KiwiSDR", "kiwi")
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
         self.kiwi_host = QLineEdit()
-        self.kiwi_host.setPlaceholderText("host:8073")
+        self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
+        self.kiwi_host.editingFinished.connect(self._normalize_kiwi_entry)
         self.kiwi_list = QComboBox()
         self.kiwi_list.setMinimumWidth(180)
         self.kiwi_list.activated.connect(self._apply_kiwi_choice)
-        refresh_audio = QPushButton("Refresh")
-        refresh_audio.clicked.connect(self._fill_inputs)
+        self.kiwi_dial = QDoubleSpinBox()
+        self.kiwi_dial.setDecimals(6)
+        self.kiwi_dial.setRange(0.1, 30.0)
+        self.kiwi_dial.setSingleStep(0.001)
+        self.kiwi_dial.setSuffix(" MHz")
+        self.refresh_audio = QPushButton("Refresh")
+        self.refresh_audio.clicked.connect(self._fill_inputs)
         self.find_button = QPushButton("Find Kiwis")
         self.find_button.clicked.connect(self._refresh_kiwis)
         self.start_button = QPushButton("Start receiving")
@@ -157,10 +182,14 @@ class ReceivePanel(QWidget):
         row1.addWidget(QLabel("Source"))
         row1.addWidget(self.source)
         row1.addWidget(self.input_device, 1)
-        row1.addWidget(refresh_audio)
+        row1.addWidget(self.refresh_audio)
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Kiwi"))
+        self.kiwi_label = QLabel("Remote receiver")
+        row2.addWidget(self.kiwi_label)
         row2.addWidget(self.kiwi_host, 1)
+        self.kiwi_dial_label = QLabel("TX dial")
+        row2.addWidget(self.kiwi_dial_label)
+        row2.addWidget(self.kiwi_dial)
         row2.addWidget(self.kiwi_list, 1)
         row2.addWidget(self.find_button)
         buttons = QHBoxLayout()
@@ -180,10 +209,16 @@ class ReceivePanel(QWidget):
         self.sync_from_config()
 
     def _sync_source_visibility(self) -> None:
-        kiwi = self.source.currentData() == "kiwi"
-        self.input_device.setVisible(not kiwi)
+        source = self.source.currentData()
+        kiwi = source == "kiwi"
+        soundcard = source == "soundcard"
+        self.input_device.setVisible(soundcard)
+        self.refresh_audio.setVisible(soundcard)
+        self.kiwi_label.setVisible(kiwi)
         self.kiwi_host.setVisible(kiwi)
         self.kiwi_list.setVisible(kiwi)
+        self.kiwi_dial_label.setVisible(kiwi)
+        self.kiwi_dial.setVisible(kiwi)
         self.find_button.setVisible(kiwi)
 
     def _fill_inputs(self) -> None:
@@ -203,7 +238,9 @@ class ReceivePanel(QWidget):
         settings = self.station.settings
         settings.rx_source = self.source.currentData()
         settings.audio_input = self.input_device.currentData() or ""
-        settings.kiwi_host = self.kiwi_host.text().strip()
+        settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
+        self.kiwi_host.setText(settings.kiwi_host)
+        settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
 
     def _refresh_kiwis(self) -> None:
         if self._kiwi_thread is not None and self._kiwi_thread.isRunning():
@@ -211,7 +248,13 @@ class ReceivePanel(QWidget):
         settings = self.station.settings
         self.find_button.setEnabled(False)
         self.status.setText("searching public KiwiSDR list…")
-        self._kiwi_thread = _KiwiListThread(settings.kiwi_lat, settings.kiwi_lon, settings.kiwi_max_km, self)
+        self._kiwi_thread = _KiwiListThread(
+            settings.kiwi_lat,
+            settings.kiwi_lon,
+            settings.kiwi_max_km,
+            self.kiwi_host.text(),
+            self,
+        )
         self._kiwi_thread.finished_list.connect(self._on_kiwi_list)
         self._kiwi_thread.start()
 
@@ -224,24 +267,58 @@ class ReceivePanel(QWidget):
         self._receivers = list(receivers)
         self.kiwi_list.clear()
         usable = [item for item in self._receivers if item.usable]
-        shown = usable or self._receivers[:40]
+        try:
+            current = normalize_kiwi_host(self.kiwi_host.text())
+        except ValueError:
+            current = self.kiwi_host.text().strip()
+        shown = self._receivers[:100]
+        if current and not any(item.host == current for item in shown):
+            self.kiwi_list.addItem(f"configured  {current}", current)
         if not shown:
-            self.kiwi_list.addItem("no reachable receivers", "")
-            self.status.setText("no reachable KiwiSDRs in range")
+            if not current:
+                self.kiwi_list.addItem("no reachable receivers", "")
+                self.status.setText("no reachable KiwiSDRs in range")
+            else:
+                self.status.setText("configured receiver retained; no directory results")
             return
         for item in shown:
-            mark = "API" if item.usable else "busy"
+            if item.offline != "no":
+                mark = "offline"
+            elif item.ext_api <= 0:
+                mark = "browser only"
+            elif item.free <= 0:
+                mark = f"full · API {item.ext_api}"
+            else:
+                mark = f"API {item.ext_api}"
+            if item.host == current:
+                mark = f"current · {mark}"
             self.kiwi_list.addItem(f"{mark}  {item.label()}", item.host)
-        self.status.setText(f"{len(usable)} usable of {len(self._receivers)} reachable")
-        if usable:
+        self.status.setText(f"{len(usable)} usable of {len(self._receivers)} listed nearby")
+        if not current and usable:
             self.kiwi_host.setText(usable[0].host)
             self.station.settings.kiwi_host = usable[0].host
+        elif current:
+            index = self.kiwi_list.findData(current)
+            if index >= 0:
+                self.kiwi_list.setCurrentIndex(index)
 
     def _apply_kiwi_choice(self, index: int) -> None:
         host = self.kiwi_list.itemData(index)
         if host:
             self.kiwi_host.setText(str(host))
             self.station.settings.kiwi_host = str(host)
+
+    def _normalize_kiwi_entry(self) -> None:
+        text = self.kiwi_host.text().strip()
+        if not text:
+            return
+        try:
+            host = normalize_kiwi_host(text)
+        except ValueError as error:
+            self.status.setText(str(error))
+            return
+        self.kiwi_host.setText(host)
+        self.station.settings.kiwi_host = host
 
     def _set_listening(self, on: bool) -> None:
         self.start_button.setEnabled(not on)
@@ -258,7 +335,13 @@ class ReceivePanel(QWidget):
         self.logMessage.emit(message)
 
     def _show_video(self, video, state: RxState) -> None:
-        self.preview.set_rgb(video)
+        mode = self.station.require_codec().mode
+        self.preview.enqueue_rgb(
+            video,
+            fps=mode.fps,
+            prebuffer_frames=2 * mode.gop_frames,
+            boundary_blend_frames=4,
+        )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
         self.progress.setValue(min(100, max(5, state.gops * 8)))

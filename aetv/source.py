@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -15,6 +17,13 @@ def list_cameras(max_index: int = 8) -> list[dict]:
     """Probe local camera indices. Names are best-effort; Windows has no stable API."""
     import cv2
     import sys
+
+    if sys.platform == "win32":
+        # Repeated DirectShow VideoCapture open/close calls are not merely slow:
+        # several consumer webcam drivers corrupt the process heap during
+        # enumeration.  Offer stable index choices and let the persistent
+        # preview open only the selected device.
+        return [{"index": index, "name": f"Camera {index}"} for index in range(min(4, max_index))]
 
     backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
     found: list[dict] = []
@@ -54,27 +63,91 @@ def iter_webcam(
     camera: int = 0,
     duration_s: float | None = None,
 ) -> Iterator[np.ndarray]:
-    """Yield (H, W, 3) uint8 frames from a local camera at the mode frame rate."""
+    """Yield the newest camera frame on a monotonic mode-rate clock.
+
+    Camera backends commonly queue frames internally. Reading only when the
+    encoder asks for a frame therefore returns old frames in a burst whenever
+    the TX producer was blocked by its rolling buffer. A dedicated reader
+    continuously drains the driver; this sampler selects its newest frame at
+    uniform wall-clock intervals and never tries to catch up missed ticks.
+    """
     import cv2
     import sys
 
     backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-    capture = cv2.VideoCapture(camera, backend)
-    if not capture.isOpened():
-        raise RuntimeError(f"could not open webcam index {camera}")
-    capture.set(cv2.CAP_PROP_FPS, mode.fps)
+    condition = threading.Condition()
+    stop = threading.Event()
+    state: dict = {"frame": None, "sequence": 0, "error": None, "capture": None}
+
+    def drain_camera() -> None:
+        capture = cv2.VideoCapture(camera, backend)
+        state["capture"] = capture
+        if not capture.isOpened():
+            with condition:
+                state["error"] = RuntimeError(f"could not open webcam index {camera}")
+                condition.notify_all()
+            capture.release()
+            return
+        # Ask for a native rate comfortably above AETV's sampling rate and
+        # minimize backend buffering where the property is honored.
+        capture.set(cv2.CAP_PROP_FPS, max(30.0, float(mode.fps)))
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        try:
+            while not stop.is_set():
+                ok, frame = capture.read()
+                if not ok:
+                    with condition:
+                        state["error"] = RuntimeError("webcam stopped delivering frames")
+                        condition.notify_all()
+                    return
+                with condition:
+                    state["frame"] = frame
+                    state["sequence"] += 1
+                    condition.notify_all()
+        finally:
+            capture.release()
+
+    reader = threading.Thread(
+        target=drain_camera, daemon=True, name=f"aetv-camera-{camera}"
+    )
+    reader.start()
     try:
         limit = None if duration_s is None else int(round(duration_s * mode.fps))
         produced = 0
+        with condition:
+            ready_until = time.monotonic() + 10.0
+            while state["frame"] is None and state["error"] is None:
+                remaining = ready_until - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"webcam index {camera} did not deliver a frame")
+                condition.wait(remaining)
+            if state["error"] is not None:
+                raise state["error"]
+
+        period = 1.0 / mode.fps
+        next_frame_at = time.monotonic()
         while limit is None or produced < limit:
-            ok, frame = capture.read()
-            if not ok:
-                raise RuntimeError("webcam stopped delivering frames")
+            delay = next_frame_at - time.monotonic()
+            if delay > 0 and stop.wait(delay):
+                return
+            with condition:
+                if state["error"] is not None:
+                    raise state["error"]
+                frame = state["frame"].copy()
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             yield resize_frame(rgb, mode.width, mode.height)
             produced += 1
+            next_frame_at += period
+            # A paused consumer must resume from "now", not rapidly consume
+            # every sampling deadline it missed while the TX queue was full.
+            next_frame_at = max(next_frame_at, time.monotonic())
     finally:
-        capture.release()
+        stop.set()
+        reader.join(timeout=2.0)
+        if reader.is_alive() and state["capture"] is not None:
+            # Best effort to unblock a backend stuck in read().
+            state["capture"].release()
+            reader.join(timeout=1.0)
 
 
 def iter_video_file(

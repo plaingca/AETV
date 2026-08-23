@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -15,6 +17,39 @@ from PySide6.QtWidgets import (
 
 CANVAS = QColor("#202024")
 CANVAS_TEXT = QColor("#888888")
+
+
+def blend_gop_boundary(
+    previous: np.ndarray | None,
+    frames: np.ndarray,
+    transition_frames: int = 4,
+) -> np.ndarray:
+    """Fade an independently decoded GOP onto the previous final frame.
+
+    Rather than duplicating or inserting pictures, apply the first-frame
+    reconstruction offset to the beginning of the new GOP and taper it to
+    zero.  Each new frame keeps its own motion, the stream stays at its native
+    frame rate, and the one-second codec boundary becomes a short transition.
+    """
+    values = np.asarray(frames)
+    if (
+        previous is None
+        or values.ndim != 4
+        or values.shape[0] == 0
+        or previous.shape != values.shape[1:]
+        or transition_frames <= 0
+    ):
+        return values
+    count = min(int(transition_frames), len(values))
+    output = values.copy()
+    correction = previous.astype(np.float32) - values[0].astype(np.float32)
+    # Leave 20% of the new reconstruction visible on its first frame, then
+    # smoothly remove the concealment over about one third of a second at 12 fps.
+    weights = np.linspace(0.8, 0.0, count, endpoint=True, dtype=np.float32)
+    for index, weight in enumerate(weights):
+        blended = values[index].astype(np.float32) + weight * correction
+        output[index] = np.clip(np.rint(blended), 0, 255).astype(values.dtype)
+    return output
 
 
 class ElidingLabel(QLabel):
@@ -43,6 +78,11 @@ class VideoView(QWidget):
         super().__init__(parent)
         self._placeholder = placeholder
         self._pixmap = QPixmap()
+        self._frames = deque(maxlen=120)
+        self._last_enqueued_frame: np.ndarray | None = None
+        self._fps = 12.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._advance_frame)
         self.setMinimumSize(240, 135)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAutoFillBackground(False)
@@ -52,14 +92,72 @@ class VideoView(QWidget):
         self.update()
 
     def clear(self) -> None:
+        self._timer.stop()
+        self._frames.clear()
+        self._last_enqueued_frame = None
         self._pixmap = QPixmap()
         self.update()
 
-    def set_rgb(self, frames: np.ndarray) -> None:
+    def set_rgb(self, frames: np.ndarray, fps: float | None = None) -> None:
         if frames is None or frames.size == 0:
             self.clear()
             return
-        frame = frames[-1] if frames.ndim == 4 else frames
+        if fps is not None and fps > 0:
+            self._fps = float(fps)
+        if frames.ndim == 4:
+            # A GOP is a new presentation window. Do not let delayed GUI
+            # paints turn into seconds of stale camera or receive playback.
+            self._frames.clear()
+            self._frames.extend(np.ascontiguousarray(frame).copy() for frame in frames)
+            if not self._timer.isActive():
+                self._advance_frame()
+                self._timer.start(max(1, round(1000.0 / self._fps)))
+            return
+        # A live single-frame preview always supersedes queued GOP playback.
+        self._timer.stop()
+        self._frames.clear()
+        self._show_frame(frames)
+
+    def enqueue_rgb(
+        self,
+        frames: np.ndarray,
+        *,
+        fps: float,
+        prebuffer_frames: int = 24,
+        boundary_blend_frames: int = 4,
+    ) -> None:
+        """Queue decoded frames for clocked, jitter-buffered receive playout."""
+        if frames is None or frames.size == 0:
+            return
+        if fps > 0:
+            self._fps = float(fps)
+        values = frames if frames.ndim == 4 else frames[np.newaxis, ...]
+        values = blend_gop_boundary(
+            self._last_enqueued_frame,
+            values,
+            transition_frames=boundary_blend_frames,
+        )
+        self._last_enqueued_frame = np.ascontiguousarray(values[-1]).copy()
+        self._frames.extend(
+            np.ascontiguousarray(frame).copy() for frame in values
+        )
+        if self._timer.isActive():
+            return
+        # After startup or an underrun, hold the last picture until enough
+        # decoded material is available to ride through the GUI's batched GOP
+        # delivery. Playback itself remains locked to the advertised frame rate.
+        if len(self._frames) < max(1, int(prebuffer_frames)):
+            return
+        self._advance_frame()
+        self._timer.start(max(1, round(1000.0 / self._fps)))
+
+    def _advance_frame(self) -> None:
+        if not self._frames:
+            self._timer.stop()
+            return
+        self._show_frame(self._frames.popleft())
+
+    def _show_frame(self, frame: np.ndarray) -> None:
         if frame.ndim != 3 or frame.shape[2] != 3:
             return
         height, width = frame.shape[:2]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,8 +23,10 @@ from PySide6.QtWidgets import (
 )
 
 from aetv.audio_io import AudioUnavailable, list_audio_devices
-from aetv.cat import CatConfig, list_serial_ports, open_ptt
+from aetv.cat import CatConfig, list_hamlib_models, list_serial_ports, open_ptt
 from aetv.config import AETV_MODES
+from aetv.flex import FlexRadioInfo, discover_radios, with_probed_path_mtu
+from aetv.kiwi import normalize_kiwi_host
 from aetv.settings import StationSettings, normalize_callsign
 from aetv.source import list_cameras
 
@@ -55,17 +57,51 @@ class _CatTestThread(QThread):
             self.finished_ok.emit(False, str(error))
 
 
+class _FlexDiscoveryThread(QThread):
+    finished_list = Signal(object, str)
+
+    def __init__(self, configured_host: str = "", parent=None):
+        super().__init__(parent)
+        self._configured_host = configured_host.strip()
+
+    def run(self) -> None:
+        try:
+            radios = discover_radios(2.0)
+            if self._configured_host and not any(
+                radio.ip == self._configured_host for radio in radios
+            ):
+                # Routed VPNs often do not carry discovery broadcasts. Keep a
+                # manually configured radio in the list and probe it directly.
+                radios.append(
+                    FlexRadioInfo(
+                        ip=self._configured_host,
+                        nickname="Configured FlexRadio",
+                    )
+                )
+            measured = []
+            for radio in radios:
+                try:
+                    radio = with_probed_path_mtu(radio, timeout=1.5)
+                except OSError:
+                    pass
+                measured.append(radio)
+            self.finished_list.emit(measured, "")
+        except Exception as error:
+            self.finished_list.emit([], str(error))
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: StationSettings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("AETV settings")
         self._settings = settings
         self._cat_thread: _CatTestThread | None = None
+        self._flex_thread: _FlexDiscoveryThread | None = None
         tabs = QTabWidget()
         tabs.addTab(self._station_tab(), "Station")
         tabs.addTab(self._audio_tab(), "Audio")
         tabs.addTab(self._rig_tab(), "Rig")
-        tabs.addTab(self._kiwi_tab(), "KiwiSDR")
+        tabs.addTab(self._kiwi_tab(), "Remote receiver")
         tabs.addTab(self._folders_tab(), "Folders")
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -76,6 +112,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs)
         layout.addWidget(buttons)
         self.resize(520, 480)
+        if self._settings.cat_backend == "flex" and self._settings.flex_host:
+            QTimer.singleShot(0, self._discover_flex)
 
     def apply_to(self, settings: StationSettings) -> None:
         settings.callsign = normalize_callsign(self.callsign.text()) or "N0CALL"
@@ -89,17 +127,27 @@ class SettingsDialog(QDialog):
         settings.audio_output = self.audio_output.currentData() or ""
         settings.rx_source = self.rx_source.currentData()
         settings.cat_backend = self.cat_backend.currentData()
-        settings.rigctld_host = self.rigctld_host.text().strip()
-        settings.rigctld_port = int(self.rigctld_port.value())
-        settings.flex_host = self.flex_host.text().strip()
+        settings.hamlib_model = int(self.hamlib_model.currentData() or 0)
+        settings.hamlib_device = self.hamlib_device.currentText().strip()
+        settings.hamlib_baud = int(self.hamlib_baud.currentData() or 0)
+        settings.flex_host = self.flex_radio.currentData() or self.flex_radio.currentText().strip()
         settings.flex_power = int(self.flex_power.value())
+        settings.flex_native_audio = self.flex_native_audio.isChecked()
+        if settings.cat_backend == "flex" and settings.flex_native_audio:
+            # A native Flex station should not silently keep listening to the
+            # system soundcard just because that was the old default.
+            settings.rx_source = "flex"
         settings.freq_mhz = self.freq_mhz.value() if self.freq_mhz.value() > 0 else None
         settings.require_mode = self.require_mode.text().strip() or "DIGU"
         settings.serial_port = self.serial_port.currentText().strip()
         settings.ptt_lead_s = float(self.ptt_lead.value())
         settings.ptt_tail_s = float(self.ptt_tail.value())
         settings.audio_only = self.audio_only.isChecked()
-        settings.kiwi_host = self.kiwi_host.text().strip()
+        kiwi_text = self.kiwi_host.text().strip()
+        try:
+            settings.kiwi_host = normalize_kiwi_host(kiwi_text)
+        except ValueError:
+            settings.kiwi_host = kiwi_text
         settings.kiwi_user = self.kiwi_user.text().strip()
         settings.kiwi_password = self.kiwi_password.text()
         settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
@@ -108,6 +156,7 @@ class SettingsDialog(QDialog):
         settings.kiwi_max_km = float(self.kiwi_max_km.value())
         settings.receive_dir = self.receive_dir.text().strip()
         settings.autosave = self.autosave.isChecked()
+        settings.debug_capture = self.debug_capture.isChecked()
         settings.buffer_seconds = float(self.buffer_s.value())
         settings.decode_every_s = float(self.decode_every.value())
 
@@ -168,14 +217,16 @@ class SettingsDialog(QDialog):
         refresh.clicked.connect(self._fill_audio)
         self.rx_source = QComboBox()
         self.rx_source.addItem("Soundcard", "soundcard")
-        self.rx_source.addItem("KiwiSDR (remote IQ)", "kiwi")
+        self.rx_source.addItem("FlexRadio network audio (automatic)", "flex")
+        self.rx_source.addItem("Public KiwiSDR (remote receive only)", "kiwi")
         self.rx_source.setCurrentIndex(max(0, self.rx_source.findData(self._settings.rx_source)))
         self.buffer_s = QDoubleSpinBox()
         self.buffer_s.setRange(20.0, 300.0)
         self.buffer_s.setValue(self._settings.buffer_seconds)
         self.buffer_s.setSuffix(" s")
         self.decode_every = QDoubleSpinBox()
-        self.decode_every.setRange(0.5, 10.0)
+        self.decode_every.setRange(0.05, 2.0)
+        self.decode_every.setSingleStep(0.05)
         self.decode_every.setValue(self._settings.decode_every_s)
         self.decode_every.setSuffix(" s")
         form.addRow("Receive source", self.rx_source)
@@ -183,7 +234,7 @@ class SettingsDialog(QDialog):
         form.addRow("Output (to radio)", self.audio_output)
         form.addRow("", refresh)
         form.addRow("Receive buffer", self.buffer_s)
-        form.addRow("Decode every", self.decode_every)
+        form.addRow("RX poll interval", self.decode_every)
         return page
 
     def _rig_tab(self) -> QWidget:
@@ -192,28 +243,55 @@ class SettingsDialog(QDialog):
         self.cat_backend = QComboBox()
         for value, label in (
             ("none", "None (VOX / manual PTT)"),
-            ("rigctld", "Hamlib rigctld (TCP)"),
-            ("flex", "FlexRadio 6000 (SmartSDR)"),
+            ("hamlib", "Hamlib — connect directly to my radio"),
+            ("flex", "FlexRadio — discover on my network"),
             ("rts", "Serial RTS"),
             ("dtr", "Serial DTR"),
         ):
             self.cat_backend.addItem(label, value)
         self.cat_backend.setCurrentIndex(max(0, self.cat_backend.findData(self._settings.cat_backend)))
-        self.rigctld_host = QLineEdit(self._settings.rigctld_host)
-        self.rigctld_port = QSpinBox()
-        self.rigctld_port.setRange(1, 65535)
-        self.rigctld_port.setValue(self._settings.rigctld_port)
-        self.flex_host = QLineEdit(self._settings.flex_host)
-        self.flex_host.setPlaceholderText("192.168.88.239")
+        self.hamlib_model = QComboBox()
+        self.hamlib_model.setEditable(True)
+        self.hamlib_model.addItem("Choose your radio…", 0)
+        for item in list_hamlib_models():
+            self.hamlib_model.addItem(item.label, item.model_id)
+        model_index = self.hamlib_model.findData(self._settings.hamlib_model)
+        if model_index >= 0:
+            self.hamlib_model.setCurrentIndex(model_index)
+        self.hamlib_device = QComboBox()
+        self.hamlib_device.setEditable(True)
+        self.hamlib_device.addItems(list_serial_ports())
+        self.hamlib_device.setCurrentText(self._settings.hamlib_device)
+        self.hamlib_device.setPlaceholderText("COM3 or network address")
+        self.hamlib_baud = QComboBox()
+        for baud in (0, 4800, 9600, 19200, 38400, 57600, 115200):
+            self.hamlib_baud.addItem("Radio default" if baud == 0 else str(baud), baud)
+        baud_index = self.hamlib_baud.findData(self._settings.hamlib_baud)
+        self.hamlib_baud.setCurrentIndex(max(0, baud_index))
+        self.flex_radio = QComboBox()
+        self.flex_radio.setEditable(True)
+        self.flex_radio.setPlaceholderText("Radio is discovered automatically")
+        if self._settings.flex_host:
+            self.flex_radio.addItem(self._settings.flex_host, self._settings.flex_host)
+        discover = QPushButton("Discover radios")
+        discover.clicked.connect(self._discover_flex)
+        flex_row = QWidget()
+        flex_layout = QHBoxLayout(flex_row)
+        flex_layout.setContentsMargins(0, 0, 0, 0)
+        flex_layout.addWidget(self.flex_radio, 1)
+        flex_layout.addWidget(discover)
+        self.flex_mtu = QLabel("Not measured")
         self.flex_power = QSpinBox()
         self.flex_power.setRange(1, 100)
         self.flex_power.setValue(self._settings.flex_power)
         self.flex_power.setSuffix(" W")
+        self.flex_native_audio = QCheckBox("Use direct VITA-49 network audio (no DAX device)")
+        self.flex_native_audio.setChecked(self._settings.flex_native_audio)
         self.freq_mhz = QDoubleSpinBox()
         self.freq_mhz.setDecimals(6)
-        self.freq_mhz.setRange(0.0, 30.0)
+        self.freq_mhz.setRange(0.0, 60.0)
         self.freq_mhz.setValue(self._settings.freq_mhz or 0.0)
-        self.freq_mhz.setSpecialValueText("do not check")
+        self.freq_mhz.setSpecialValueText("use current slice")
         self.require_mode = QLineEdit(self._settings.require_mode)
         self.serial_port = QComboBox()
         self.serial_port.setEditable(True)
@@ -230,7 +308,7 @@ class SettingsDialog(QDialog):
         self.ptt_tail.setSingleStep(0.05)
         self.ptt_tail.setSuffix(" s")
         self.ptt_tail.setValue(self._settings.ptt_tail_s)
-        self.audio_only = QCheckBox("Play DAX / soundcard without keying (audio-only)")
+        self.audio_only = QCheckBox("Send audio without keying (audio-only test)")
         self.audio_only.setChecked(self._settings.audio_only)
         test_cat = QPushButton("Test CAT")
         test_ptt = QPushButton("Test PTT")
@@ -242,12 +320,15 @@ class SettingsDialog(QDialog):
         row_l.addWidget(test_cat)
         row_l.addWidget(test_ptt)
         row_l.addStretch(1)
-        form.addRow("PTT method", self.cat_backend)
-        form.addRow("rigctld host", self.rigctld_host)
-        form.addRow("rigctld port", self.rigctld_port)
-        form.addRow("Flex host", self.flex_host)
+        form.addRow("Radio connection", self.cat_backend)
+        form.addRow("Hamlib radio", self.hamlib_model)
+        form.addRow("Radio device", self.hamlib_device)
+        form.addRow("Serial speed", self.hamlib_baud)
+        form.addRow("FlexRadio", flex_row)
+        form.addRow("Current path MTU", self.flex_mtu)
         form.addRow("Flex power", self.flex_power)
-        form.addRow("Check frequency (MHz)", self.freq_mhz)
+        form.addRow(self.flex_native_audio)
+        form.addRow("Operating frequency (MHz)", self.freq_mhz)
         form.addRow("Require mode", self.require_mode)
         form.addRow("Serial port", self.serial_port)
         form.addRow("PTT lead", self.ptt_lead)
@@ -255,18 +336,28 @@ class SettingsDialog(QDialog):
         form.addRow(self.audio_only)
         form.addRow(row)
         note = QLabel(
-            "Frequency and mode are checked, never set. Tune the radio first. "
-            "AETV V7 needs a wide DIGU slice, about 800–9200 Hz."
+            "Hamlib runs inside AETV; rigctld is not needed. FlexRadio control, "
+            "PTT, receive and transmit audio use the radio's native network APIs."
         )
         note.setWordWrap(True)
         form.addRow(note)
+        self.cat_backend.currentIndexChanged.connect(self._sync_rig_visibility)
+        self._rig_form = form
+        self._rig_fields = {
+            "hamlib": [self.hamlib_model, self.hamlib_device, self.hamlib_baud],
+            "flex": [flex_row, self.flex_mtu, self.flex_power, self.flex_native_audio],
+            "serial": [self.serial_port],
+        }
+        self._sync_rig_visibility()
+        self._flex_radios = {}
+        self.flex_radio.currentIndexChanged.connect(self._update_flex_mtu)
         return page
 
     def _kiwi_tab(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
         self.kiwi_host = QLineEdit(self._settings.kiwi_host)
-        self.kiwi_host.setPlaceholderText("host:8073")
+        self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
         self.kiwi_user = QLineEdit(self._settings.kiwi_user or self._settings.callsign)
         self.kiwi_password = QLineEdit(self._settings.kiwi_password)
         self.kiwi_password.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
@@ -290,14 +381,15 @@ class SettingsDialog(QDialog):
         form.addRow("Host", self.kiwi_host)
         form.addRow("Ident / user", self.kiwi_user)
         form.addRow("Password", self.kiwi_password)
-        form.addRow("USB dial", self.kiwi_dial)
+        form.addRow("AETV TX dial", self.kiwi_dial)
         form.addRow("Your latitude", self.kiwi_lat)
         form.addRow("Your longitude", self.kiwi_lon)
         form.addRow("Search radius", self.kiwi_max_km)
         note = QLabel(
             "The receive pane can refresh the public Kiwi list and pick a "
-            "receiver that still has an API channel. V7 is received as IQ "
-            "centred on dial + 5 kHz so the 8 kHz waveform fits the 12 kHz stream."
+            "receiver that still has an API channel. Enter the same suppressed-"
+            "carrier dial frequency used by the transmitter; AETV automatically "
+            "centres Kiwi IQ 5 kHz higher so the full waveform fits."
         )
         note.setWordWrap(True)
         form.addRow(note)
@@ -316,8 +408,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(browse)
         self.autosave = QCheckBox("Autosave each decoded reception")
         self.autosave.setChecked(self._settings.autosave)
+        self.debug_capture = QCheckBox("Save TX waveform, Kiwi IQ, and modem debug logs")
+        self.debug_capture.setChecked(self._settings.debug_capture)
         form.addRow("Received video", row)
         form.addRow(self.autosave)
+        form.addRow(self.debug_capture)
         return page
 
     def _fill_audio(self) -> None:
@@ -366,15 +461,71 @@ class SettingsDialog(QDialog):
         backend = self.cat_backend.currentData()
         return CatConfig(
             backend=backend,
-            rigctld_host=self.rigctld_host.text().strip(),
-            rigctld_port=int(self.rigctld_port.value()),
-            flex_host=self.flex_host.text().strip(),
+            hamlib_model=int(self.hamlib_model.currentData() or 0),
+            hamlib_device=self.hamlib_device.currentText().strip(),
+            hamlib_baud=int(self.hamlib_baud.currentData() or 0),
+            flex_host=self.flex_radio.currentData() or self.flex_radio.currentText().strip(),
             flex_power=int(self.flex_power.value()),
             freq_mhz=self.freq_mhz.value() if self.freq_mhz.value() > 0 else None,
             require_mode=self.require_mode.text().strip() or None,
             serial_port=self.serial_port.currentText().strip(),
             serial_line=backend if backend in {"rts", "dtr"} else "rts",
         )
+
+    def _sync_rig_visibility(self) -> None:
+        backend = self.cat_backend.currentData()
+        for group, widgets in self._rig_fields.items():
+            visible = (
+                backend == group
+                or (group == "serial" and backend in {"rts", "dtr"})
+            )
+            for widget in widgets:
+                widget.setVisible(visible)
+                label = self._rig_form.labelForField(widget)
+                if label is not None:
+                    label.setVisible(visible)
+
+    def _discover_flex(self) -> None:
+        if self._flex_thread is not None and self._flex_thread.isRunning():
+            return
+        self.flex_radio.clear()
+        self.flex_radio.addItem("Listening for radios…", "")
+        configured = self.flex_radio.currentData() or self.flex_radio.currentText().strip()
+        if not configured:
+            configured = self._settings.flex_host
+        self.flex_mtu.setText("Measuring…")
+        self._flex_thread = _FlexDiscoveryThread(configured, self)
+        self._flex_thread.finished_list.connect(self._on_flex_discovery)
+        self._flex_thread.start()
+
+    def _on_flex_discovery(self, radios, error: str) -> None:
+        self.flex_radio.clear()
+        self._flex_radios = {radio.ip: radio for radio in radios}
+        if error:
+            self.flex_radio.addItem(f"Discovery failed: {error}", "")
+            self.flex_mtu.setText("Unavailable")
+            return
+        if not radios:
+            self.flex_radio.addItem("No radios found — type an IP address", "")
+            self.flex_mtu.setText("Unavailable")
+            return
+        for radio in radios:
+            self.flex_radio.addItem(radio.label, radio.ip)
+        current = self.flex_radio.findData(self._settings.flex_host)
+        if current >= 0:
+            self.flex_radio.setCurrentIndex(current)
+        self._update_flex_mtu()
+
+    def _update_flex_mtu(self) -> None:
+        host = self.flex_radio.currentData() or self.flex_radio.currentText().strip()
+        radio = self._flex_radios.get(host)
+        if radio is not None and radio.path_mtu:
+            udp_payload = radio.path_mtu - 20 - 8
+            self.flex_mtu.setText(
+                f"{radio.path_mtu} bytes ({udp_payload} bytes available to UDP)"
+            )
+        else:
+            self.flex_mtu.setText("Not measured — click Discover radios")
 
     def _test_cat(self, key: bool) -> None:
         if self._cat_thread is not None and self._cat_thread.isRunning():

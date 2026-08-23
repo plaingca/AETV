@@ -14,8 +14,9 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from aetv.config import AETV_MODES
 
-DB_FLOOR = -95.0
-DB_CEIL = -20.0
+MIN_DBFS = -140.0
+MAX_DBFS = 3.0
+MIN_DISPLAY_RANGE_DB = 32.0
 
 
 def _colormap() -> np.ndarray:
@@ -54,6 +55,34 @@ def reduce_to_width(row: np.ndarray, width: int) -> np.ndarray:
     return np.interp(x, np.arange(row.size), row).astype(np.float32)
 
 
+def spectrum_dbfs(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return a Hann-windowed spectrum whose tone amplitudes are in dBFS.
+
+    Dividing by the window's coherent gain keeps the FFT size from changing
+    the displayed level. A full-scale sinusoid therefore lands near 0 dBFS
+    instead of gaining roughly 54 dB merely because a 1024-point FFT is used.
+    """
+    values = np.asarray(samples, dtype=np.float32)
+    window = np.hanning(values.size)
+    coherent_gain = max(float(window.sum()) / 2.0, 1e-12)
+    amplitudes = np.abs(np.fft.rfft(values * window)) / coherent_gain
+    dbfs = 20.0 * np.log10(np.maximum(amplitudes, 1e-12))
+    return dbfs.astype(np.float32), amplitudes.astype(np.float32)
+
+
+def automatic_levels(values: np.ndarray) -> tuple[float, float]:
+    """Choose a robust noise floor and highlight level for a spectrum row."""
+    finite = np.asarray(values, dtype=np.float32)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return -100.0, -60.0
+    floor = float(np.percentile(finite, 35.0))
+    highlight = float(np.percentile(finite, 99.5))
+    floor = float(np.clip(floor, MIN_DBFS, MAX_DBFS - MIN_DISPLAY_RANGE_DB))
+    ceiling = float(np.clip(max(highlight, floor + MIN_DISPLAY_RANGE_DB), floor + MIN_DISPLAY_RANGE_DB, MAX_DBFS))
+    return floor, ceiling
+
+
 class Waterfall(QWidget):
     def __init__(self, parent=None, fps: int = 20):
         super().__init__(parent)
@@ -65,6 +94,8 @@ class Waterfall(QWidget):
         self._peak = 0.0
         self._clipping = False
         self._clip_latched = False
+        self._display_floor: float | None = None
+        self._display_ceiling: float | None = None
         self.setMinimumHeight(90)
         self.setMinimumWidth(160)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -79,6 +110,7 @@ class Waterfall(QWidget):
 
     def set_ring(self, ring) -> None:
         self._ring = ring
+        self._reset_scaling()
         if ring is not None:
             self._fs = ring.fs
 
@@ -86,12 +118,18 @@ class Waterfall(QWidget):
         mode = AETV_MODES[mode_name]
         self._fs = mode.geometry.fs
         self._band_lo, self._band_hi = mode.geometry.tx_bandpass
+        self._reset_scaling()
+
+    def _reset_scaling(self) -> None:
+        self._display_floor = None
+        self._display_ceiling = None
 
     def clear(self) -> None:
         if not self._image.isNull():
             self._image.fill(Qt.GlobalColor.black)
         self._peak = 0.0
         self._clipping = False
+        self._reset_scaling()
         self.update()
 
     def clip_latched(self) -> bool:
@@ -126,19 +164,30 @@ class Waterfall(QWidget):
         if samples.size < 32:
             self.update()
             return
-        window = np.hanning(len(samples))
-        spectrum = np.fft.rfft(samples * window)
-        mag = 20.0 * np.log10(np.maximum(np.abs(spectrum), 1e-12))
+        mag, _ = spectrum_dbfs(samples)
         freqs = np.fft.rfftfreq(len(samples), 1.0 / self._fs)
         usable = mag[freqs <= self._fs / 2]
         width = self._image.width()
         meter_w = max(8, int(round(12 * self.devicePixelRatio())))
         row = reduce_to_width(usable.astype(np.float32), max(1, width - meter_w))
-        # Rolling floor so a quiet interface is not a black strip.
-        floor = float(np.percentile(row, 15))
-        lo = min(floor, DB_FLOOR)
-        hi = DB_CEIL
-        norm = np.clip((row - lo) / max(hi - lo, 1.0), 0.0, 1.0)
+        # Scale from the useful modem passband. The robust percentiles keep
+        # Flex AGC noise dark while allowing carriers to reach the highlights.
+        in_band = mag[(freqs >= self._band_lo) & (freqs <= self._band_hi)]
+        target_floor, target_ceiling = automatic_levels(in_band if in_band.size else usable)
+        if self._display_floor is None or self._display_ceiling is None:
+            self._display_floor, self._display_ceiling = target_floor, target_ceiling
+        else:
+            # Gentle tracking prevents brightness pumping without leaving an
+            # AGC level change stuck as a white screen.
+            alpha = 0.18
+            self._display_floor += alpha * (target_floor - self._display_floor)
+            self._display_ceiling += alpha * (target_ceiling - self._display_ceiling)
+        span = max(self._display_ceiling - self._display_floor, MIN_DISPLAY_RANGE_DB)
+        norm = np.clip((row - self._display_floor) / span, 0.0, 1.0)
+        norm = np.power(norm, 1.35)  # reserve yellow/white for actual signals
+        pixel_freqs = np.linspace(0.0, self._fs / 2.0, row.size)
+        outside = (pixel_freqs < self._band_lo) | (pixel_freqs > self._band_hi)
+        norm[outside] *= 0.45
         colors = COLORMAP[np.rint(norm * 255).astype(np.uint8)]
         shifted = QImage(self._image.size(), QImage.Format.Format_RGB32)
         shifted.setDevicePixelRatio(self._image.devicePixelRatio())

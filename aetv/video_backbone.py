@@ -1,8 +1,8 @@
 """Small chunked video autoencoder sized for a single 16 GB GPU.
 
-This is deliberately not an LTX-sized model.  It borrows the useful idea of
-spatiotemporal latents, while keeping the radio contract from SSTVAE: bounded
-unit-RMS coordinates and an explicit confidence tensor at the decoder.
+This is deliberately not an LTX-sized model. It borrows the useful idea of
+spatiotemporal latents while keeping AETV's radio contract: bounded unit-RMS
+coordinates and an explicit confidence tensor at the decoder.
 """
 
 from __future__ import annotations
@@ -416,7 +416,7 @@ class VideoDecoder(nn.Module):
         return torch.sigmoid(self.output(x) + temporal_skip)
 
 
-class VideoSSTVAE(nn.Module):
+class VideoAutoencoder(nn.Module):
     def __init__(
         self, width: int = 48, latent_channels: int = 12, compact: bool = False,
         resize_conv_upsampling: bool = False, preserve_time: bool = False,

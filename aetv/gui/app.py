@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import time
 
+import torch
+
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
@@ -39,6 +41,8 @@ class _CodecThread(QThread):
         try:
             codec = self._station.load_codec()
             device = str(codec.device)
+            if codec.device.type == "cuda":
+                device = f"{device} ({torch.cuda.get_device_name(codec.device)})"
             self.loaded.emit(f"{codec.mode.name} on {device}")
         except Exception as error:
             self.failed.emit(str(error))
@@ -77,6 +81,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(stack)
 
         self.log = LogPane()
+        self.station.set_logger(self._log)
         dock = QDockWidget("Log", self)
         dock.setObjectName("log")
         dock.setWidget(self.log)
@@ -200,19 +205,22 @@ class MainWindow(QMainWindow):
         if backend == "none":
             self.rig_label.setText("CAT off")
         elif backend == "flex":
-            self.rig_label.setText(f"Flex {self.settings.flex_host or '?'}")
-        elif backend == "rigctld":
-            self.rig_label.setText(f"rigctld {self.settings.rigctld_host}:{self.settings.rigctld_port}")
+            route = "VITA" if self.settings.flex_native_audio else "audio device"
+            self.rig_label.setText(f"Flex {self.settings.flex_host or '?'} · {route}")
+        elif backend == "hamlib":
+            self.rig_label.setText(f"Hamlib {self.settings.hamlib_device or '?'}")
         else:
             self.rig_label.setText(f"{backend} {self.settings.serial_port}")
 
     def _on_tx_started(self) -> None:
-        if self.rx.listening():
+        if self.rx.listening() and self.settings.rx_source != "kiwi":
             self.rx.stop()
             self._resume_rx = True
             self._log("receive paused for half-duplex transmit")
         else:
             self._resume_rx = False
+            if self.rx.listening() and self.settings.rx_source == "kiwi":
+                self._log("Kiwi receive remains live for full-duplex monitoring")
 
     def _on_tx_finished(self) -> None:
         self.ptt_lamp.set_keyed(False)
@@ -230,7 +238,7 @@ class MainWindow(QMainWindow):
             "About AETV",
             "AETV — Autoencoder Television\n"
             "Analog video over HF OFDM for amateur radio.\n\n"
-            "Published mode: V7 Flex-8k, 256×144 @ 12 fps, 24 kHz DAX.\n"
+            "Published mode: V7 Flex-8k, 256×144 @ 12 fps, 24 kHz audio.\n"
             "Identify every transmission. This software does not replace "
             "a license or a band-plan check.\n\n"
             "Artistic License 2.0",
@@ -253,6 +261,7 @@ class MainWindow(QMainWindow):
                 self.tx._thread.join(timeout=8.0)
         if self.rx.listening():
             self.rx.stop()
+        self.tx.stop_preview()
         save_settings(self.settings)
         event.accept()
 

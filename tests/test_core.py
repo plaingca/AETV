@@ -32,6 +32,13 @@ from aetv import (
     modulate_gop_stream,
 )
 from aetv import beacon, framing, ofdm
+from aetv.config import PROTOCOL_VERSION
+from aetv.modem import (
+    StreamingDemodulator,
+    modulate_continuous_chunks,
+    modulate_gop_chunks,
+)
+from aetv.modem import _header_candidates, _header_carriers, decode_header, encode_header
 
 
 def test_aetv_numerology():
@@ -111,6 +118,163 @@ def test_beacon_encode_decode_superframe():
     assert dec_mode == mode_idx
 
 
+def test_beacon_sync_is_gain_independent_and_accepts_inverted_iq():
+    chips = beacon.encode_superframe(17, "VE7TEST", 7)
+    padded = np.concatenate([np.zeros(9), -0.12 * chips, np.zeros(4)])
+    decoded = beacon.find_beacon_superframe(padded)
+    assert decoded is not None
+    assert decoded.callsign == "VE7TEST"
+
+
+def test_streaming_modem_allows_late_entry_and_recovers_beacon():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(12)]
+    chunks = list(modulate_gop_chunks(iter(gops), "V7", "VE7TEST"))
+    receiver = StreamingDemodulator(mode.band)
+    decoded = []
+    # Tune in partway through a GOP and use deliberately awkward callback sizes.
+    audio = np.concatenate(chunks[1:])[9000:]
+    for start in range(0, len(audio), 733):
+        decoded.extend(receiver.feed(audio[start : start + 733]))
+    assert len(decoded) >= 6
+    assert decoded[-1].callsign == "VE7TEST"
+
+
+def test_streaming_modem_rejects_noise_false_triggers():
+    receiver = StreamingDemodulator("U")
+    noise = np.random.default_rng(2026).standard_normal(120000).astype(np.float32)
+    decoded = []
+    for start in range(0, len(noise), 733):
+        decoded.extend(receiver.feed(noise[start : start + 733]))
+    assert decoded == []
+
+
+def test_v7_repeated_beacon_identifies_within_seven_gops():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
+    receiver = StreamingDemodulator(mode.band)
+    decoded = []
+    for chunk in modulate_gop_chunks(iter(gops), "V7", "VE7TEST"):
+        decoded.extend(receiver.feed(chunk))
+    assert decoded[-1].callsign == "VE7TEST"
+
+
+def test_streaming_demodulator_is_invariant_to_low_kiwi_level():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
+    audio = np.concatenate(list(modulate_gop_chunks(gops, "V7", "VE7TEST")))
+    receiver = StreamingDemodulator(mode.band)
+    decoded = []
+    for start in range(0, len(audio), 733):
+        decoded.extend(receiver.feed(0.001 * audio[start : start + 733]))
+    assert len(decoded) == 7
+    assert decoded[-1].callsign == "VE7TEST"
+
+
+def test_streaming_demodulator_consumes_large_backlog_in_order():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
+    audio = np.concatenate(list(modulate_gop_chunks(gops, "V7", "VE7TEST")))
+    decoded = StreamingDemodulator(mode.band).feed(audio)
+    assert len(decoded) == 7
+    assert decoded[-1].callsign == "VE7TEST"
+
+
+def test_continuous_v7_stream_has_exact_one_second_steady_state_gops():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
+    chunks = list(modulate_continuous_chunks(gops, "V7", "VE7TEST"))
+    assert [len(chunk) for chunk in chunks] == [29760, *([24000] * 5), 26400]
+    assert sum(map(len, chunks)) == 7 * 24000 + int(0.34 * 24000)
+
+    receiver = StreamingDemodulator(mode.band, continuous=True)
+    decoded = []
+    audio = np.concatenate(chunks)
+    for start in range(0, len(audio), 733):
+        decoded.extend(receiver.feed(audio[start : start + 733]))
+    assert len(decoded) == 7
+    assert decoded[-1].callsign == "VE7TEST"
+
+
+def test_continuous_v7_receiver_can_join_after_initial_header():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(18)]
+    audio = np.concatenate(list(modulate_continuous_chunks(gops, "V7", "VE7TEST")))
+    # Enter at an arbitrary point well after the only RF preamble/header.
+    audio = audio[42000:]
+    events = []
+    receiver = StreamingDemodulator(mode.band, continuous=True, on_debug=events.append)
+    decoded = []
+    for start in range(0, len(audio), 733):
+        decoded.extend(receiver.feed(audio[start : start + 733]))
+    assert any(event["event"] == "blind_acquired" for event in events)
+    assert decoded
+    assert decoded[-1].callsign == "VE7TEST"
+
+
+def test_continuous_v7_receiver_keeps_looking_when_started_before_tx():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
+    transmission = np.concatenate(
+        list(modulate_continuous_chunks(gops, "V7", "VE7TEST"))
+    )
+    # Starting reception in quiet/noisy spectrum used to put the state machine
+    # permanently into blind-acquisition mode before the one-time preamble
+    # arrived. Keep the prefix below the 12-second late-join observation time
+    # so this specifically exercises continued startup-preamble searching.
+    audio = np.concatenate(
+        [np.zeros(2 * mode.geometry.fs, dtype=np.float32), transmission]
+    )
+    events = []
+    receiver = StreamingDemodulator(
+        mode.band, continuous=True, on_debug=events.append
+    )
+    decoded = []
+    # Match the GUI's default two-second polling cadence. Acquisition must be
+    # invariant to a preamble landing anywhere inside a large callback batch.
+    batch = 2 * mode.geometry.fs
+    for start in range(0, len(audio), batch):
+        decoded.extend(receiver.feed(audio[start : start + batch]))
+
+    assert len(decoded) == 7
+    assert decoded[-1].callsign == "VE7TEST"
+    assert not any(event["event"] == "blind_acquired" for event in events)
+
+
+def test_continuous_v7_tracking_stops_at_post_transmission_noise():
+    mode = AETV_MODES["V7"]
+    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
+    transmission = np.concatenate(
+        list(modulate_continuous_chunks(gops, "V7", "VE7TEST"))
+    )
+    noise = np.random.default_rng(7).standard_normal(
+        3 * mode.geometry.fs
+    ).astype(np.float32)
+    events = []
+    receiver = StreamingDemodulator(
+        mode.band, continuous=True, on_debug=events.append
+    )
+    decoded = []
+    audio = np.concatenate([transmission, noise])
+    for start in range(0, len(audio), 4096):
+        decoded.extend(receiver.feed(audio[start : start + 4096]))
+
+    assert len(decoded) == 7
+    assert decoded[-1].callsign == "VE7TEST"
+    assert any(event["event"] == "tracking_lost" for event in events)
+
+
+def test_v7_header_repetition_survives_loss_of_legacy_carriers():
+    chips = encode_header(AETV_MODES["V7"].index)
+    carriers = _header_carriers(chips, AETV_MODES["V7"].geometry.carriers)
+    # Simulate a deep fade over the legacy first copy. The copies elsewhere in
+    # the 8 kHz channel still identify the protocol and mode.
+    carriers[:24] = 0.0
+    legacy, combined = _header_candidates(carriers)
+    assert decode_header(legacy) != (AETV_MODES["V7"].index, PROTOCOL_VERSION)
+    assert decode_header(combined) == (AETV_MODES["V7"].index, PROTOCOL_VERSION)
+
+
 def test_gop_framing_and_interleaving():
     for band, geom in [("N", BAND_N), ("W", BAND_W), ("U", BAND_U)]:
         latents = np.random.randn(geom.latents_per_gop).astype(np.float32)
@@ -163,6 +327,7 @@ def test_aetv_latent_channel_stage1():
 
 
 def test_aetv_waveform_channel_stage2():
+    torch.manual_seed(0)
     for band in ["N", "W"]:
         channel = AETVWaveformChannel(
             band=band,
@@ -184,12 +349,13 @@ def test_aetv_waveform_channel_stage2():
 
 
 def test_aetv_end_to_end_modem_clean_loopback():
+    rng = np.random.default_rng(0)
     for mode_name, band, geom in [
         ("V0", "N", BAND_N),
         ("V1", "W", BAND_W),
         ("V7", "U", BAND_U),
     ]:
-        gop_lat = np.random.randn(geom.latents_per_gop).astype(np.float32)
+        gop_lat = rng.standard_normal(geom.latents_per_gop).astype(np.float32)
         audio = modulate_gop_stream([gop_lat], mode_name=mode_name, callsign="N0CALL")
         assert len(audio) > 0
         demod_res = demodulate_gop_stream(audio, band=band, drift_track="off")

@@ -89,8 +89,26 @@ def pack_gop_symbols(
     latent_matrix = complex_latents.reshape(n_data_syms, geom.latent_carriers)
     symbols[:, :geom.latent_carriers] = latent_matrix
     
-    # Beacon carrier on last carrier (NC-1)
-    if len(beacon_chips) >= n_data_syms:
+    # V7/U has one otherwise-unused guard carrier. Carry four real beacon chips
+    # per data symbol on I/Q of that carrier and the normal beacon carrier.
+    # Unit I/Q gives each chip 3 dB more energy than normalized QPSK. These are
+    # only two of 160 carriers, so the overall waveform power increase is tiny
+    # while the OTA beacon gets useful margin at the Golay correction boundary.
+    if band == "U" and len(beacon_chips) >= 4 * n_data_syms:
+        # Legacy v3 four-lane fast beacon, retained for decoding old captures.
+        scale = np.float32(1.0)
+        chips = beacon_chips[: 4 * n_data_syms].reshape(n_data_syms, 4)
+        symbols[:, geom.latent_carriers] = scale * (chips[:, 0] + 1j * chips[:, 1])
+        symbols[:, geom.beacon_carrier] = scale * (chips[:, 2] + 1j * chips[:, 3])
+    elif band == "U" and len(beacon_chips) >= n_data_syms:
+        # Repeat each logical beacon chip on I/Q of both reserved carriers.
+        # Combining provides 6 dB without consuming more RF time; a 2x chip
+        # amplitude gives margin for the high-edge rolloff seen in Kiwi OTA IQ.
+        chips = np.asarray(beacon_chips[:n_data_syms], dtype=np.float32)
+        repeated = np.float32(2.0) * (chips + 1j * chips)
+        symbols[:, geom.latent_carriers] = repeated
+        symbols[:, geom.beacon_carrier] = repeated
+    elif len(beacon_chips) >= n_data_syms:
         symbols[:, geom.beacon_carrier] = beacon_chips[:n_data_syms]
     else:
         symbols[:len(beacon_chips), geom.beacon_carrier] = beacon_chips
@@ -139,4 +157,3 @@ def unpack_gop_symbols(
         weights = raw_weights
         
     return latents, weights
-

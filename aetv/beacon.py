@@ -171,12 +171,17 @@ def find_beacon_superframe(
     """Scan a soft chip stream for Barker-13 sync and decode the superframe."""
     if len(soft_stream) < SUPERFRAME_LEN:
         return None
+    stream = np.asarray(soft_stream, dtype=np.float64)
+    windows = np.lib.stride_tricks.sliding_window_view(stream, SYNC_LEN)
     sync_norm = np.linalg.norm(SYNC)
-    corr = np.correlate(soft_stream, SYNC, mode="valid")
-    peaks = np.where(corr > threshold * sync_norm * sync_norm)[0]
+    window_norms = np.linalg.norm(windows, axis=1)
+    corr = (windows @ SYNC) / np.maximum(window_norms * sync_norm, 1e-12)
+    peaks = np.where(np.abs(corr) > threshold)[0]
+    peaks = peaks[np.argsort(np.abs(corr[peaks]))[::-1]]
     for peak_idx in peaks:
         if peak_idx + SUPERFRAME_LEN <= len(soft_stream):
-            payload_soft = soft_stream[peak_idx + SYNC_LEN : peak_idx + SUPERFRAME_LEN]
+            polarity = 1.0 if corr[peak_idx] >= 0 else -1.0
+            payload_soft = polarity * stream[peak_idx + SYNC_LEN : peak_idx + SUPERFRAME_LEN]
             decoded = decode_superframe(payload_soft)
             if decoded is not None:
                 counter, callsign, mode_idx = decoded

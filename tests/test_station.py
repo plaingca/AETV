@@ -5,6 +5,8 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from types import SimpleNamespace
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +17,13 @@ from aetv.cat import CatConfig, NullPtt, RigctldClient, open_ptt
 from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
-from aetv.station import TxEngine, TxPhase, WATCHDOG_MARGIN_S, _PttWatchdog
+from aetv.station import (
+    TxEngine,
+    TxPhase,
+    WATCHDOG_MARGIN_S,
+    _PcmWaveRecorder,
+    _PttWatchdog,
+)
 
 
 def test_ringbuffer_wrap_and_tail():
@@ -28,6 +36,20 @@ def test_ringbuffer_wrap_and_tail():
     assert snap[-1] == 149
     tail = ring.tail(10)
     assert np.array_equal(tail, np.arange(140, 150))
+
+
+def test_ringbuffer_incremental_reader_reports_overrun():
+    ring = RingBuffer(seconds=1, fs=5)
+    ring.write(np.array([1.0, 2.0, 3.0]))
+    first, cursor, overrun = ring.read_since(0)
+    assert np.array_equal(first, [1.0, 2.0, 3.0])
+    assert not overrun
+    ring.write(np.array([4.0, 5.0, 6.0, 7.0]))
+    fresh, cursor, overrun = ring.read_since(cursor)
+    assert np.array_equal(fresh, [4.0, 5.0, 6.0, 7.0])
+    old, _, overrun = ring.read_since(0)
+    assert overrun
+    assert np.array_equal(old, [3.0, 4.0, 5.0, 6.0, 7.0])
 
 
 def test_stream_resampler_matches_oneshot():
@@ -87,6 +109,16 @@ def test_settings_roundtrip(tmp_path: Path):
     assert loaded.callsign == "va7eet"
     assert loaded.mode == "V7"
     assert loaded.kiwi_host == "1.2.3.4:8073"
+
+
+def test_native_flex_settings_do_not_silently_use_soundcard(tmp_path: Path):
+    settings = StationSettings(
+        cat_backend="flex", flex_host="192.0.2.1", flex_native_audio=True,
+        rx_source="soundcard",
+    )
+    path = tmp_path / "settings.json"
+    save_settings(settings, path)
+    assert load_settings(path).rx_source == "flex"
 
 
 def test_normalize_callsign():
@@ -207,6 +239,79 @@ def test_tx_ptt_unkeys_when_player_raises():
     assert ptt.events[0] is True
     assert ptt.events[-1] is False
     assert engine.state.phase == TxPhase.FAILED
+
+
+def test_streaming_tx_prepares_first_gop_before_ptt(monkeypatch):
+    from aetv.station import Station
+
+    events = []
+
+    class Ptt:
+        def set_ptt(self, on):
+            events.append(f"ptt:{on}")
+
+        def describe(self):
+            return "test PTT"
+
+        def close(self):
+            events.append("close")
+
+    def chunks():
+        for index in range(2):
+            events.append(f"produce:{index}")
+            yield np.zeros(32, dtype=np.float32)
+
+    def play(stream, rate, **kwargs):
+        for index, _chunk in enumerate(stream):
+            events.append(f"play:{index}")
+            kwargs["on_chunk"](index + 1)
+        return True
+
+    monkeypatch.setattr("aetv.station.play_chunk_stream", play)
+    station = Station(StationSettings(ptt_lead_s=0, ptt_tail_s=0))
+    engine = TxEngine(station, ptt=Ptt())
+    assert engine._keyed_send_stream(chunks(), 24000, 2)
+    assert events.index("produce:0") < events.index("ptt:True") < events.index("play:0")
+
+
+def test_webcam_gops_are_captured_and_encoded_lazily(monkeypatch):
+    from aetv.station import Station
+
+    events = []
+
+    def camera(_mode, camera=0, duration_s=None):
+        assert duration_s is None
+        for index in range(6):
+            events.append(f"frame:{index}")
+            yield np.full((2, 3, 3), index, dtype=np.uint8)
+
+    class Codec:
+        mode = SimpleNamespace(gop_frames=2)
+
+        def encode_gop(self, frames):
+            events.append(f"encode:{int(frames[0, 0, 0, 0])}")
+            return np.array([frames.mean()], dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.iter_webcam", camera)
+    station = Station(StationSettings(debug_capture=False))
+    engine = TxEngine(station)
+    stream = engine._live_webcam_gops(Codec(), 3)
+    next(stream)
+    assert events == ["frame:0", "frame:1", "encode:0"]
+    next(stream)
+    assert events[-3:] == ["frame:2", "frame:3", "encode:2"]
+    stream.close()
+
+
+def test_debug_wave_recorder_streams_pcm_to_disk(tmp_path):
+    path = tmp_path / "tx.tx.wav"
+    recorder = _PcmWaveRecorder(path, 24000)
+    recorder.write(np.array([-1.0, 0.0, 1.0], dtype=np.float32))
+    recorder.close()
+    with wave.open(str(path), "rb") as saved:
+        assert saved.getframerate() == 24000
+        assert saved.getnchannels() == 1
+        assert saved.getnframes() == 3
 
 
 def test_ptt_watchdog_fires(monkeypatch):
