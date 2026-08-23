@@ -14,11 +14,13 @@ import pytest
 
 from aetv.audio_io import StreamResampler, resample_ratio
 from aetv.cat import CatConfig, NullPtt, RigctldClient, open_ptt
+from aetv.config import AETV_MODES
 from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
 from aetv.station import (
     RxState,
+    RxEngine,
     Station,
     TxEngine,
     TxPhase,
@@ -26,6 +28,21 @@ from aetv.station import (
     _PcmWaveRecorder,
     _PttWatchdog,
 )
+
+
+def test_rx_demodulator_uses_loaded_mode_as_one_atomic_configuration():
+    station = Station(StationSettings(mode="V8"))
+    engine = RxEngine(station)
+    demodulator = engine._new_demodulator(AETV_MODES["V8"])
+    assert demodulator.band == "W"
+    assert demodulator.expected_mode.name == "V8"
+
+
+def test_stale_codec_cannot_start_a_new_mode_receive():
+    station = Station(StationSettings(mode="V8"))
+    station.codec = SimpleNamespace(mode=AETV_MODES["V7"])
+    with pytest.raises(RuntimeError, match="V8 checkpoint is still loading"):
+        station.require_codec()
 
 
 def test_ringbuffer_wrap_and_tail():

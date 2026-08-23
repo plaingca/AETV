@@ -29,7 +29,7 @@ from .audio_io import (
 )
 from .cat import CatConfig, NullPtt, open_ptt
 from .codec import AETVCodec, resolve_checkpoint
-from .config import AETV_MODES
+from .config import AETV_MODES, AETVModeSpec
 from .kiwi import KiwiCapture
 from .flex import FlexVitaSession
 from .hfchannel import CHANNEL_PROFILES, StreamingChannelEmulator
@@ -211,7 +211,12 @@ class Station:
 
     def require_codec(self) -> AETVCodec:
         if self.codec is None:
-            raise RuntimeError("the V7 checkpoint is still loading")
+            raise RuntimeError(f"the {self.settings.mode} checkpoint is still loading")
+        if self.codec.mode.name != self.settings.mode:
+            raise RuntimeError(
+                f"the {self.settings.mode} checkpoint is still loading "
+                f"(currently loaded: {self.codec.mode.name})"
+            )
         return self.codec
 
     def cat_config(self) -> CatConfig:
@@ -857,7 +862,7 @@ class RxEngine:
                     },
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
-        self._stream_decoder = self._new_demodulator(codec.mode.band)
+        self._stream_decoder = self._new_demodulator(codec.mode)
         self._kiwi_discontinuity.clear()
         self._read_cursor = 0
         self._on_ring(self.ring)
@@ -953,12 +958,12 @@ class RxEngine:
         if self._debug_log is not None:
             self._debug_log.write(event)
 
-    def _new_demodulator(self, band: str) -> StreamingDemodulator:
+    def _new_demodulator(self, mode: AETVModeSpec) -> StreamingDemodulator:
         return StreamingDemodulator(
-            band,
+            mode.band,
             on_debug=self._record_modem_debug,
             continuous=True,
-            mode_name=self.station.settings.mode,
+            mode_name=mode.name,
         )
 
     def _loop(self) -> None:
@@ -974,7 +979,7 @@ class RxEngine:
                 break
             if self._kiwi_discontinuity.is_set():
                 self._kiwi_discontinuity.clear()
-                self._stream_decoder = self._new_demodulator(codec.mode.band)
+                self._stream_decoder = self._new_demodulator(codec.mode)
                 # Drop every sample written before the reset. The interrupted
                 # GOP cannot be repaired live; the next independently framed
                 # GOP will provide a fresh preamble and mode header.
@@ -984,14 +989,14 @@ class RxEngine:
                 continue
             audio, self._read_cursor, overrun = ring.read_since(self._read_cursor)
             if overrun:
-                self._stream_decoder = self._new_demodulator(codec.mode.band)
+                self._stream_decoder = self._new_demodulator(codec.mode)
                 self.state.message = "receive buffer overrun; reacquiring"
             if audio.size == 0:
                 continue
             try:
                 demodulator = self._stream_decoder
                 if demodulator is None:
-                    demodulator = self._stream_decoder = self._new_demodulator(codec.mode.band)
+                    demodulator = self._stream_decoder = self._new_demodulator(codec.mode)
                 demod_started = time.perf_counter()
                 results = demodulator.feed(audio)
                 demod_s = time.perf_counter() - demod_started

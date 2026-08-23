@@ -59,6 +59,8 @@ class MainWindow(QMainWindow):
         self._tx_waiting_for_rx = False
         self._tx_finished_while_stopping_rx = False
         self._resume_rx = False
+        self._reload_codec_after_rx_stop = False
+        self._resume_rx_after_codec_reload = False
         self._emulation_active = False
         self._path_planner = None
         self._ft8_calibration = None
@@ -111,6 +113,7 @@ class MainWindow(QMainWindow):
 
         self.rx.statusChanged.connect(self.rx_status.setText)
         self.rx.stopFinished.connect(self._on_rx_stopped_for_tx)
+        self.rx.stopFinished.connect(self._on_rx_stopped_for_codec_reload)
         self.rx.logMessage.connect(self._log)
         self.rx.pathPlannerRequested.connect(self.open_path_planner)
         self.tx.logMessage.connect(self._log)
@@ -187,13 +190,24 @@ class MainWindow(QMainWindow):
         self._codec_thread.start()
 
     def _on_model_loaded(self, text: str) -> None:
+        if self.station.codec is None or self.station.codec.mode.name != self.settings.mode:
+            self._log(
+                f"discarding stale codec load ({text}); loading {self.settings.mode}"
+            )
+            self._load_codec()
+            return
         self.model_label.setText(text)
         self.tx.send_button.setEnabled(True)
         self.rx.start_button.setEnabled(True)
         self.waterfall.set_mode(self.settings.mode)
         self._log(f"codec ready: {text}")
+        if self._resume_rx_after_codec_reload:
+            self._resume_rx_after_codec_reload = False
+            self._log(f"restarting receive with {self.settings.mode}")
+            self.rx.start()
 
     def _on_model_failed(self, message: str) -> None:
+        self._resume_rx_after_codec_reload = False
         self.model_label.setText("No checkpoint")
         self._log(message)
         QMessageBox.warning(
@@ -204,6 +218,11 @@ class MainWindow(QMainWindow):
         )
 
     def open_settings(self) -> None:
+        previous_codec_config = (
+            self.settings.mode,
+            self.settings.checkpoint,
+            self.settings.torch_device,
+        )
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
@@ -215,8 +234,29 @@ class MainWindow(QMainWindow):
         self.waterfall.set_mode(self.settings.mode)
         self._refresh_station_label()
         self._log("settings saved")
-        if self.station.codec is None or self.station.codec.mode.name != self.settings.mode:
-            self._load_codec()
+        codec_config = (
+            self.settings.mode,
+            self.settings.checkpoint,
+            self.settings.torch_device,
+        )
+        if (
+            self.station.codec is None
+            or self.station.codec.mode.name != self.settings.mode
+            or codec_config != previous_codec_config
+        ):
+            if self.rx.listening():
+                self._reload_codec_after_rx_stop = True
+                self._resume_rx_after_codec_reload = True
+                self._log("receive stopping to apply the new mode/checkpoint")
+                self.rx.stop()
+            else:
+                self._load_codec()
+
+    def _on_rx_stopped_for_codec_reload(self) -> None:
+        if not self._reload_codec_after_rx_stop:
+            return
+        self._reload_codec_after_rx_stop = False
+        self._load_codec()
 
     def open_path_planner(self) -> None:
         from aetv.gui.path_planner import PathPlannerDialog
