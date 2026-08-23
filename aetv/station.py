@@ -231,13 +231,23 @@ class Station:
 
 
 class TxEngine:
-    def __init__(self, station: Station, on_state=None, on_error=None, on_preview=None, ptt=None, player=None):
+    def __init__(
+        self,
+        station: Station,
+        on_state=None,
+        on_error=None,
+        on_preview=None,
+        ptt=None,
+        player=None,
+        camera_frames=None,
+    ):
         self.station = station
         self._on_state = on_state or (lambda _state: None)
         self._on_error = on_error or (lambda _msg: None)
         self._on_preview = on_preview or (lambda _frames: None)
         self._ptt_override = ptt
         self._player = player
+        self._camera_frames = camera_frames
         self._cancel = threading.Event()
         self.state = TxState()
         self.last_wav: np.ndarray | None = None
@@ -462,36 +472,43 @@ class TxEngine:
         # pulled the lazy generator *after* xmit=1, leaving the transmitter
         # keyed with no audio while a CPU encoded the first GOP. A producer
         # keeps later GOPs moving while the consumer paces radio audio.
-        ready: queue.Queue = queue.Queue(maxsize=3)
+        # Reserve queue capacity *before* advancing ``chunks``.  A regular
+        # bounded Queue alone is not sufficient here: ``for chunk in chunks``
+        # encodes the next GOP before put() discovers that the queue is full.
+        # During startup that let the producer encode several seconds of video
+        # back-to-back while the camera and radio were being handed over,
+        # starving the GUI even though this work runs on a Python thread.
+        #
+        # A single look-ahead GOP is enough to overlap encoding with the
+        # one-second audio consumer without creating that startup burst.
+        ready: queue.Queue = queue.Queue(maxsize=1)
+        free_slots = threading.Semaphore(1)
         producer_stop = threading.Event()
         sentinel = object()
 
         def produce() -> None:
-            terminal = sentinel
-            try:
-                for chunk in chunks:
-                    while not producer_stop.is_set():
-                        try:
-                            ready.put(chunk, timeout=0.2)
-                            break
-                        except queue.Full:
-                            continue
-                    if producer_stop.is_set():
-                        return
-            except Exception as error:
-                terminal = error
-            finally:
-                while not producer_stop.is_set():
-                    try:
-                        ready.put(terminal, timeout=0.2)
-                        break
-                    except queue.Full:
-                        continue
+            iterator = iter(chunks)
+            while not producer_stop.is_set():
+                if not free_slots.acquire(timeout=0.2):
+                    continue
+                if producer_stop.is_set():
+                    free_slots.release()
+                    return
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    item = sentinel
+                except Exception as error:
+                    item = error
+                ready.put(item)
+                if item is sentinel or isinstance(item, Exception):
+                    return
 
         self._set(TxPhase.ENCODING, 0.0, "preparing first live GOP before PTT")
         producer = threading.Thread(target=produce, name="aetv-tx-producer", daemon=True)
         producer.start()
         first = ready.get()
+        free_slots.release()
         if isinstance(first, Exception):
             self._on_error(str(first))
             self._set(TxPhase.FAILED, 0.0, str(first))
@@ -510,6 +527,7 @@ class TxEngine:
             while True:
                 wait_started = time.perf_counter()
                 item = ready.get()
+                free_slots.release()
                 wait_s = time.perf_counter() - wait_started
                 if item is sentinel:
                     return
@@ -608,7 +626,16 @@ class TxEngine:
     def _live_webcam_gops(self, codec, n_gops: int):
         """Capture, encode, and yield camera GOPs while the prior GOP transmits."""
         mode = codec.mode
-        camera_frames = iter_webcam(mode, camera=self.station.settings.camera_index)
+        if self._camera_frames is None:
+            camera_frames = iter_webcam(
+                mode, camera=self.station.settings.camera_index
+            )
+        else:
+            camera_frames = self._camera_frames(
+                mode,
+                camera=self.station.settings.camera_index,
+                should_stop=self._cancel.is_set,
+            )
         try:
             for index in range(n_gops):
                 capture_started = time.perf_counter()

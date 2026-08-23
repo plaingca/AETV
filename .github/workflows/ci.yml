@@ -11,6 +11,8 @@ jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +30,7 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
       - name: Install test dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked --extra gui --extra dev
       - name: Run tests
         run: uv run pytest
       - name: Build distributions

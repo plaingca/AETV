@@ -2,15 +2,122 @@
 
 from __future__ import annotations
 
+import queue
 import subprocess
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 
 from .config import AETVModeSpec
+
+
+class CameraFrameBuffer:
+    """One persistent webcam producer shared by preview and transmission.
+
+    Consumers get independent live cursors into a bounded frame history. A
+    slow consumer skips frames instead of holding up camera capture or making
+    the other consumer stale.
+    """
+
+    def __init__(self, history_frames: int = 48):
+        self._history = deque(maxlen=max(2, int(history_frames)))
+        self._condition = threading.Condition()
+        self._lifecycle_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._key: tuple[int, str] | None = None
+        self._sequence = 0
+        self._error: Exception | None = None
+
+    def configure(self, mode: AETVModeSpec, camera: int = 0) -> None:
+        """Open the requested camera unless that exact producer is running."""
+        key = (int(camera), mode.name)
+        with self._lifecycle_lock:
+            if self._key == key and self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_locked()
+            with self._condition:
+                self._history.clear()
+                self._error = None
+                self._key = key
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=self._run,
+                args=(mode, int(camera), self._stop),
+                daemon=True,
+                name=f"aetv-camera-buffer-{camera}",
+            )
+            self._thread.start()
+
+    def frames(
+        self,
+        mode: AETVModeSpec,
+        camera: int = 0,
+        should_stop=None,
+        latest: bool = False,
+    ) -> Iterator[np.ndarray]:
+        """Yield frames without taking ownership of the camera.
+
+        Ordered consumers such as TX read every available frame. A live
+        preview can request ``latest`` so a delayed paint skips directly to
+        the newest camera picture instead of replaying stale history.
+        """
+        self.configure(mode, camera)
+        with self._condition:
+            cursor = self._sequence
+        while should_stop is None or not should_stop():
+            with self._condition:
+                if latest and self._history and self._history[-1][0] > cursor:
+                    available = self._history[-1]
+                else:
+                    available = next(
+                        (
+                            (sequence, frame)
+                            for sequence, frame in self._history
+                            if sequence > cursor
+                        ),
+                        None,
+                    )
+                if available is None:
+                    if self._error is not None:
+                        raise self._error
+                    self._condition.wait(timeout=0.2)
+                    continue
+                cursor, frame = available
+            yield frame
+
+    def close(self) -> None:
+        with self._lifecycle_lock:
+            self._stop_locked()
+            with self._condition:
+                self._key = None
+                self._history.clear()
+
+    def _stop_locked(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+        self._thread = None
+
+    def _run(self, mode: AETVModeSpec, camera: int, stop: threading.Event) -> None:
+        try:
+            for frame in iter_webcam(mode, camera=camera):
+                if stop.is_set():
+                    return
+                with self._condition:
+                    self._sequence += 1
+                    self._history.append((self._sequence, frame))
+                    self._condition.notify_all()
+        except Exception as error:
+            if not stop.is_set():
+                with self._condition:
+                    self._error = error
+                    self._condition.notify_all()
 
 
 def list_cameras(max_index: int = 8) -> list[dict]:
@@ -78,6 +185,12 @@ def iter_webcam(
     condition = threading.Condition()
     stop = threading.Event()
     state: dict = {"frame": None, "sequence": 0, "error": None, "capture": None}
+    # Sampling must not stop while the neural encoder is using the yielded
+    # GOP. Keep a small, bounded clocked queue so capture for GOP N+1 overlaps
+    # encoding GOP N without accumulating stale camera video.
+    sampled: queue.Queue[np.ndarray] = queue.Queue(
+        maxsize=max(2, int(mode.gop_frames) * 2)
+    )
 
     def drain_camera() -> None:
         capture = cv2.VideoCapture(camera, backend)
@@ -111,38 +224,76 @@ def iter_webcam(
         target=drain_camera, daemon=True, name=f"aetv-camera-{camera}"
     )
     reader.start()
+
+    def sample_camera() -> None:
+        try:
+            with condition:
+                ready_until = time.monotonic() + 10.0
+                while state["frame"] is None and state["error"] is None:
+                    remaining = ready_until - time.monotonic()
+                    if remaining <= 0:
+                        state["error"] = RuntimeError(
+                            f"webcam index {camera} did not deliver a frame"
+                        )
+                        condition.notify_all()
+                        return
+                    condition.wait(remaining)
+                if state["error"] is not None:
+                    return
+
+            period = 1.0 / mode.fps
+            next_frame_at = time.monotonic()
+            while not stop.is_set():
+                delay = next_frame_at - time.monotonic()
+                if delay > 0 and stop.wait(delay):
+                    return
+                with condition:
+                    if state["error"] is not None:
+                        return
+                    frame = state["frame"].copy()
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                value = resize_frame(rgb, mode.width, mode.height)
+                while not stop.is_set():
+                    try:
+                        sampled.put_nowait(value)
+                        break
+                    except queue.Full:
+                        # The consumer fell behind by more than two GOPs.
+                        # Discard the oldest picture and stay live.
+                        try:
+                            sampled.get_nowait()
+                        except queue.Empty:
+                            pass
+                next_frame_at += period
+                next_frame_at = max(next_frame_at, time.monotonic())
+        except Exception as error:
+            with condition:
+                state["error"] = error
+                condition.notify_all()
+
+    sampler = threading.Thread(
+        target=sample_camera, daemon=True, name=f"aetv-camera-sampler-{camera}"
+    )
+    sampler.start()
     try:
         limit = None if duration_s is None else int(round(duration_s * mode.fps))
         produced = 0
-        with condition:
-            ready_until = time.monotonic() + 10.0
-            while state["frame"] is None and state["error"] is None:
-                remaining = ready_until - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError(f"webcam index {camera} did not deliver a frame")
-                condition.wait(remaining)
-            if state["error"] is not None:
-                raise state["error"]
-
-        period = 1.0 / mode.fps
-        next_frame_at = time.monotonic()
         while limit is None or produced < limit:
-            delay = next_frame_at - time.monotonic()
-            if delay > 0 and stop.wait(delay):
-                return
-            with condition:
-                if state["error"] is not None:
-                    raise state["error"]
-                frame = state["frame"].copy()
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            yield resize_frame(rgb, mode.width, mode.height)
+            try:
+                frame = sampled.get(timeout=0.2)
+            except queue.Empty:
+                with condition:
+                    error = state["error"]
+                if error is not None:
+                    raise error
+                if not sampler.is_alive():
+                    raise RuntimeError(f"webcam index {camera} sampler stopped")
+                continue
+            yield frame
             produced += 1
-            next_frame_at += period
-            # A paused consumer must resume from "now", not rapidly consume
-            # every sampling deadline it missed while the TX queue was full.
-            next_frame_at = max(next_frame_at, time.monotonic())
     finally:
         stop.set()
+        sampler.join(timeout=1.0)
         reader.join(timeout=2.0)
         if reader.is_alive() and state["capture"] is not None:
             # Best effort to unblock a backend stuck in read().

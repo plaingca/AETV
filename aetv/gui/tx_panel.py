@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from aetv.audio_io import AudioUnavailable, list_audio_devices
 from aetv.config import AETV_MODES
-from aetv.source import iter_webcam, list_cameras
+from aetv.source import CameraFrameBuffer, list_cameras
 from aetv.station import TxEngine, TxPhase, TxState
 from aetv.gui.widgets import ElidingLabel, VideoView
 
@@ -35,6 +35,7 @@ class TransmitPanel(QWidget):
     _stateArrived = Signal(object)
     _errorArrived = Signal(str)
     _previewArrived = Signal(object)
+    _cameraPreviewArrived = Signal(object)
     _previewStopped = Signal()
     _workerFinished = Signal()
     _camerasArrived = Signal(object)
@@ -43,11 +44,13 @@ class TransmitPanel(QWidget):
     def __init__(self, station, parent=None):
         super().__init__(parent)
         self.station = station
+        self._camera_frames = CameraFrameBuffer()
         self.engine = TxEngine(
             station,
             on_state=self._stateArrived.emit,
             on_error=self._errorArrived.emit,
             on_preview=self._previewArrived.emit,
+            camera_frames=self._camera_frames.frames,
         )
         self._thread: threading.Thread | None = None
         self._start_gate = threading.Event()
@@ -55,11 +58,15 @@ class TransmitPanel(QWidget):
         self._preview_stop = threading.Event()
         self._preview_thread: threading.Thread | None = None
         self._preview_restart_pending = False
+        self._camera_preview_queued = threading.Event()
         self._camera_load_active = False
         self._output_load_active = False
         self._stateArrived.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._previewArrived.connect(self._show_preview, Qt.ConnectionType.QueuedConnection)
+        self._cameraPreviewArrived.connect(
+            self._show_camera_preview, Qt.ConnectionType.QueuedConnection
+        )
         self._previewStopped.connect(self._on_preview_stopped, Qt.ConnectionType.QueuedConnection)
         self._workerFinished.connect(self._on_worker_finished, Qt.ConnectionType.QueuedConnection)
         self._camerasArrived.connect(self._apply_cameras, Qt.ConnectionType.QueuedConnection)
@@ -97,9 +104,6 @@ class TransmitPanel(QWidget):
         if problems:
             self.status.setText(problems[0])
             return
-        # Some camera backends take seconds to return from read().  Ask the
-        # preview to stop here, but wait for it only in the TX worker.
-        self._preview_stop.set()
         source = "webcam" if self.cam_radio.isChecked() else self._file_path
         self.send_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -119,9 +123,6 @@ class TransmitPanel(QWidget):
 
     def _run_send(self, source: str) -> None:
         try:
-            preview = self._preview_thread
-            if preview is not None and preview.is_alive():
-                preview.join(timeout=3.0)
             self._start_gate.wait()
             if self._cancel_requested.is_set():
                 self._stateArrived.emit(
@@ -250,10 +251,17 @@ class TransmitPanel(QWidget):
 
     def _preview_loop(self, mode_name: str, camera: int) -> None:
         try:
-            for frame in iter_webcam(AETV_MODES[mode_name], camera=camera):
-                if self._preview_stop.is_set():
-                    break
-                self._previewArrived.emit(frame)
+            for frame in self._camera_frames.frames(
+                AETV_MODES[mode_name],
+                camera=camera,
+                should_stop=self._preview_stop.is_set,
+                latest=True,
+            ):
+                # At most one camera paint may wait in Qt's event queue. The
+                # next delivery always comes from the newest buffered frame.
+                if not self._camera_preview_queued.is_set():
+                    self._camera_preview_queued.set()
+                    self._cameraPreviewArrived.emit(frame)
         except Exception as error:
             if not self._preview_stop.is_set():
                 self._errorArrived.emit(f"Webcam preview unavailable: {error}")
@@ -268,13 +276,14 @@ class TransmitPanel(QWidget):
 
     def _stop_preview(self) -> None:
         self._preview_stop.set()
-        thread = self._preview_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
 
     def stop_preview(self) -> None:
         """Release the preview camera before the application closes."""
         self._stop_preview()
+        thread = self._preview_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        self._camera_frames.close()
 
     def _choose_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -369,4 +378,12 @@ class TransmitPanel(QWidget):
         self.logMessage.emit(message)
 
     def _show_preview(self, frames) -> None:
+        # Webcam TX has its own always-live preview subscriber. Do not replace
+        # it with a one-second GOP captured earlier for neural encoding.
+        if self.transmitting() and self.cam_radio.isChecked():
+            return
         self.preview.set_rgb(frames)
+
+    def _show_camera_preview(self, frame) -> None:
+        self._camera_preview_queued.clear()
+        self.preview.set_rgb(frame)

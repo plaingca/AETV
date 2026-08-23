@@ -150,6 +150,17 @@ The suite covers N/W/U numerology, a clean modem loopback including V7,
 checkpoint loading when the release model is present, the receive ring buffer,
 Kiwi IQ-to-passband conversion, and fail-safe PTT.
 
+## Codex worktrees
+
+This repository includes a local Codex environment at
+`.codex/environments/environment.toml`. Select **AETV development** when
+starting a worktree task. Codex creates a worktree-local `.venv` from the
+locked dependencies and exposes **Test**, **Build**, and **Run GUI** actions.
+
+The ignored `models/v7-flex8k.pt` checkpoint is not duplicated into every
+worktree. Tests that require it skip there; use a local task when validating
+the release checkpoint or copy the checkpoint into that specific worktree.
+
 ## License
 
 Artistic License 2.0. See `LICENSE` and `NOTICE`.

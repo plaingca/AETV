@@ -18,6 +18,7 @@ from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
 from aetv.station import (
+    Station,
     TxEngine,
     TxPhase,
     WATCHDOG_MARGIN_S,
@@ -301,6 +302,55 @@ def test_webcam_gops_are_captured_and_encoded_lazily(monkeypatch):
     next(stream)
     assert events[-3:] == ["frame:2", "frame:3", "encode:2"]
     stream.close()
+
+
+def test_stream_producer_does_not_encode_past_available_buffer(monkeypatch):
+    """TX startup must not eagerly encode several GOPs before playback."""
+    encoded = []
+    first_chunk_seen = threading.Event()
+    allow_playback = threading.Event()
+
+    class Ptt:
+        def set_ptt(self, _on):
+            pass
+
+        def describe(self):
+            return "test PTT"
+
+        def close(self):
+            pass
+
+    def chunks():
+        for index in range(5):
+            encoded.append(index)
+            yield np.zeros(32, dtype=np.float32)
+
+    def play(stream, rate, **kwargs):
+        iterator = iter(stream)
+        next(iterator)
+        first_chunk_seen.set()
+        assert allow_playback.wait(timeout=2.0)
+        for index, _chunk in enumerate(iterator, start=2):
+            kwargs["on_chunk"](index)
+        return True
+
+    monkeypatch.setattr("aetv.station.play_chunk_stream", play)
+    station = Station(StationSettings(ptt_lead_s=0, ptt_tail_s=0))
+    engine = TxEngine(station, ptt=Ptt())
+    result = []
+    worker = threading.Thread(
+        target=lambda: result.append(engine._keyed_send_stream(chunks(), 24000, 5))
+    )
+    worker.start()
+    assert first_chunk_seen.wait(timeout=2.0)
+    # One GOP is playing and one may be encoded ahead; the producer must not
+    # run through the rest merely because transmission startup is still busy.
+    time.sleep(0.05)
+    assert encoded == [0, 1]
+    allow_playback.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    assert result == [True]
 
 
 def test_debug_wave_recorder_streams_pcm_to_disk(tmp_path):
