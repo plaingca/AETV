@@ -98,6 +98,7 @@ def test_flex_session_uses_documented_filter_command(monkeypatch):
     session = FlexVitaSession("192.0.2.1", filter_low=800, filter_high=9200)
     session.close()
     assert "filt 0 800 9200" in commands
+    assert "transmit set dax=1 rfpower=5 filter_low=800 filter_high=9200" in commands
     assert "client set enforce_network_mtu=1 network_mtu=1200" in commands
     assert not any("filter_lo=" in command for command in commands)
     assert not any(command.startswith("client program") for command in commands)

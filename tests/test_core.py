@@ -154,6 +154,22 @@ def test_aetv_modes_specs():
     assert AETV_MODES["V8"].geometry.tx_bandpass[1] <= 3000.0
 
 
+def test_v8_transmit_waveform_stays_inside_nominal_3khz_channel():
+    mode = AETV_MODES["V8"]
+    rng = np.random.default_rng(8128)
+    gops = [
+        rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+        for _ in range(4)
+    ]
+    audio = np.concatenate(list(modulate_continuous_chunks(gops, "V8")))
+    windowed = audio * np.hanning(len(audio))
+    spectrum = np.abs(np.fft.rfft(windowed)) ** 2
+    frequencies = np.fft.rfftfreq(len(windowed), 1.0 / mode.geometry.fs)
+    outside = spectrum[(frequencies < 300.0) | (frequencies > 3000.0)].sum()
+    # Leave 40 dB of margin for FFT leakage while enforcing the OTA mask.
+    assert outside / spectrum.sum() < 1e-4
+
+
 def test_pilot_sequence_and_papr():
     for band, geom in [("N", BAND_N), ("W", BAND_W), ("U", BAND_U)]:
         p = ofdm.pilot_sequence(band)

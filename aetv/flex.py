@@ -310,7 +310,13 @@ class FlexVitaSession:
         # firmware generations.
         self.control.command(f"filt {idx} {filter_low} {filter_high}")
         self.control.command(f"dax audio set 1 slice={idx} tx=1")
-        self.control.command(f"transmit set dax=1 rfpower={max(1, min(100, int(power)))}")
+        # FILT controls the slice passband, while these transmit fields control
+        # the actual RF transmit chain.  Setting only FILT can leave a previous
+        # Flex-8k TX passband active even when a narrow V8 slice is displayed.
+        self.control.command(
+            f"transmit set dax=1 rfpower={max(1, min(100, int(power)))} "
+            f"filter_low={filter_low} filter_high={filter_high}"
+        )
         if frequency_mhz is not None:
             self._verify_transmit_frequency(float(frequency_mhz))
 

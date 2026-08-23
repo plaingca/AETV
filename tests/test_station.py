@@ -302,6 +302,42 @@ def test_streaming_tx_prepares_first_gop_before_ptt(monkeypatch):
     assert events.index("produce:0") < events.index("ptt:True") < events.index("play:0")
 
 
+def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):
+    captured = {}
+
+    class FakeFlex:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def prepare_tx(self):
+            pass
+
+        def describe(self):
+            return "test Flex"
+
+        def set_ptt(self, _on):
+            pass
+
+        def send_audio_stream(self, chunks, sample_rate, **kwargs):
+            captured["rate"] = sample_rate
+            captured["audio"] = np.concatenate(list(chunks))
+            return True
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("aetv.station.FlexVitaSession", FakeFlex)
+    settings = StationSettings(
+        mode="V8", cat_backend="flex", flex_host="192.0.2.1",
+        flex_native_audio=True, ptt_lead_s=0, ptt_tail_s=0,
+    )
+    engine = TxEngine(Station(settings))
+    chunks = [np.ones(800, dtype=np.float32), np.ones(800, dtype=np.float32)]
+    assert engine._keyed_send_stream(iter(chunks), 8000, len(chunks))
+    assert captured["rate"] == 24000
+    assert len(captured["audio"]) > 2.5 * sum(map(len, chunks))
+
+
 def test_webcam_gops_are_captured_and_encoded_lazily(monkeypatch):
     from aetv.station import Station
 

@@ -639,13 +639,19 @@ class TxEngine:
             and settings.cat_backend == "flex"
             and settings.flex_native_audio
         ):
+            tx_geometry = AETV_MODES[settings.mode].geometry
+            self.station.log(
+                f"Flex {settings.mode} TX mask: "
+                f"{int(tx_geometry.tx_bandpass[0])}-"
+                f"{int(tx_geometry.tx_bandpass[1])} Hz"
+            )
             flex_session = FlexVitaSession(
                 settings.flex_host,
                 frequency_mhz=settings.freq_mhz,
                 mode=settings.require_mode or "DIGU",
                 power=settings.flex_power,
-                filter_low=int(AETV_MODES[settings.mode].geometry.tx_bandpass[0]),
-                filter_high=int(AETV_MODES[settings.mode].geometry.tx_bandpass[1]),
+                filter_low=int(tx_geometry.tx_bandpass[0]),
+                filter_high=int(tx_geometry.tx_bandpass[1]),
             )
             # Stream creation and DAX ownership must complete while receiving;
             # otherwise the first VITA packets can arrive before the radio has
@@ -675,9 +681,15 @@ class TxEngine:
                 return False
             self._set(TxPhase.SENDING, 0.0, "encoding and sending live GOPs")
             if flex_session is not None:
+                flex_chunks = chunks
+                flex_rate = fs
+                if fs != 24000:
+                    flex_resampler = StreamResampler(*resample_ratio(fs, 24000))
+                    flex_chunks = (flex_resampler(chunk) for chunk in chunks)
+                    flex_rate = 24000
                 completed = flex_session.send_audio_stream(
-                    chunks,
-                    fs,
+                    flex_chunks,
+                    flex_rate,
                     should_stop=self._cancel.is_set,
                     on_chunk=lambda count: self._report_progress(
                         count / max(1, n_gops)
