@@ -46,12 +46,15 @@ from aetv.modem import (
     modulate_gop_chunks,
 )
 from aetv.modem import (
+    _interpolate_channel_phase_aware,
+    _payload_wave,
     _equalize_payload_symbol,
     _estimate_snr_db,
     _header_candidates,
     _header_carriers,
     _pilot_coherence,
     decode_header,
+    demodulate_tracked_gop,
     encode_header,
 )
 
@@ -342,6 +345,44 @@ def test_pilot_snr_estimator_subtracts_noise_from_total_power():
     )
     estimate = _estimate_snr_db(1.0 + noise, band="U")
     assert estimate == pytest.approx(target_db, abs=0.7)
+
+
+def test_pilot_snr_ignores_common_phase_rotation():
+    rng = np.random.default_rng(20260824)
+    noise = 0.08 * (
+        rng.standard_normal((64, 160))
+        + 1j * rng.standard_normal((64, 160))
+    )
+    stationary = 1.0 + noise
+    rotating = stationary * np.exp(1j * 2.6 * np.arange(64))[:, None]
+    assert _estimate_snr_db(rotating, band="W") == pytest.approx(
+        _estimate_snr_db(stationary, band="W"), abs=0.05
+    )
+
+
+def test_phase_aware_channel_interpolation_preserves_rotating_gain():
+    before = np.ones(16, dtype=np.complex128)
+    after = np.exp(1j * 2.8) * before
+    midpoint = _interpolate_channel_phase_aware(before, after, 0.5)
+    assert np.abs(midpoint) == pytest.approx(np.ones(16), abs=1e-12)
+    assert np.angle(midpoint) == pytest.approx(np.full(16, 1.4), abs=1e-12)
+
+
+def test_tracked_gop_refines_stale_frequency_offset_from_pilots():
+    rng = np.random.default_rng(20260825)
+    mode = AETV_MODES["V8"]
+    original = rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+    chips = beacon.generate_beacon_chips(
+        n_frames=FRAMES_PER_GOP,
+        callsign="N0CALL",
+        mode_index=mode.index,
+    )
+    payload = _payload_wave(original, chips, mode, interleave=True)
+    actual_offset = 1.1
+    shifted = freq_shift(payload, actual_offset, fs=mode.geometry.fs)
+    result = demodulate_tracked_gop(shifted, mode, freq_offset=4.4)
+    assert result.freq_offset == pytest.approx(actual_offset, abs=0.03)
+    assert np.corrcoef(original, result.gops_latents[0])[0, 1] > 0.99
 
 
 def test_payload_confidence_tracks_pilot_noise_power():

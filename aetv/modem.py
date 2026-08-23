@@ -278,10 +278,57 @@ def _payload_noise_variances(
     grouped = pilots[:, :latent_carriers].reshape(
         -1, FRAMES_PER_GOP, latent_carriers
     )
-    differences = np.diff(grouped, axis=1)
+    # A residual common frequency/phase offset rotates every carrier together
+    # between 125 ms pilot observations.  That deterministic rotation is not
+    # noise and must not collapse confidence to zero.  Align each adjacent
+    # pilot pair by its robust all-carrier common phase before differencing;
+    # carrier-selective changes and AWGN remain in the residual.
+    previous = grouped[:, :-1]
+    following = grouped[:, 1:]
+    common_step = np.angle(
+        np.sum(following * np.conj(previous), axis=2)
+    )
+    aligned_following = following * np.exp(-1j * common_step[..., None])
+    differences = aligned_following - previous
     noise = 0.5 * np.mean(np.abs(differences) ** 2, axis=(1, 2))
     total = np.mean(np.abs(grouped) ** 2, axis=(1, 2))
     return np.maximum(noise, np.maximum(total, 1e-18) * 1e-9)
+
+
+def _pilot_residual_cfo_hz(
+    h_pilots: np.ndarray,
+    latent_carriers: int,
+    pilot_interval_s: float,
+) -> float:
+    """Estimate common residual CFO/Doppler from adjacent pilot phases.
+
+    Pilot spacing bounds the unambiguous correction to +/- half its update
+    rate.  Treating common channel Doppler as CFO is intentional: both rotate
+    every payload carrier and require the same correction before equalization.
+    """
+    pilots = np.asarray(h_pilots)
+    if pilots.ndim != 2 or len(pilots) < 2:
+        return 0.0
+    useful = pilots[:, :latent_carriers]
+    cross = np.sum(useful[1:] * np.conj(useful[:-1]))
+    if abs(cross) <= 1e-18:
+        return 0.0
+    phase_step = float(np.angle(cross))
+    return phase_step / (2.0 * np.pi * float(pilot_interval_s))
+
+
+def _interpolate_channel_phase_aware(
+    before: np.ndarray,
+    after: np.ndarray,
+    fraction: float,
+) -> np.ndarray:
+    """Interpolate channel magnitude and shortest-path phase independently."""
+    before = np.asarray(before)
+    after = np.asarray(after)
+    magnitude = (1.0 - fraction) * np.abs(before) + fraction * np.abs(after)
+    phase_step = np.angle(after * np.conj(before))
+    phase = np.angle(before) + fraction * phase_step
+    return magnitude * np.exp(1j * phase)
 
 
 def _equalize_payload_symbol(
@@ -828,6 +875,7 @@ class StreamingDemodulator:
                     continue
                 self.buffer = self.buffer[payload_samples:]
                 self.samples_consumed += payload_samples
+                self._tracking_freq_offset = result.freq_offset
                 # Below this independent carrier-structure floor, decoded
                 # latents are indistinguishable from noise. Keep tracking for
                 # two intervals so a short fade does not end reception, but do
@@ -1128,13 +1176,19 @@ def _estimate_snr_db(h_pilot: np.ndarray, band: str = "W") -> float:
     """Pilot-derived SNR in 2500 Hz reference bandwidth."""
     if len(h_pilot) < 2:
         return float("nan")
-    diffs = np.diff(h_pilot, axis=0)
-    noise_var = 0.5 * float(np.mean(np.abs(diffs) ** 2))
-    total_var = float(np.mean(np.abs(h_pilot) ** 2))
+    geom = BANDS[band]
+    useful = np.asarray(h_pilot)[:, : geom.latent_carriers]
+    previous = useful[:-1]
+    following = useful[1:]
+    common_step = np.angle(np.sum(following * np.conj(previous), axis=1))
+    aligned_following = following * np.exp(-1j * common_step[:, None])
+    noise_var = 0.5 * float(
+        np.mean(np.abs(aligned_following - previous) ** 2)
+    )
+    total_var = float(np.mean(np.abs(useful) ** 2))
     signal_var = max(0.0, total_var - noise_var)
     if noise_var <= 0 or total_var <= 0:
         return float("nan")
-    geom = BANDS[band]
     snr_50hz = signal_var / noise_var
     snr_ref = snr_50hz * (geom.carriers * RS / SNR_REF_BW_HZ)
     # A finite floor keeps GUI/log serialization useful for noise-only input.
@@ -1388,6 +1442,30 @@ def demodulate_gop_stream(
         h_pilots.append(r_pilot / pilot_seq)
 
     h_pilot_arr = np.asarray(h_pilots)
+    refined_freq_offset = float(acq.freq_offset)
+    # The acquisition estimator is intentionally coarse. Use payload pilots
+    # to remove the remaining common rotation before interpolation, but only
+    # when the carriers contain independent evidence of a real signal.
+    if _pilot_coherence(h_pilot_arr) >= 0.09:
+        residual_cfo = _pilot_residual_cfo_hz(
+            h_pilot_arr,
+            geom.latent_carriers,
+            frame_samples / fs,
+        )
+        refined_freq_offset += residual_cfo
+        if abs(residual_cfo) > 1e-6:
+            z_cfo = freq_correct(z, refined_freq_offset, fs)
+            r_pilots = []
+            h_pilots = []
+            for f in range(total_frames):
+                frame_sample = frames_start + f * frame_samples
+                pilot_sample = frame_sample + ncp
+                r_pilot = ofdm.demod_window(
+                    z_cfo, pilot_sample, band=band
+                )
+                r_pilots.append(r_pilot)
+                h_pilots.append(r_pilot / pilot_seq)
+            h_pilot_arr = np.asarray(h_pilots)
     noise_variances = _payload_noise_variances(
         h_pilot_arr, geom.latent_carriers
     )
@@ -1420,7 +1498,9 @@ def demodulate_gop_stream(
             # This removes up to 100 ms of avoidable pilot age on fading paths.
             if f + 1 < total_frames and (f + 1) % FRAMES_PER_GOP:
                 fraction = (s + 1) / SYMS_PER_FRAME
-                h_data = (1.0 - fraction) * h_f + fraction * h_pilot_arr[f + 1]
+                h_data = _interpolate_channel_phase_aware(
+                    h_f, h_pilot_arr[f + 1], fraction
+                )
             else:
                 h_data = h_f
 
@@ -1479,7 +1559,7 @@ def demodulate_gop_stream(
         gops_latents=gops_latents,
         gops_weights=gops_weights,
         mode=mode,
-        freq_offset=acq.freq_offset,
+        freq_offset=refined_freq_offset,
         sync_metric=acq.metric,
         frames_received=total_frames,
         beacon=beacon_res,
@@ -1540,6 +1620,26 @@ def demodulate_tracked_gop(
         r_pilots.append(r_pilot)
         h_pilots.append(r_pilot / pilot_seq)
     pilot_array = np.asarray(h_pilots)
+    refined_freq_offset = float(freq_offset)
+    if _pilot_coherence(pilot_array) >= 0.09:
+        residual_cfo = _pilot_residual_cfo_hz(
+            pilot_array,
+            geom.latent_carriers,
+            frame_samples / fs,
+        )
+        refined_freq_offset += residual_cfo
+        if abs(residual_cfo) > 1e-6:
+            z_cfo = freq_correct(z, refined_freq_offset, fs)
+            r_pilots = []
+            h_pilots = []
+            for frame in range(FRAMES_PER_GOP):
+                frame_sample = frame * frame_samples
+                r_pilot = ofdm.demod_window(
+                    z_cfo, frame_sample + ncp, band=mode.band
+                )
+                r_pilots.append(r_pilot)
+                h_pilots.append(r_pilot / pilot_seq)
+            pilot_array = np.asarray(h_pilots)
     noise_variance = _payload_noise_variances(
         pilot_array, geom.latent_carriers
     )[0]
@@ -1554,9 +1654,8 @@ def demodulate_tracked_gop(
             )
             if frame + 1 < FRAMES_PER_GOP:
                 fraction = (data_index + 1) / SYMS_PER_FRAME
-                h_data = (
-                    (1.0 - fraction) * h_f
-                    + fraction * pilot_array[frame + 1]
+                h_data = _interpolate_channel_phase_aware(
+                    h_f, pilot_array[frame + 1], fraction
                 )
             else:
                 h_data = h_f
@@ -1599,7 +1698,7 @@ def demodulate_tracked_gop(
         gops_latents=[latents],
         gops_weights=[weights],
         mode=mode,
-        freq_offset=float(freq_offset),
+        freq_offset=refined_freq_offset,
         sync_metric=1.0,
         frames_received=FRAMES_PER_GOP,
         beacon=beacon_result,
