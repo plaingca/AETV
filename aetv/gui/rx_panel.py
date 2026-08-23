@@ -422,6 +422,7 @@ class ReceivePanel(QWidget):
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
         self.kiwi_host = QLineEdit()
+        self.kiwi_host.setMinimumWidth(190)
         self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
         self.kiwi_host.textEdited.connect(self._on_manual_kiwi_host_edited)
         self.kiwi_host.editingFinished.connect(self._normalize_kiwi_entry)
@@ -443,7 +444,9 @@ class ReceivePanel(QWidget):
             "this selects settings but never starts a transmission."
         )
         self.find_button.clicked.connect(self._find_best_rf_pair)
-        self.auto_kiwi = QCheckBox("Keep the receiver on the best available path")
+        self.auto_kiwi = QCheckBox(
+            "Automatically replace the receiver with the predictor's best path"
+        )
         self.auto_kiwi.setChecked(self.station.settings.kiwi_auto_select)
         self.auto_kiwi.toggled.connect(self._on_auto_kiwi_toggled)
         self.kiwi_recommendation = QLabel("Best receiver not calculated yet")
@@ -473,11 +476,12 @@ class ReceivePanel(QWidget):
         self.kiwi_label = QLabel("Receiver address")
         row2.addWidget(self.kiwi_label)
         row2.addWidget(self.kiwi_host, 1)
+        row3 = QHBoxLayout()
         self.kiwi_dial_label = QLabel("TX dial")
-        row2.addWidget(self.kiwi_dial_label)
-        row2.addWidget(self.kiwi_dial)
-        row2.addWidget(self.kiwi_list, 1)
-        row2.addWidget(self.find_button)
+        row3.addWidget(self.kiwi_dial_label)
+        row3.addWidget(self.kiwi_dial)
+        row3.addWidget(self.kiwi_list, 1)
+        row3.addWidget(self.find_button)
         path_row = QHBoxLayout()
         path_row.addWidget(self.kiwi_recommendation, 1)
         path_row.addWidget(self.path_planner_button)
@@ -491,6 +495,7 @@ class ReceivePanel(QWidget):
         buttons.addStretch(1)
         strip.addLayout(row1)
         strip.addLayout(row2)
+        strip.addLayout(row3)
         strip.addLayout(path_row)
         strip.addLayout(auto_row)
         strip.addWidget(self.status)
@@ -774,6 +779,7 @@ class ReceivePanel(QWidget):
             self._probe_receiver = next(
                 (item for item in self._receivers if item.host == str(host)), None
             )
+            self._show_manual_kiwi(str(host))
 
     def _on_manual_kiwi_host_edited(self, _text: str) -> None:
         """Treat typed receiver addresses as pinned operator selections."""
@@ -781,10 +787,23 @@ class ReceivePanel(QWidget):
         self._kiwi_force_auto = False
         self._recommended_receiver = None
         self.station.settings.kiwi_auto_select = False
+        self.kiwi_list.setCurrentIndex(-1)
+        self._show_manual_kiwi(_text.strip())
         if not self.listening():
             self.status.setText(
                 "manual Kiwi pinned; automatic path selection is off"
             )
+
+    def _show_manual_kiwi(self, host: str) -> None:
+        display = host or "type a receiver address"
+        self.kiwi_recommendation.setText(
+            f"Manual receiver pinned: {display}\n"
+            "The propagation predictor will not replace it."
+        )
+        self.kiwi_recommendation.setStyleSheet(
+            "QLabel { padding: 5px 8px; border: 1px solid #52657a; "
+            "border-radius: 4px; background: #263747; color: white; }"
+        )
 
     def set_probe_receiver(self, receiver: KiwiReceiver) -> None:
         """Remember exact receiver coordinates for the next matching OTA decode."""

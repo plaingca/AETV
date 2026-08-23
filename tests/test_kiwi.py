@@ -155,14 +155,26 @@ def test_typing_kiwi_host_pins_manual_selection():
         def setChecked(self, checked):
             self.checked = checked
 
-    class Status:
+    class TextWidget:
         text = ""
+        style = ""
 
         def setText(self, text):
             self.text = text
 
+        def setStyleSheet(self, style):
+            self.style = style
+
+    class ReceiverList:
+        index = 0
+
+        def setCurrentIndex(self, index):
+            self.index = index
+
     toggle = Toggle()
-    status = Status()
+    status = TextWidget()
+    recommendation = TextWidget()
+    receiver_list = ReceiverList()
     panel = SimpleNamespace(
         auto_kiwi=toggle,
         _kiwi_force_auto=True,
@@ -172,12 +184,20 @@ def test_typing_kiwi_host_pins_manual_selection():
         ),
         listening=lambda: False,
         status=status,
+        kiwi_list=receiver_list,
+        kiwi_recommendation=recommendation,
+    )
+    panel._show_manual_kiwi = lambda host: ReceivePanel._show_manual_kiwi(
+        panel, host
     )
     ReceivePanel._on_manual_kiwi_host_edited(panel, "108.180.193.61:8073")
     assert not toggle.checked
     assert not panel._kiwi_force_auto
     assert panel._recommended_receiver is None
     assert not panel.station.settings.kiwi_auto_select
+    assert receiver_list.index == -1
+    assert "108.180.193.61:8073" in recommendation.text
+    assert "will not replace it" in recommendation.text
     assert "manual Kiwi pinned" in status.text
 
 
