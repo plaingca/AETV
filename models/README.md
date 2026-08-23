@@ -52,3 +52,16 @@ Export from the research tree:
 
 The original checkpoint remains useful as a reproducible release baseline,
 but is no longer selected by default.
+
+## HF-3k V8 checkpoints
+
+V8 uses the standard-channel W waveform at 192x108 and 6 fps. These files are
+not stored in git; copy the exported inference checkpoints into `models/`:
+
+| File | Purpose | SHA-256 |
+|---|---|---|
+| `v8-hf3k-perceptual.pt` | V8 default; motion-aware perceptual fine-tune | `35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707` |
+| `v8-hf3k-robust.pt` | Alternate for 0 dB and severe MPP fading | `4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd` |
+
+See [`docs/v8-hf3k.md`](../docs/v8-hf3k.md) for the waveform contract,
+fine-tuning recipe, paired 32-clip results, and operating commands.

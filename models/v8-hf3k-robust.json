@@ -1,0 +1,10 @@
+{
+  "path": "models\\v8-hf3k-robust.pt",
+  "mode": "V8",
+  "step": 250,
+  "source_run": "v8-hf3k-channel",
+  "bytes": 215757893,
+  "sha256": "4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd",
+  "model_width": 128,
+  "latent_channels": 3
+}

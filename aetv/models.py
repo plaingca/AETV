@@ -1,4 +1,4 @@
-"""Spatiotemporal GOP video autoencoders for AETV modes V0-V7.
+"""Spatiotemporal GOP video autoencoders for AETV modes V0-V8.
 
 Uses spatiotemporal 3D ResNets, axial attention, and smooth temporal skips,
 mapping between video GOPs (B, 3, T, H, W) and 1D analog latents at exact
@@ -41,8 +41,16 @@ class AETVEncoder(nn.Module):
         else:
             self.mode = mode
 
+        # Compact is the rate-compatible motion path: it preserves one latent
+        # time slice per source frame and supplies its own deeper bottleneck.
+        # The non-compact encoder depth tiers address different module indices
+        # and are intentionally disabled for this layout.
+        if compact:
+            deep = deep2 = deep3 = False
+
         self.latent_budget = self.mode.latents_per_gop
         self.latent_channels = latent_channels
+        self.compact = compact
         is_deep = deep and (width >= 64)
         is_deep2 = deep2 and (width >= 64)
         is_deep3 = deep3 and (width >= 64)
@@ -103,6 +111,7 @@ class AETVDecoder(nn.Module):
 
         self.latent_budget = self.mode.latents_per_gop
         self.latent_channels = latent_channels
+        self.compact = compact
         is_deep_tail = deep_tail and (width >= 64)
         is_deeper = deeper and (width >= 64)
         is_deepest = deepest and (width >= 64)
@@ -124,6 +133,17 @@ class AETVDecoder(nn.Module):
 
     def _get_grid_shape(self, output_shape: Tuple[int, int, int]) -> Tuple[int, int, int]:
         frames, height, width = output_shape
+        if self.compact:
+            # Compact encoding deliberately keeps one latent slice per source
+            # frame and performs four 2x spatial reductions.  Reusing the
+            # legacy 2x8x8 geometry here scrambles the flattened latent order:
+            # the decoder sees three temporal slices instead of six and pads
+            # almost half of the reconstructed grid with zeros.
+            return (
+                frames,
+                max(1, math.ceil(height / 16.0)),
+                max(1, math.ceil(width / 16.0)),
+            )
         # Spatial downsample is 8x, temporal downsample is 2x
         t_latent = max(1, math.ceil(frames / 2.0))
         h_latent = max(1, height // 8)
@@ -232,10 +252,25 @@ class AETVAutoencoder(nn.Module):
         ckpt = torch.load(checkpoint_path, map_location=device)
         state_dict = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
 
-        # Check if direct state dict matches self
-        incompatible = self.load_state_dict(state_dict, strict=False)
-        if len(incompatible.missing_keys) == 0:
+        # Load every shape-compatible native tensor. ``strict=False`` alone
+        # still raises on size mismatches, which prevented a trained spatial
+        # backbone from warm-starting a new latent interface (for example the
+        # compact motion-preserving V8 layout).
+        own_state = self.state_dict()
+        compatible = {
+            key: value
+            for key, value in state_dict.items()
+            if key in own_state and own_state[key].shape == value.shape
+        }
+        incompatible = self.load_state_dict(compatible, strict=False)
+        if len(compatible) == len(own_state) and not incompatible.unexpected_keys:
             print(f"Loaded exact matching native AETV weights from {checkpoint_path}")
+            return
+        if compatible:
+            print(
+                f"Loaded {len(compatible)}/{len(own_state)} shape-compatible "
+                f"native AETV tensors from {checkpoint_path}"
+            )
             return
 
         # Otherwise extract encoder and decoder submodules from SSTVAE checkpoint

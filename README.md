@@ -128,6 +128,7 @@ The exact severe-channel warm-start command and reference results are in
 | V0 | N, 1.2 kHz | 64×48 | 6 fps | 8 kHz |
 | V1 | W, 2.25 kHz | 96×72 | 6 fps | 8 kHz |
 | V7 | U, ~8 kHz | 256×144 | 12 fps | 24 kHz |
+| V8 | W, ~2.25 kHz | 192×108 | 6 fps | 8 kHz |
 
 V7 is the published Flex-8k mode. Each GOP is exactly one RF second: 8 OFDM
 frames and 10112 analog latents. Live station transmissions send lead-in,
@@ -139,6 +140,12 @@ than 40.2 seconds and sustains 12 fps. A receiver entering after the initial
 header acquires symbol timing from cyclic prefixes, identifies pilot/frame
 phase and the GOP boundary from the beacon, then jumps to the newest complete
 GOP. Encoding, modulation, acquisition, and decoding all run incrementally.
+
+V8 is the experimental standard-channel counterpart: it trades half the frame
+rate and one quarter of V7's latent throughput for 192×108 16:9 video on
+450–2650 Hz carriers. It can load the V7 checkpoint for a zero-shot trial and
+is designed to be fine-tuned from those weights. See
+[`docs/v8-hf3k.md`](docs/v8-hf3k.md) for the waveform budget and commands.
 
 ## Credits
 
@@ -163,7 +170,7 @@ uv run pytest
 uv build
 ```
 
-The suite covers N/W/U numerology, a clean modem loopback including V7,
+The suite covers N/W/U numerology, clean modem loopbacks including V7 and V8,
 checkpoint loading when the release model is present, the receive ring buffer,
 Kiwi IQ-to-passband conversion, and fail-safe PTT.
 

@@ -21,7 +21,11 @@ from .sync import SyncError
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", default="V7", choices=list(AETV_MODES), help="waveform / video mode")
-    parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT), help="inference checkpoint")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="inference checkpoint (default: the selected mode's release checkpoint)",
+    )
     parser.add_argument("--device", default=None, help="torch device, e.g. cuda or cpu")
     parser.add_argument("--callsign", default="N0CALL", help="station identification carried on the beacon")
 

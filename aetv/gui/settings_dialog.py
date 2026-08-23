@@ -210,7 +210,7 @@ class SettingsDialog(QDialog):
             self.mode.addItem(f"{name} — {spec.description}", name)
         self.mode.setCurrentIndex(max(0, self.mode.findData(self._settings.mode)))
         self.checkpoint = QLineEdit(self._settings.checkpoint)
-        self.checkpoint.setPlaceholderText("models/v7-flex8k-severe.pt")
+        self.checkpoint.setPlaceholderText("selected mode's default checkpoint")
         browse = QPushButton("File…")
         browse.clicked.connect(self._browse_checkpoint)
         ck = QWidget()

@@ -193,7 +193,10 @@ class Station:
         self._on_log(message)
 
     def checkpoint_path(self) -> Path:
-        return resolve_checkpoint(self.settings.checkpoint or None)
+        return resolve_checkpoint(
+            self.settings.checkpoint or None,
+            mode=self.settings.mode,
+        )
 
     def load_codec(self) -> AETVCodec:
         device = self.settings.torch_device or None

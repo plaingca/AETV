@@ -134,7 +134,7 @@ def test_aetv_band_geometries():
 
 
 def test_aetv_modes_specs():
-    for name in ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7"]:
+    for name in ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8"]:
         mode = AETV_MODES[name]
         assert mode.name == name
         assert mode.index in AETV_MODES_BY_INDEX
@@ -145,6 +145,11 @@ def test_aetv_modes_specs():
     assert AETV_MODES["V7"].width == 256
     assert AETV_MODES["V7"].height == 144
     assert AETV_MODES["V7"].fps == 12.0
+    assert AETV_MODES["V8"].band == "W"
+    assert AETV_MODES["V8"].width == 192
+    assert AETV_MODES["V8"].height == 108
+    assert AETV_MODES["V8"].fps == 6.0
+    assert AETV_MODES["V8"].geometry.tx_bandpass[1] <= 3000.0
 
 
 def test_pilot_sequence_and_papr():
@@ -413,7 +418,7 @@ def test_gop_framing_and_interleaving():
         assert np.allclose(unpacked_lat, latents, atol=1e-5)
 
 
-@pytest.mark.parametrize("mode_name", ["V0", "V1", "V2", "V3", "V4", "V5"])
+@pytest.mark.parametrize("mode_name", ["V0", "V1", "V2", "V3", "V4", "V5", "V8"])
 def test_aetv_autoencoder_forward_backward(mode_name):
     mode_spec = AETV_MODES[mode_name]
     model = AETVAutoencoder(mode=mode_spec, width=32, causal=mode_spec.causal)
@@ -437,6 +442,23 @@ def test_aetv_autoencoder_forward_backward(mode_name):
     loss.backward()
     assert video.grad is not None
     assert torch.isfinite(video.grad).all()
+
+
+def test_v8_compact_preserves_frame_axis_and_latent_order():
+    mode = AETV_MODES["V8"]
+    model = AETVAutoencoder(
+        mode=mode, width=32, latent_channels=6, compact=True,
+        causal=mode.causal,
+    )
+    video = torch.rand(1, 3, mode.gop_frames, mode.height, mode.width)
+
+    grid = model.encoder.encoder(video)
+    assert grid.shape == (1, 6, 6, 7, 12)
+    assert model.decoder._get_grid_shape(video.shape[-3:]) == (6, 7, 12)
+
+    latents = model.encoder(video)
+    recon = model.decoder(latents, torch.ones_like(latents))
+    assert recon.shape == video.shape
 
 
 def test_aetv_latent_channel_stage1():
@@ -477,6 +499,7 @@ def test_aetv_end_to_end_modem_clean_loopback():
     for mode_name, band, geom in [
         ("V0", "N", BAND_N),
         ("V1", "W", BAND_W),
+        ("V8", "W", BAND_W),
         ("V7", "U", BAND_U),
     ]:
         gop_lat = rng.standard_normal(geom.latents_per_gop).astype(np.float32)

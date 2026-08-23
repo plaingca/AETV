@@ -10,6 +10,8 @@ looks soft rather than blocky or silent.
 - The beacon carries an 8-character callsign. Set `--callsign` to yours.
 - Flex-8k occupies about 8 kHz of audio. That is not a standard 2.7 kHz SSB
   channel. Use a wide digital slice (DIGU) and stay inside the band plan.
+- Experimental V8 occupies about 2.25 kHz on 450-2650 Hz audio carriers and is
+  the mode intended for a nominal 3 kHz SSB channel.
 - Yesterday's clear frequency is not a check today. Listen first.
 
 ## Station app
@@ -74,6 +76,13 @@ The published mode is **V7** on a Flex 6000-series radio:
 
 A receiver needs the same checkpoint and the same mode. A narrow SSB filter
 will cut the upper carriers and the picture will collapse.
+
+For a standard channel, select **V8** at both ends. It uses 8 kHz audio, 45
+carriers from 450 through 2650 Hz, and 192x108 color at 6 frames/s. The V7
+checkpoint is structurally compatible for an initial experiment, but use the
+dedicated V8 checkpoint for transmission. V8 remains experimental until it is
+validated on-air. See
+[`v8-hf3k.md`](v8-hf3k.md).
 
 ## Send
 
