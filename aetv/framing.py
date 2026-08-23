@@ -102,10 +102,11 @@ def pack_gop_symbols(
         symbols[:, geom.beacon_carrier] = scale * (chips[:, 2] + 1j * chips[:, 3])
     elif band == "U" and len(beacon_chips) >= n_data_syms:
         # Repeat each logical beacon chip on I/Q of both reserved carriers.
-        # Combining provides 6 dB without consuming more RF time; a 2x chip
-        # amplitude gives margin for the high-edge rolloff seen in Kiwi OTA IQ.
+        # Combining provides 6 dB without consuming more RF time. Unit I/Q
+        # keeps each reserved carrier at the same average power as a latent
+        # carrier; the former 2x amplitude unnecessarily drove the clipper.
         chips = np.asarray(beacon_chips[:n_data_syms], dtype=np.float32)
-        repeated = np.float32(2.0) * (chips + 1j * chips)
+        repeated = chips + 1j * chips
         symbols[:, geom.latent_carriers] = repeated
         symbols[:, geom.beacon_carrier] = repeated
     elif len(beacon_chips) >= n_data_syms:

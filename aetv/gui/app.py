@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from aetv.settings import StationSettings, load_settings, save_settings
+from aetv.hfchannel import CHANNEL_PROFILES
 from aetv.station import Station
 from aetv.gui.rx_panel import ReceivePanel
 from aetv.gui.settings_dialog import SettingsDialog
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self._tx_waiting_for_rx = False
         self._tx_finished_while_stopping_rx = False
         self._resume_rx = False
+        self._emulation_active = False
         self._build()
         self._load_codec()
 
@@ -112,6 +114,7 @@ class MainWindow(QMainWindow):
         self.tx.pttChanged.connect(self.ptt_lamp.set_keyed)
         self.tx.transmitStarted.connect(self._on_tx_started)
         self.tx.transmitFinished.connect(self._on_tx_finished)
+        self.tx.loopbackVideo.connect(self.rx.show_emulated)
 
         self._build_menu()
         self.resize(1280, 800)
@@ -185,7 +188,8 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self,
             "AETV checkpoint",
-            message + "\n\nCopy the published Flex-8k weights to models/v7-flex8k.pt.",
+            message + "\n\nCopy the severe-channel Flex-8k weights to "
+            "models/v7-flex8k-severe.pt.",
         )
 
     def open_settings(self) -> None:
@@ -218,11 +222,19 @@ class MainWindow(QMainWindow):
 
     def _on_tx_started(self) -> None:
         self._tx_finished_while_stopping_rx = False
-        if self.rx.listening() and self.settings.rx_source != "kiwi":
+        emulating = self.tx.emulating()
+        self._emulation_active = emulating
+        if emulating:
+            key = self.tx.selected_channel_profile()
+            self.rx.prepare_emulator(CHANNEL_PROFILES[key].label)
+        if self.rx.listening() and (emulating or self.settings.rx_source != "kiwi"):
             self.rx.stop()
             self._resume_rx = True
             self._tx_waiting_for_rx = True
-            self._log("receive paused for half-duplex transmit")
+            self._log(
+                "receive paused for channel loopback"
+                if emulating else "receive paused for half-duplex transmit"
+            )
         else:
             self._resume_rx = False
             self._tx_waiting_for_rx = False
@@ -236,9 +248,7 @@ class MainWindow(QMainWindow):
         self._tx_waiting_for_rx = False
         self.tx.allow_transmit()
         if self._tx_finished_while_stopping_rx and self._resume_rx:
-            self.rx.start()
-            self._resume_rx = False
-            self._tx_finished_while_stopping_rx = False
+            self._resume_or_hold_receive()
 
     def _on_tx_finished(self) -> None:
         self.ptt_lamp.set_keyed(False)
@@ -246,8 +256,17 @@ class MainWindow(QMainWindow):
             if self._tx_waiting_for_rx:
                 self._tx_finished_while_stopping_rx = True
                 return
+            self._resume_or_hold_receive()
+        self._emulation_active = False
+
+    def _resume_or_hold_receive(self) -> None:
+        if self._emulation_active:
+            self._log("receive remains paused so the loopback result stays visible")
+        else:
             self.rx.start()
-            self._resume_rx = False
+        self._resume_rx = False
+        self._tx_finished_while_stopping_rx = False
+        self._emulation_active = False
 
     def _log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")

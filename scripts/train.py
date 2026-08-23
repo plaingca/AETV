@@ -782,7 +782,13 @@ def main():
     # Use existing cached clips from eval directory or streaming buffer
     cached_eval_files = sorted(list(Path("runs/openvid-cache-5fps-eval-v68").glob("*.pt")))
     if not cached_eval_files:
-        cached_eval_files = sorted(list(Path(args.cache_dir).glob("*.pt")))[:5]
+        mode_suffix = (
+            f"mode_{mode_spec.name.lower()}_{mode_spec.width}x"
+            f"{mode_spec.height}_{int(mode_spec.fps)}fps"
+        )
+        cached_eval_files = sorted(
+            list((Path(args.cache_dir) / mode_suffix).glob("*.pt"))
+        )[:5]
     
     for f in cached_eval_files[:5]:
         clip = torch.load(f).float()

@@ -1,4 +1,4 @@
-"""Load the published Flex-8k checkpoint and encode/decode video GOPs."""
+"""Load the default Flex-8k checkpoint and encode/decode video GOPs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import torch
 from .config import AETV_MODES, AETVModeSpec
 from .models import AETVAutoencoder
 
-DEFAULT_CHECKPOINT = Path("models") / "v7-flex8k.pt"
+DEFAULT_CHECKPOINT = Path("models") / "v7-flex8k-severe.pt"
 DEFAULT_MODE = "V7"
 
 
@@ -36,7 +36,7 @@ def resolve_checkpoint(path: str | Path | None = None) -> Path:
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(
         f"AETV checkpoint not found (searched: {searched}).\n"
-        "Copy the published Flex-8k weights to models/v7-flex8k.pt, set "
+        "Copy the severe-channel Flex-8k weights to models/v7-flex8k-severe.pt, set "
         "AETV_CHECKPOINT, or pass --checkpoint."
     )
 

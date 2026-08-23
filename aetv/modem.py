@@ -103,9 +103,10 @@ def clip_envelope_and_filter(
     bandpass_hz: tuple[float, float],
     fs: int = FS,
     iterations: int = 2,
+    reference_power: float | None = None,
 ) -> np.ndarray:
     """Envelope clip-and-filter for PAPR control."""
-    power = np.mean(x**2)
+    power = float(np.mean(x**2)) if reference_power is None else float(reference_power)
     if power == 0:
         return x
     thresh = np.sqrt(2.0 * power) * 10.0 ** (clip_headroom_db / 20.0)
@@ -222,13 +223,32 @@ class _ContinuousTxConditioner:
         self.taps = signal.firwin(201, mode.geometry.tx_bandpass, fs=self.fs, pass_zero=False)
         self.states = [np.zeros(len(self.taps) - 1) for _ in range(iterations)]
 
-    def process(self, values: np.ndarray) -> np.ndarray:
+    def process(
+        self,
+        values: np.ndarray,
+        *,
+        reference_power: float | None = None,
+    ) -> np.ndarray:
         y = np.asarray(values, dtype=np.float64)
         input_power = float(np.mean(y**2)) if y.size else 0.0
+        # Keep one threshold for both clip/filter passes. This is the
+        # checkpoint-era AETV contract: recomputing it after the first FIR
+        # pass lowers the second-pass threshold and over-clips the payload.
+        threshold = (
+            np.sqrt(
+                2.0
+                * (
+                    input_power
+                    if reference_power is None
+                    else float(reference_power)
+                )
+            )
+            * 10.0 ** (CLIP_HEADROOM_DB / 20.0)
+            if (reference_power if reference_power is not None else input_power) > 0.0
+            else 0.0
+        )
         for index, state in enumerate(self.states):
-            power = float(np.mean(y**2)) if y.size else 0.0
-            if power > 0.0:
-                threshold = np.sqrt(2.0 * power) * 10.0 ** (CLIP_HEADROOM_DB / 20.0)
+            if threshold > 0.0:
                 analytic = signal.hilbert(y)
                 scale = np.minimum(1.0, threshold / np.maximum(np.abs(analytic), 1e-12))
                 y = np.real(analytic * scale)
@@ -239,6 +259,41 @@ class _ContinuousTxConditioner:
             rms = float(np.sqrt(np.mean(y**2)))
             y = y / max(rms, 1e-9)
         return y.astype(np.float32)
+
+
+def _payload_equalizer_scales(
+    h_pilots: np.ndarray,
+    latent_carriers: int,
+) -> np.ndarray:
+    """Return one robust channel-amplitude reference per GOP.
+
+    Payload regularization must follow the received gain. Audio devices and RF
+    captures have arbitrary amplitude, so fixed absolute constants make the
+    recovered latents and confidence depend on AGC level. The checkpoint's
+    differentiable channel has a nominal pilot gain near one; normalizing the
+    constants by each GOP's median pilot gain preserves that contract while
+    remaining invariant to capture amplitude.
+    """
+    pilots = np.asarray(h_pilots)
+    if pilots.ndim != 2 or len(pilots) % FRAMES_PER_GOP:
+        raise ValueError("pilot estimates must contain complete GOPs")
+    grouped = pilots[:, :latent_carriers].reshape(
+        -1, FRAMES_PER_GOP, latent_carriers
+    )
+    return np.maximum(np.median(np.abs(grouped), axis=(1, 2)), 1e-9)
+
+
+def _equalize_payload_symbol(
+    received: np.ndarray,
+    channel: np.ndarray,
+    scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Scale-invariant checkpoint-compatible payload equalization."""
+    magnitude = np.abs(channel)
+    denominator = magnitude**2 + 1e-3 * scale**2
+    equalized = received * np.conj(channel) / denominator
+    weights = np.clip(magnitude / (magnitude + 0.1 * scale), 0.0, 1.0)
+    return equalized, weights
 
 
 def _header_aided_acquisitions(
@@ -259,7 +314,7 @@ def _header_aided_acquisitions(
     if peak <= 1e-12:
         return []
     z = to_baseband(values / peak, geom.fcenter_hz, fs)
-    product = z[:-m] * np.conj(z[m:])
+    product = z[m:] * np.conj(z[:-m])
     kernel = np.ones(ncp)
     correlation = signal.fftconvolve(product, kernel, mode="valid")
     e1 = signal.fftconvolve(np.abs(z[:-m]) ** 2, kernel, mode="valid")
@@ -377,7 +432,7 @@ def _ofdm_timing_metric(audio: np.ndarray, band: str) -> float:
     if len(values) < m + ncp:
         return 0.0
     z = to_baseband(values, geom.fcenter_hz, fs)
-    product = z[:-m] * np.conj(z[m:])
+    product = z[m:] * np.conj(z[:-m])
     kernel = np.ones(ncp)
     correlation = signal.fftconvolve(product, kernel, mode="valid")
     e1 = signal.fftconvolve(np.abs(z[:-m]) ** 2, kernel, mode="valid")
@@ -465,6 +520,9 @@ def modulate_gop_stream(
         clip_headroom_db=CLIP_HEADROOM_DB,
         bandpass_hz=geom.tx_bandpass,
         fs=fs,
+        reference_power=float(
+            np.mean(np.concatenate(gop_audio_chunks, dtype=np.float64) ** 2)
+        ),
     )
     return conditioned.astype(np.float32)
 
@@ -515,17 +573,22 @@ def modulate_gop_chunks(
             frame_syms[frame * SYMS_PER_FRAME + 1 : (frame + 1) * SYMS_PER_FRAME] = data_syms[
                 frame * DATA_SYMS_PER_FRAME : (frame + 1) * DATA_SYMS_PER_FRAME
             ]
+        payload_wave = ofdm.modulate_symbols(frame_syms, mode.band)
         raw = np.concatenate(
             [
                 np.zeros(leadin_samples),
                 preamble,
                 header_wave,
-                ofdm.modulate_symbols(frame_syms, mode.band),
+                payload_wave,
                 np.zeros(leadout_samples),
             ]
         )
         yield clip_envelope_and_filter(
-            raw, CLIP_HEADROOM_DB, geom.tx_bandpass, fs=fs
+            raw,
+            CLIP_HEADROOM_DB,
+            geom.tx_bandpass,
+            fs=fs,
+            reference_power=float(np.mean(payload_wave.astype(np.float64) ** 2)),
         ).astype(np.float32)
 
 
@@ -539,7 +602,7 @@ def modulate_continuous_chunks(
     """Yield one acquisition followed by back-to-back one-second GOPs.
 
     Lead-in, preamble, and mode header occur once at stream start; lead-out
-    occurs once at stream end. For N GOPs the total duration is N + 0.34 s in
+    occurs once at stream end. For N GOPs the total duration is N + 0.65 s in
     V7, rather than 1.34*N. Filtering retains state across yielded blocks.
     """
     mode = AETV_MODES[mode_name]
@@ -576,7 +639,10 @@ def modulate_continuous_chunks(
         pieces.append(payload)
         if final:
             pieces.append(lead)
-        yield conditioner.process(np.concatenate(pieces))
+        yield conditioner.process(
+            np.concatenate(pieces),
+            reference_power=float(np.mean(payload.astype(np.float64) ** 2)),
+        )
 
         if final:
             return
@@ -762,7 +828,7 @@ class StreamingDemodulator:
                 # eight-pilot incoherent baseline (0.125).  Hold only the truly
                 # ambiguous intervals and release them if carrier evidence
                 # returns before the three-GOP end detector expires.
-                if result.pilot_coherence < 0.145:
+                if result.pilot_coherence < 0.09:
                     self._tracking_bad_gops += 1
                     self._tracking_pending.append((result, stream_sample))
                     self._debug(
@@ -770,7 +836,7 @@ class StreamingDemodulator:
                         stream_sample=int(stream_sample),
                         consecutive=int(self._tracking_bad_gops),
                         pilot_coherence=float(result.pilot_coherence),
-                        reason="payload pilot coherence below 0.145 presence floor",
+                        reason="payload pilot structure below 0.09 presence floor",
                     )
                     if self._tracking_bad_gops >= 3:
                         self._debug(
@@ -843,6 +909,7 @@ class StreamingDemodulator:
                                 drift_track="off",
                                 interleave=self.interleave,
                                 acquisition=recent_acq,
+                                expected_mode=self.expected_mode,
                             )
                             if recent_result.mode != self.expected_mode:
                                 raise SyncError(
@@ -850,11 +917,6 @@ class StreamingDemodulator:
                                     f"{recent_result.mode.name}"
                                 )
                             expected_header_matched = True
-                            if recent_result.pilot_coherence < 0.20:
-                                raise SyncError(
-                                    "startup payload pilot coherence too low "
-                                    f"({recent_result.pilot_coherence:.2f})"
-                                )
                         except SyncError:
                             recent_acq = None
                             fallback_candidates = (
@@ -874,10 +936,9 @@ class StreamingDemodulator:
                                         drift_track="off",
                                         interleave=self.interleave,
                                         acquisition=candidate,
+                                        expected_mode=self.expected_mode,
                                     )
                                     if candidate_result.mode != self.expected_mode:
-                                        continue
-                                    if candidate_result.pilot_coherence < 0.20:
                                         continue
                                 except SyncError:
                                     continue
@@ -984,12 +1045,8 @@ class StreamingDemodulator:
                     drift_track="off",
                     interleave=self.interleave,
                     acquisition=acq,
+                    expected_mode=self.expected_mode,
                 )
-                if self.continuous and result.pilot_coherence < 0.20:
-                    raise SyncError(
-                        "startup payload pilot coherence too low "
-                        f"({result.pilot_coherence:.2f})"
-                    )
             except SyncError as error:
                 self._debug(
                     "candidate_rejected",
@@ -1062,13 +1119,19 @@ def _estimate_snr_db(h_pilot: np.ndarray, band: str = "W") -> float:
 
 
 def _pilot_coherence(h_pilot: np.ndarray) -> float:
-    """Fraction of pilot-channel energy coherent across one GOP."""
+    """Adjacent-carrier structure of the pilot-derived channel estimate.
+
+    At calibrated 0/-2 dB, temporal coherence across only eight pilots sits
+    close to its 1/8 pure-noise floor. A physical HF channel remains smooth
+    across adjacent 50 Hz carriers, giving far more observations and a clean
+    separation from noise even when the temporal statistic is ambiguous.
+    """
     values = np.asarray(h_pilot)
-    if values.ndim != 2 or values.shape[0] < 2:
+    if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] < 2:
         return 0.0
-    coherent = float(np.sum(np.abs(np.mean(values, axis=0)) ** 2))
-    total = float(np.sum(np.mean(np.abs(values) ** 2, axis=0)))
-    return coherent / max(total, 1e-12)
+    adjacent = np.mean(values[:, 1:] * np.conj(values[:, :-1]))
+    total = float(np.mean(np.abs(values) ** 2))
+    return float(np.abs(adjacent) / max(total, 1e-12))
 
 
 def blind_acquire_continuous_payload(
@@ -1091,7 +1154,7 @@ def blind_acquire_continuous_payload(
         raise SyncError("blind acquisition needs 12 seconds of continuous payload")
 
     z = to_baseband(values, mode.geometry.fcenter_hz, fs)
-    product = z[:-m] * np.conj(z[m:])
+    product = z[m:] * np.conj(z[:-m])
     kernel = np.ones(ncp)
     correlation = signal.fftconvolve(product, kernel, mode="valid")
     e1 = signal.fftconvolve(np.abs(z[:-m]) ** 2, kernel, mode="valid")
@@ -1171,6 +1234,7 @@ def demodulate_gop_stream(
     drift_track: str = "off",
     interleave: bool = True,
     acquisition: Acquisition | None = None,
+    expected_mode: AETVModeSpec | None = None,
 ) -> AETVDemodResult:
     """Demodulate an AETV passband transmission into reconstructed GOP latents and confidence weights.
 
@@ -1199,19 +1263,31 @@ def demodulate_gop_stream(
 
     # Acquire preamble
     acq = acquisition if acquisition is not None else acquire(z, band=band)
-    z_cfo = freq_correct(z, -acq.freq_offset, fs)
+    z_cfo = freq_correct(z, acq.freq_offset, fs)
 
     # Position past preamble
     data_start = acq.preamble_start + preamble_samples
 
-    # Estimate the channel from the final known preamble repetition. Header
-    # BPSK cannot safely be decoded from its raw real component over an RF
-    # channel with arbitrary per-carrier phase.
+    # Average every known preamble repetition for the header channel estimate.
+    # Using only the final repetition discarded 6 dB of available observation
+    # energy and made the otherwise heavily repeated header the bottleneck.
     preamble_pilot = ofdm.pilot_sequence(band)
-    preamble_useful = acq.preamble_start + 2 * ncp + (PREAMBLE_REPEATS - 1) * m
-    r_preamble = ofdm.demod_window(z_cfo, preamble_useful, band=band)
+    r_preamble = np.mean(
+        [
+            ofdm.demod_window(
+                z_cfo,
+                acq.preamble_start + 2 * ncp + repeat * m,
+                band=band,
+            )
+            for repeat in range(PREAMBLE_REPEATS)
+        ],
+        axis=0,
+    )
     h_preamble = r_preamble / preamble_pilot
-    header_denom = np.abs(h_preamble) ** 2 + 1e-4
+    header_scale = max(
+        float(np.median(np.abs(h_preamble[: geom.latent_carriers]))), 1e-9
+    )
+    header_denom = np.abs(h_preamble) ** 2 + 1e-3 * header_scale**2
 
     # Demodulate and equalize the repeated header symbols.
     header_syms = []
@@ -1220,23 +1296,36 @@ def demodulate_gop_stream(
         received = ofdm.demod_window(z_cfo, sym_start, band=band)
         header_syms.append(received * np.conj(h_preamble) / header_denom)
 
-    header_carriers = np.real(np.mean(header_syms, axis=0))
     valid_headers = []
-    for observed_header in _header_candidates(header_carriers):
-        mode_idx, version = decode_header(observed_header)
-        mode = AETV_MODES_BY_INDEX.get(mode_idx)
-        if version != PROTOCOL_VERSION or mode is None or mode.band != band:
+    # Score each repeated header independently and combine magnitudes. This is
+    # noncoherent across header time, so residual sub-hertz CFO cannot rotate
+    # repeated observations into cancellation. It also uses all 160 carriers
+    # directly instead of hard-decoding a prematurely averaged Golay word.
+    candidate_modes = (
+        (expected_mode,)
+        if expected_mode is not None
+        else tuple(AETV_MODES.values())
+    )
+    for mode in candidate_modes:
+        if mode.band != band:
             continue
-        expected_header = encode_header(mode_idx, version)
-        score = float(
-            np.dot(observed_header, expected_header)
-            / max(np.linalg.norm(observed_header) * np.linalg.norm(expected_header), 1e-12)
+        expected = _header_carriers(
+            encode_header(mode.index, PROTOCOL_VERSION), geom.carriers
         )
-        valid_headers.append((score, mode))
+        expected_norm = np.linalg.norm(expected)
+        symbol_scores = [
+            float(
+                np.abs(np.vdot(expected, observed))
+                / max(expected_norm * np.linalg.norm(observed), 1e-12)
+            )
+            for observed in header_syms
+        ]
+        valid_headers.append((float(np.mean(symbol_scores)), mode))
     if not valid_headers:
         raise SyncError("mode header rejected")
     header_score, mode = max(valid_headers, key=lambda item: item[0])
-    if header_score < 0.45:
+    header_floor = 0.045 if expected_mode is not None else 0.075
+    if header_score < header_floor:
         raise SyncError(f"mode header confidence too low ({header_score:.2f})")
 
     frames_start = data_start + header_samples
@@ -1253,6 +1342,7 @@ def demodulate_gop_stream(
     all_beacon_chips = []
     all_beacon_repeated_chips = []
     h_pilots = []
+    r_pilots = []
 
     # Drift tracker loop setup
     alpha, beta = 0.0, 0.0
@@ -1264,14 +1354,25 @@ def demodulate_gop_stream(
     carrier_phase = 0.0
     carrier_freq = 0.0
 
-    # Demodulate all frames
+    # Demodulate every pilot first so the equalizer constants can be expressed
+    # relative to a robust GOP-wide gain rather than the capture amplitude.
     total_frames = n_gops * FRAMES_PER_GOP
     for f in range(total_frames):
         frame_sample = frames_start + f * frame_samples
-
-        # Demodulate pilot symbol
         pilot_sample = frame_sample + ncp
         r_pilot = ofdm.demod_window(z_cfo, pilot_sample, band=band)
+        r_pilots.append(r_pilot)
+        h_pilots.append(r_pilot / pilot_seq)
+
+    h_pilot_arr = np.asarray(h_pilots)
+    equalizer_scales = _payload_equalizer_scales(
+        h_pilot_arr, geom.latent_carriers
+    )
+
+    # Demodulate all data frames.
+    for f in range(total_frames):
+        frame_sample = frames_start + f * frame_samples
+        r_pilot = r_pilots[f]
 
         # Drift tracking correction
         if alpha > 0:
@@ -1280,8 +1381,8 @@ def demodulate_gop_stream(
             carrier_phase += alpha * phase_err + carrier_freq
 
         # Channel estimate H on pilot
-        h_f = r_pilot / pilot_seq
-        h_pilots.append(h_f)
+        h_f = h_pilot_arr[f]
+        equalizer_scale = equalizer_scales[f // FRAMES_PER_GOP]
 
         # Equalize 4 data symbols in this frame
         for s in range(DATA_SYMS_PER_FRAME):
@@ -1291,10 +1392,9 @@ def demodulate_gop_stream(
             if alpha > 0:
                 r_sym *= np.exp(-1j * carrier_phase)
 
-            # Zero-forcing / Wiener equalization: S = R / H
-            denom = np.abs(h_f) ** 2 + 1e-4
-            eq_sym = r_sym * np.conj(h_f) / denom
-            weight = np.clip(np.abs(h_f) / (np.abs(h_f) + 0.01), 0.0, 1.0)
+            eq_sym, weight = _equalize_payload_symbol(
+                r_sym, h_f, equalizer_scale
+            )
 
 
             all_data_syms.append(eq_sym)
@@ -1316,7 +1416,6 @@ def demodulate_gop_stream(
             else:
                 all_beacon_chips.append(np.real(eq_sym[geom.beacon_carrier]))
 
-    h_pilot_arr = np.array(h_pilots)
     snr_est = _estimate_snr_db(h_pilot_arr, band=band)
     pilot_coherence = _pilot_coherence(h_pilot_arr)
 
@@ -1370,10 +1469,10 @@ def demodulate_tracked_gop(
 ) -> AETVDemodResult:
     """Decode one boundary-aligned payload while already tracking a stream.
 
-    The payload itself contains a known pilot in every OFDM frame, so channel
-    equalization needs no repeated RF header. A locally generated, level-matched
-    acquisition prefix reuses the verified payload decoder without consuming
-    any on-air samples. The per-frame pilots remove the residual common phase;
+    The payload itself contains a known pilot in every OFDM frame, so timing,
+    gain and per-carrier equalization need no synthetic preamble or repeated RF
+    header. This mirrors the payload-only decoder used for the Simpsons OTA
+    tests: once the segment boundary is known, decode directly from its pilots.
     ``freq_offset`` is retained for receiver telemetry.
     """
     payload = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -1382,18 +1481,93 @@ def demodulate_tracked_gop(
         raise SyncError(
             f"tracked GOP needs exactly {expected} samples, got {len(payload)}"
         )
-    prefix = _acquisition_wave(mode).astype(np.float64)
-    payload_rms = float(np.sqrt(np.mean(payload.astype(np.float64) ** 2)))
-    prefix_rms = float(np.sqrt(np.mean(prefix**2)))
-    if payload_rms <= 1e-12:
+    peak = float(np.max(np.abs(payload))) if payload.size else 0.0
+    if peak <= 1e-12:
         raise SyncError("tracked GOP has no signal energy")
-    prefix *= payload_rms / max(prefix_rms, 1e-12)
-    result = demodulate_gop_stream(
-        np.concatenate([prefix, payload]),
+
+    geom = mode.geometry
+    fs = geom.fs
+    _geom, _fs, _m, ncp, nsym, frame_samples, *_rest = _band_params(mode.band)
+    z = to_baseband(payload.astype(np.float64) / peak, geom.fcenter_hz, fs)
+    z_cfo = freq_correct(z, freq_offset, fs)
+    pilot_seq = ofdm.pilot_sequence(mode.band)
+    all_data_syms = []
+    all_data_weights = []
+    all_beacon_chips = []
+    all_beacon_repeated_chips = []
+    h_pilots = []
+
+    # Estimate every pilot before decoding data so the regularizer is tied to
+    # the GOP's channel gain, not to arbitrary receive amplitude.
+    r_pilots = []
+    for frame in range(FRAMES_PER_GOP):
+        frame_sample = frame * frame_samples
+        r_pilot = ofdm.demod_window(
+            z_cfo, frame_sample + ncp, band=mode.band
+        )
+        r_pilots.append(r_pilot)
+        h_pilots.append(r_pilot / pilot_seq)
+    pilot_array = np.asarray(h_pilots)
+    equalizer_scale = _payload_equalizer_scales(
+        pilot_array, geom.latent_carriers
+    )[0]
+
+    for frame in range(FRAMES_PER_GOP):
+        frame_sample = frame * frame_samples
+        h_f = pilot_array[frame]
+        for data_index in range(DATA_SYMS_PER_FRAME):
+            symbol_sample = frame_sample + (1 + data_index) * nsym + ncp
+            received = ofdm.demod_window(
+                z_cfo, symbol_sample, band=mode.band
+            )
+            equalized, weight = _equalize_payload_symbol(
+                received, h_f, equalizer_scale
+            )
+            all_data_syms.append(equalized)
+            all_data_weights.append(weight)
+            if mode.band == "U":
+                all_beacon_chips.extend(
+                    (
+                        np.real(equalized[geom.latent_carriers]),
+                        np.imag(equalized[geom.latent_carriers]),
+                        np.real(equalized[geom.beacon_carrier]),
+                        np.imag(equalized[geom.beacon_carrier]),
+                    )
+                )
+                all_beacon_repeated_chips.append(
+                    0.25
+                    * (
+                        np.real(equalized[geom.latent_carriers])
+                        + np.imag(equalized[geom.latent_carriers])
+                        + np.real(equalized[geom.beacon_carrier])
+                        + np.imag(equalized[geom.beacon_carrier])
+                    )
+                )
+            else:
+                all_beacon_chips.append(np.real(equalized[geom.beacon_carrier]))
+
+    latents, weights = framing.unpack_gop_symbols(
+        np.asarray(all_data_syms),
+        np.asarray(all_data_weights),
         band=mode.band,
-        drift_track="off",
         interleave=interleave,
     )
-    result.freq_offset = float(freq_offset)
-    result.preamble_start = 0
-    return result
+    beacon_chips = np.asarray(all_beacon_chips)
+    repeated_chips = np.asarray(all_beacon_repeated_chips)
+    beacon_result = find_beacon_superframe(beacon_chips)
+    return AETVDemodResult(
+        gops_latents=[latents],
+        gops_weights=[weights],
+        mode=mode,
+        freq_offset=float(freq_offset),
+        sync_metric=1.0,
+        frames_received=FRAMES_PER_GOP,
+        beacon=beacon_result,
+        callsign=beacon_result.callsign if beacon_result else "",
+        preamble_start=0,
+        snr_db=_estimate_snr_db(pilot_array, band=mode.band),
+        beacon_chips=beacon_chips,
+        beacon_repeated_chips=repeated_chips,
+        header_score=1.0,
+        pilot_coherence=_pilot_coherence(pilot_array),
+    )

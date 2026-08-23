@@ -7,6 +7,7 @@ import threading
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from aetv.audio_io import AudioUnavailable, list_audio_devices
 from aetv.config import AETV_MODES
+from aetv.hfchannel import CHANNEL_PROFILES
 from aetv.source import CameraFrameBuffer, list_cameras
 from aetv.station import TxEngine, TxPhase, TxState
 from aetv.gui.widgets import ElidingLabel, VideoView
@@ -40,6 +42,7 @@ class TransmitPanel(QWidget):
     _workerFinished = Signal()
     _camerasArrived = Signal(object)
     _outputsArrived = Signal(object)
+    loopbackVideo = Signal(object, object)
 
     def __init__(self, station, parent=None):
         super().__init__(parent)
@@ -51,6 +54,7 @@ class TransmitPanel(QWidget):
             on_error=self._errorArrived.emit,
             on_preview=self._previewArrived.emit,
             camera_frames=self._camera_frames.frames,
+            on_loopback=lambda video, state: self.loopbackVideo.emit(video, state),
         )
         self._thread: threading.Thread | None = None
         self._start_gate = threading.Event()
@@ -89,6 +93,12 @@ class TransmitPanel(QWidget):
         self.gops.setValue(settings.gops)
         level = max(0.05, min(1.0, settings.tx_level))
         self.level_db.setValue(20.0 * math.log10(level))
+        profile = settings.tx_channel_profile
+        if profile in self.channel_keys:
+            button = self.channel_buttons.button(self.channel_keys.index(profile))
+            if button is not None:
+                button.setChecked(True)
+        self._sync_channel_route()
         self._fill_cameras()
         self._fill_outputs()
 
@@ -107,6 +117,8 @@ class TransmitPanel(QWidget):
         source = "webcam" if self.cam_radio.isChecked() else self._file_path
         self.send_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        for button in self.channel_buttons.buttons():
+            button.setEnabled(False)
         self.progress.setValue(0)
         self.status.setText("preparing transmit…")
         self._start_gate.clear()
@@ -199,6 +211,24 @@ class TransmitPanel(QWidget):
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("To radio"))
         out_row.addWidget(self.output, 1)
+        channel_row = QHBoxLayout()
+        channel_row.addWidget(QLabel("Route"))
+        self.channel_keys = ["radio", *CHANNEL_PROFILES]
+        self.channel_buttons = QButtonGroup(self)
+        self.channel_buttons.setExclusive(True)
+        for index, key in enumerate(self.channel_keys):
+            label = "Radio" if key == "radio" else CHANNEL_PROFILES[key].label
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setToolTip(
+                "Transmit to the configured radio/audio output"
+                if key == "radio"
+                else CHANNEL_PROFILES[key].description + " (local loopback; no PTT)"
+            )
+            self.channel_buttons.addButton(button, index)
+            channel_row.addWidget(button)
+        self.channel_buttons.button(0).setChecked(True)
+        self.channel_buttons.idClicked.connect(self._sync_channel_route)
         buttons = QHBoxLayout()
         buttons.addWidget(self.send_button)
         buttons.addWidget(self.cancel_button)
@@ -207,6 +237,7 @@ class TransmitPanel(QWidget):
         strip.addLayout(file_row)
         strip.addLayout(mode_row)
         strip.addLayout(out_row)
+        strip.addLayout(channel_row)
         strip.addWidget(self.progress)
         strip.addLayout(buttons)
         strip.addWidget(self.status)
@@ -361,6 +392,21 @@ class TransmitPanel(QWidget):
         settings.tx_level = float(10 ** (self.level_db.value() / 20.0))
         settings.camera_index = int(self.camera.currentData() or 0)
         settings.audio_output = self.output.currentData() or ""
+        settings.tx_channel_profile = self.selected_channel_profile()
+
+    def selected_channel_profile(self) -> str:
+        index = self.channel_buttons.checkedId()
+        return self.channel_keys[index] if 0 <= index < len(self.channel_keys) else "radio"
+
+    def emulating(self) -> bool:
+        return self.selected_channel_profile() != "radio"
+
+    def _sync_channel_route(self, _button_id: int | None = None) -> None:
+        profile = self.selected_channel_profile()
+        self.station.settings.tx_channel_profile = profile
+        testing = profile != "radio"
+        self.output.setEnabled(not testing)
+        self.send_button.setText("Run loopback" if testing else "Send")
 
     def _apply_state(self, state: TxState) -> None:
         self.status.setText(state.message or state.phase.value)
@@ -370,6 +416,9 @@ class TransmitPanel(QWidget):
         if state.phase in {TxPhase.DONE, TxPhase.CANCELLED, TxPhase.FAILED, TxPhase.IDLE}:
             self.send_button.setEnabled(self.station.codec is not None)
             self.cancel_button.setEnabled(False)
+            for button in self.channel_buttons.buttons():
+                button.setEnabled(True)
+            self._sync_channel_route()
             if state.phase != TxPhase.IDLE:
                 self.transmitFinished.emit()
 

@@ -71,16 +71,16 @@ BEACON_PAYLOAD_BITS = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS + BEACON_MODE_B
 BEACON_SUPERFRAME_CHIPS = len(BEACON_SYNC) + BEACON_PAYLOAD_BITS
 
 # --- Preamble & Sync -------------------------------------------------------
-PREAMBLE_REPEATS = 4
+PREAMBLE_REPEATS = 12
 PREAMBLE_CP = 2 * NCP  # 80 samples (10.0 ms)
-PREAMBLE_SAMPLES = PREAMBLE_CP + PREAMBLE_REPEATS * M  # 720 samples (90 ms)
-PREAMBLE_CORR_WINDOW = (PREAMBLE_REPEATS - 1) * M  # 480 samples
+PREAMBLE_SAMPLES = PREAMBLE_CP + PREAMBLE_REPEATS * M  # 2,000 samples (250 ms)
+PREAMBLE_CORR_WINDOW = (PREAMBLE_REPEATS - 1) * M  # 1,760 samples
 PREAMBLE_THRESHOLD = 0.42
 ACQUIRE_MAX_BINS = 12
-TEMPLATE_SCORE_THRESHOLD = 0.40
+TEMPLATE_SCORE_THRESHOLD = 0.14
 
-HEADER_SYMS = 2  # Golay-coded BPSK symbols
-HEADER_SAMPLES = HEADER_SYMS * NSYM  # 400 samples
+HEADER_SYMS = 8  # repeated Golay-coded BPSK symbols
+HEADER_SAMPLES = HEADER_SYMS * NSYM  # 1,600 samples
 
 LEADIN_SAMPLES = 800  # 100 ms lead-in
 LEADOUT_SAMPLES = 800
@@ -92,7 +92,12 @@ TX_BANDPASS_W = (350.0, 2750.0)  # Hz
 TX_BANDPASS_U = (500.0, 9500.0)  # Hz; margin around 1000..8950 Hz carriers
 DEMOD_BACKOFF = 8  # samples
 SNR_REF_BW_HZ = 2500.0
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
+
+
+def reference_noise_bandwidth_scale(fs: int | float) -> float:
+    """White-noise power multiplier for the 2.5 kHz SNR convention."""
+    return (float(fs) / 2.0) / SNR_REF_BW_HZ
 
 # --- Drift tracking loop ---------------------------------------------------
 DRIFT_SLOW_ALPHA = 0.1

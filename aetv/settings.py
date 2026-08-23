@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from .config import AETV_MODES
+from .hfchannel import CHANNEL_PROFILES
 from .kiwi import normalize_kiwi_host
 
 CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{1,8}$")
@@ -83,6 +84,7 @@ class StationSettings:
     autosave: bool = True
     debug_capture: bool = True
     window_layout: str = "split"
+    tx_channel_profile: str = "radio"  # radio | a CHANNEL_PROFILES key
 
     def validate(self) -> list[str]:
         problems: list[str] = []
@@ -95,6 +97,8 @@ class StationSettings:
             problems.append("TX level must be between 0.05 and 1.0")
         if self.gops < 1:
             problems.append("GOP count must be >= 1")
+        if self.tx_channel_profile != "radio" and self.tx_channel_profile not in CHANNEL_PROFILES:
+            problems.append(f"unknown TX channel profile {self.tx_channel_profile!r}")
         if self.cat_backend not in {"none", "hamlib", "rigctld", "flex", "rts", "dtr"}:
             problems.append(f"unknown CAT backend {self.cat_backend!r}")
         if self.rx_source not in {"soundcard", "flex", "kiwi"}:

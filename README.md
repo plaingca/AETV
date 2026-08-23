@@ -25,7 +25,8 @@ digital codec plus modem does.
 ## Install
 
 You need Python 3.10+, [uv](https://docs.astral.sh/uv/), FFmpeg on `PATH`,
-and the Flex-8k weights in `models/v7-flex8k.pt` (see `models/README.md`).
+and the severe-channel Flex-8k weights in `models/v7-flex8k-severe.pt`
+(see `models/README.md`).
 
 ```powershell
 git clone https://github.com/plaingca/AETV.git
@@ -51,9 +52,9 @@ uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available
 Set **Torch device** to `cuda` in AETV Settings. The status bar includes the
 GPU name when the checkpoint is actually running there.
 
-Download `v7-flex8k.pt` from the matching GitHub release and copy it into
-`models/` (see [`models/README.md`](models/README.md) for the command and
-checksum), then:
+Place `v7-flex8k-severe.pt` in `models/`. The balanced fine-tune can be kept
+beside it as `v7-flex8k-severe-balanced.pt`, and the original published model
+as `v7-flex8k.pt` (see [`models/README.md`](models/README.md)), then:
 
 ```powershell
 uv run aetv gui
@@ -95,16 +96,30 @@ Radio setup details are in
 [`docs/ham-guide.md`](docs/ham-guide.md). Frequency and mode are checked,
 never set — tune the radio first.
 
+The transmit pane's **Route** buttons also provide deterministic local modem
+loopbacks. **Clean**, **12/6/0 dB**, and **MPP 12/6/0** bypass PTT and the audio
+device, pass each completed modem chunk through the HF channel simulator, and
+show recovered GOPs with measured pilot SNR in the Receive pane while later
+GOPs are still being captured and encoded. **Radio** is the normal
+on-air/audio-output route. SNR is signal power relative to white noise in a
+2.5 kHz reference bandwidth; the 24 kHz V7 simulator includes the corresponding
+12 kHz-to-2.5 kHz noise-bandwidth conversion.
+
 ## Train and eval
 
 ```powershell
 uv sync --extra train
 uv run aetv train -- --mode V7 --stage 2 --out runs/v7 --steps 10000 --amp
-uv run aetv eval -- --checkpoint models/v7-flex8k.pt --out runs/eval --clips 8
+uv run aetv eval -- --checkpoint models/v7-flex8k-severe.pt --out runs/eval --clips 8
 ```
 
 The trainer streams OpenVid-1M. Use `--init-checkpoint` to continue a
-curriculum and `--reset-steps` when the objective changes.
+curriculum and `--reset-steps` when the objective changes. The published V7
+checkpoint predates the corrected reference-bandwidth conversion: its stored
+training labels are 11.86 dB below the equivalent physical SNR (for example,
+the old training label 0 dB represents 11.86 dB in the UI and radio convention).
+The exact severe-channel warm-start command and reference results are in
+[`docs/v7-severe-finetune.md`](docs/v7-severe-finetune.md).
 
 ## Waveform
 
@@ -117,7 +132,9 @@ curriculum and `--reset-steps` when the objective changes.
 V7 is the published Flex-8k mode. Each GOP is exactly one RF second: 8 OFDM
 frames and 10112 analog latents. Live station transmissions send lead-in,
 preamble, and Golay mode header once, followed by back-to-back one-second GOPs
-and one final lead-out. Thus 30 seconds of video occupies 30.34 seconds rather
+and one final lead-out. Protocol v4 uses a twelve-symbol repeated preamble and
+eight repeated soft-scored Golay headers for calibrated low-SNR acquisition.
+Thus 30 seconds of video occupies 30.65 seconds rather
 than 40.2 seconds and sustains 12 fps. A receiver entering after the initial
 header acquires symbol timing from cyclic prefixes, identifies pilot/frame
 phase and the GOP boundary from the beacon, then jumps to the newest complete
@@ -157,9 +174,9 @@ This repository includes a local Codex environment at
 starting a worktree task. Codex creates a worktree-local `.venv` from the
 locked dependencies and exposes **Test**, **Build**, and **Run GUI** actions.
 
-The ignored `models/v7-flex8k.pt` checkpoint is not duplicated into every
-worktree. Tests that require it skip there; use a local task when validating
-the release checkpoint or copy the checkpoint into that specific worktree.
+The ignored model checkpoints are not duplicated into every worktree. Tests
+that require the default `models/v7-flex8k-severe.pt` skip there; use a local
+task when validating it or copy the checkpoint into that specific worktree.
 
 ## License
 

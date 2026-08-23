@@ -29,8 +29,8 @@ from .config import (
     NCP,
     NSYM,
     RS,
-    SNR_REF_BW_HZ,
     SYMS_PER_FRAME,
+    reference_noise_bandwidth_scale,
 )
 from .framing import GOP_INTERLEAVER_N, GOP_INTERLEAVER_W, GOP_INTERLEAVER_U
 from .ofdm import pilot_sequence
@@ -283,7 +283,16 @@ class AETVWaveformChannel(nn.Module):
         snr_db = lo + torch.rand(b, 1, device=device, generator=generator) * (hi - lo)
         snr_linear = 10.0 ** (snr_db / 10.0)
         signal_pwr = tx_audio.square().mean(dim=1, keepdim=True)
-        noise_std = torch.sqrt(signal_pwr / (snr_linear * (g.carriers * RS / SNR_REF_BW_HZ) + 1e-12))
+        # ``snr_db`` is referenced to noise in SNR_REF_BW_HZ. The generated
+        # real white noise spans the full Nyquist bandwidth, so expand its
+        # total variance by (FS/2)/reference_bandwidth. The old expression
+        # divided by occupied_signal_bandwidth/reference_bandwidth instead,
+        # making labelled conditions 11.86 dB too optimistic in V7/U.
+        noise_std = torch.sqrt(
+            signal_pwr
+            * reference_noise_bandwidth_scale(self.FS)
+            / snr_linear.clamp_min(1e-12)
+        )
         rx_audio = tx_audio + torch.randn_like(tx_audio) * noise_std
 
         # Demodulate
@@ -298,9 +307,19 @@ class AETVWaveformChannel(nn.Module):
         data_syms_rx = rx_frames[:, :, 1:, : g.latent_carriers]  # (B, N_FRAMES, 4, NC_LATENT)
         h_latent = h_est[:, :, None, : g.latent_carriers]
 
-        denom = h_latent.abs().square() + 1e-3
+        gain_scale = (
+            h_est[:, :, : g.latent_carriers]
+            .abs()
+            .flatten(1)
+            .median(dim=1)
+            .values
+            .clamp_min(1e-9)[:, None, None, None]
+        )
+        denom = h_latent.abs().square() + 1e-3 * gain_scale.square()
         eq_data = data_syms_rx * torch.conj(h_latent) / denom
-        eq_weights = torch.clamp(h_latent.abs() / (h_latent.abs() + 0.1), 0.0, 1.0)
+        eq_weights = torch.clamp(
+            h_latent.abs() / (h_latent.abs() + 0.1 * gain_scale), 0.0, 1.0
+        )
         eq_weights = eq_weights.expand_as(data_syms_rx)
 
         # Unpack I and Q

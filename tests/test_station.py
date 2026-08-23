@@ -18,6 +18,7 @@ from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
 from aetv.station import (
+    RxState,
     Station,
     TxEngine,
     TxPhase,
@@ -103,13 +104,22 @@ def test_iq_stream_phase_continuity():
 
 
 def test_settings_roundtrip(tmp_path: Path):
-    settings = StationSettings(callsign="va7eet", mode="V7", kiwi_host="1.2.3.4:8073")
+    settings = StationSettings(
+        callsign="va7eet", mode="V7", kiwi_host="1.2.3.4:8073",
+        tx_channel_profile="mpp6",
+    )
     path = tmp_path / "settings.json"
     save_settings(settings, path)
     loaded = load_settings(path)
     assert loaded.callsign == "va7eet"
     assert loaded.mode == "V7"
     assert loaded.kiwi_host == "1.2.3.4:8073"
+    assert loaded.tx_channel_profile == "mpp6"
+
+
+def test_settings_reject_unknown_channel_profile():
+    settings = StationSettings(tx_channel_profile="invented")
+    assert "unknown TX channel profile 'invented'" in settings.validate()
 
 
 def test_native_flex_settings_do_not_silently_use_soundcard(tmp_path: Path):
@@ -362,6 +372,61 @@ def test_debug_wave_recorder_streams_pcm_to_disk(tmp_path):
         assert saved.getframerate() == 24000
         assert saved.getnchannels() == 1
         assert saved.getnframes() == 3
+
+
+def test_channel_loopback_decodes_without_keying(monkeypatch):
+    from aetv.station import Station
+
+    result = SimpleNamespace(
+        gops_latents=[np.array([1.0])],
+        gops_weights=[np.array([1.0])],
+        freq_offset=0.0,
+        sync_metric=0.9,
+        snr_db=6.2,
+        callsign="N0CALL",
+    )
+    class FakeChannel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def process(self, audio):
+            return audio
+
+    monkeypatch.setattr("aetv.station.StreamingChannelEmulator", FakeChannel)
+
+    class FakeDemodulator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def feed(self, _audio):
+            return [result]
+
+    monkeypatch.setattr("aetv.station.StreamingDemodulator", FakeDemodulator)
+
+    class Codec:
+        mode = SimpleNamespace(name="V7", band="U", gop_frames=2)
+
+        def decode_gop(self, latents, _weights):
+            return np.full((2, 2, 2, 3), latents[0], dtype=np.uint8)
+
+    shown = []
+    def chunks():
+        yield np.ones(8, dtype=np.float32)
+        assert len(shown) == 1  # First GOP is decoded before TX requests the next.
+        yield np.ones(8, dtype=np.float32)
+
+    station = Station(StationSettings(tx_channel_profile="awgn6", tx_level=0.7))
+    engine = TxEngine(station, on_loopback=lambda video, state: shown.append((video, state)))
+    assert engine._emulated_send_stream(
+        chunks(),
+        24000,
+        2,
+        Codec(),
+        "awgn6",
+    )
+    assert len(shown) == 2
+    assert all(isinstance(state, RxState) and state.source == "emulator" for _, state in shown)
+    assert engine.state.phase == TxPhase.DONE
 
 
 def test_ptt_watchdog_fires(monkeypatch):

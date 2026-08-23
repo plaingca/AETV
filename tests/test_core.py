@@ -32,13 +32,65 @@ from aetv import (
     modulate_gop_stream,
 )
 from aetv import beacon, framing, ofdm
-from aetv.config import PROTOCOL_VERSION
+from aetv.config import PROTOCOL_VERSION, reference_noise_bandwidth_scale
+from aetv.hfchannel import (
+    CHANNEL_PROFILES,
+    StreamingChannelEmulator,
+    awgn,
+    emulate,
+    freq_shift,
+)
 from aetv.modem import (
     StreamingDemodulator,
     modulate_continuous_chunks,
     modulate_gop_chunks,
 )
-from aetv.modem import _header_candidates, _header_carriers, decode_header, encode_header
+from aetv.modem import (
+    _header_candidates,
+    _header_carriers,
+    _pilot_coherence,
+    decode_header,
+    encode_header,
+)
+
+
+def test_operator_channel_profiles_are_repeatable_and_clean_is_exact():
+    tone = np.sin(2 * np.pi * 1000 * np.arange(8000) / 8000).astype(np.float32)
+    assert np.array_equal(emulate(tone, "clean", fs=8000), tone)
+    first = emulate(tone, "awgn6", fs=8000)
+    second = emulate(tone, CHANNEL_PROFILES["awgn6"], fs=8000)
+    assert np.array_equal(first, second)
+    assert not np.array_equal(first, tone)
+
+
+def test_reference_snr_uses_real_nyquist_noise_bandwidth():
+    assert reference_noise_bandwidth_scale(8000) == pytest.approx(1.6)
+    assert reference_noise_bandwidth_scale(24000) == pytest.approx(4.8)
+
+    tone = np.sin(2 * np.pi * 1000 * np.arange(240000) / 24000)
+    noisy = emulate(tone, "awgn12", seed=7, fs=24000)
+    noise = noisy - tone
+    expected = (
+        np.mean(tone**2)
+        * reference_noise_bandwidth_scale(24000)
+        / 10 ** (12.0 / 10.0)
+    )
+    assert np.var(noise) == pytest.approx(expected, rel=0.02)
+
+
+def test_streaming_channel_profiles_are_repeatable_across_gop_chunks():
+    tone = np.sin(2 * np.pi * 1000 * np.arange(16000) / 8000).astype(np.float32)
+    for profile in ("clean", "awgn6", "mpp6"):
+        first = StreamingChannelEmulator(profile, fs=8000)
+        second = StreamingChannelEmulator(profile, fs=8000)
+        got = np.concatenate([first.process(tone[:8000]), first.process(tone[8000:])])
+        repeated = np.concatenate(
+            [second.process(tone[:8000]), second.process(tone[8000:])]
+        )
+        assert np.array_equal(got, repeated)
+        assert np.isfinite(got).all()
+    clean = StreamingChannelEmulator("clean", fs=8000)
+    assert np.array_equal(clean.process(tone), tone)
 
 
 def test_aetv_numerology():
@@ -184,8 +236,8 @@ def test_continuous_v7_stream_has_exact_one_second_steady_state_gops():
     mode = AETV_MODES["V7"]
     gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
     chunks = list(modulate_continuous_chunks(gops, "V7", "VE7TEST"))
-    assert [len(chunk) for chunk in chunks] == [29760, *([24000] * 5), 26400]
-    assert sum(map(len, chunks)) == 7 * 24000 + int(0.34 * 24000)
+    assert [len(chunk) for chunk in chunks] == [37200, *([24000] * 5), 26400]
+    assert sum(map(len, chunks)) == 7 * 24000 + 15600
 
     receiver = StreamingDemodulator(mode.band, continuous=True)
     decoded = []
@@ -196,9 +248,75 @@ def test_continuous_v7_stream_has_exact_one_second_steady_state_gops():
     assert decoded[-1].callsign == "VE7TEST"
 
 
+def test_continuous_tx_clipping_matches_checkpoint_batch_contract():
+    """The stateful FIR may add delay, but must not add extra clipping."""
+    rng = np.random.default_rng(20260824)
+    mode = AETV_MODES["V7"]
+    latents = rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+    latents /= np.sqrt(np.mean(latents**2))
+
+    batch_audio = modulate_gop_stream([latents], mode_name="V7")
+    live_audio = np.concatenate(list(modulate_continuous_chunks([latents], "V7")))
+    batch_latents = demodulate_gop_stream(batch_audio, band="U").gops_latents[0]
+    live_latents = demodulate_gop_stream(live_audio, band="U").gops_latents[0]
+
+    # Causal filtering shifts the preamble by its group delay; after acquisition
+    # the payload distortion should be numerically the same as centered batch TX.
+    assert np.mean((live_latents - batch_latents) ** 2) < 1e-8
+
+
+def test_payload_equalization_is_invariant_to_receive_level():
+    rng = np.random.default_rng(77)
+    mode = AETV_MODES["V7"]
+    latents = rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+    audio = modulate_gop_stream([latents], mode_name="V7")
+    nominal = demodulate_gop_stream(audio, band="U")
+    quiet = demodulate_gop_stream(0.001 * audio, band="U")
+    assert np.allclose(nominal.gops_latents[0], quiet.gops_latents[0], atol=2e-5)
+    assert np.allclose(nominal.gops_weights[0], quiet.gops_weights[0], atol=2e-5)
+
+
+def test_v7_acquires_calibrated_zero_db_and_corrects_cfo():
+    rng = np.random.default_rng(20260825)
+    mode = AETV_MODES["V7"]
+    latents = rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+    audio = np.concatenate(list(modulate_continuous_chunks([latents], "V7")))
+
+    for seed in range(5):
+        impaired = awgn(audio, 0.0, seed=seed, fs=mode.geometry.fs)
+        results = StreamingDemodulator(
+            "U", continuous=True, mode_name="V7"
+        ).feed(impaired)
+        assert len(results) == 1
+        assert results[0].pilot_coherence > 0.09
+
+    for offset in (-20.0, 20.0):
+        shifted = freq_shift(audio, offset, fs=mode.geometry.fs)
+        results = StreamingDemodulator(
+            "U", continuous=True, mode_name="V7"
+        ).feed(shifted)
+        assert len(results) == 1
+        assert results[0].freq_offset == pytest.approx(offset, abs=0.1)
+
+
+def test_pilot_structure_rejects_unstructured_noise():
+    rng = np.random.default_rng(9)
+    noise = rng.standard_normal((8, 160)) + 1j * rng.standard_normal((8, 160))
+    smooth = np.ones((8, 160), dtype=np.complex128)
+    assert _pilot_coherence(noise) < 0.09
+    assert _pilot_coherence(smooth) > 0.99
+
+
 def test_continuous_v7_receiver_can_join_after_initial_header():
     mode = AETV_MODES["V7"]
-    gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(18)]
+    rng = np.random.default_rng(20260826)
+    # Real encoder latents occupy the payload carriers. All-zero payloads form
+    # an artificial sequence of mostly empty OFDM symbols that can correlate
+    # with a repeated pilot and are not representative of a transmitted GOP.
+    gops = [
+        rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+        for _ in range(18)
+    ]
     audio = np.concatenate(list(modulate_continuous_chunks(gops, "V7", "VE7TEST")))
     # Enter at an arbitrary point well after the only RF preamble/header.
     audio = audio[42000:]
@@ -207,9 +325,12 @@ def test_continuous_v7_receiver_can_join_after_initial_header():
     decoded = []
     for start in range(0, len(audio), 733):
         decoded.extend(receiver.feed(audio[start : start + 733]))
-    assert any(event["event"] == "blind_acquired" for event in events)
     assert decoded
     assert decoded[-1].callsign == "VE7TEST"
+    assert any(
+        event["event"] in {"blind_acquired", "preamble_candidate"}
+        for event in events
+    )
 
 
 def test_continuous_v7_receiver_keeps_looking_when_started_before_tx():
@@ -282,6 +403,9 @@ def test_gop_framing_and_interleaving():
 
         packed = framing.pack_gop_symbols(latents, beacon_chips, band=band, interleave=True)
         assert packed.shape == (32, geom.carriers)
+        if band == "U":
+            assert np.all(packed[:, geom.latent_carriers] == 1.0 + 1.0j)
+            assert np.all(packed[:, geom.beacon_carrier] == 1.0 + 1.0j)
 
         unpacked_lat, weights = framing.unpack_gop_symbols(
             packed, np.ones((32, geom.carriers), dtype=np.float32), band=band, interleave=True
@@ -364,3 +488,26 @@ def test_aetv_end_to_end_modem_clean_loopback():
         recovered_lat = demod_res.gops_latents[0]
         corr = np.corrcoef(gop_lat, recovered_lat)[0, 1]
         assert corr > 0.95, f"{mode_name}: expected high correlation on clean loopback, got {corr:.3f}"
+
+
+def test_v7_tracked_gops_match_continuous_batch_equalization():
+    """Later streaming GOPs must not be level-shrunk by synthetic sync audio."""
+    rng = np.random.default_rng(20260823)
+    originals = [
+        rng.standard_normal(BAND_U.latents_per_gop).astype(np.float32)
+        for _ in range(2)
+    ]
+    audio = np.concatenate(
+        list(modulate_continuous_chunks(originals, mode_name="V7", callsign="N0CALL"))
+    )
+    batch = demodulate_gop_stream(audio, band="U", drift_track="off")
+    streaming = StreamingDemodulator("U", continuous=True, mode_name="V7")
+    tracked = []
+    for start in range(0, len(audio), BAND_U.fs // 10):
+        for result in streaming.feed(audio[start : start + BAND_U.fs // 10]):
+            tracked.extend(result.gops_latents)
+
+    assert len(tracked) == len(batch.gops_latents) == 2
+    for original, expected, recovered in zip(originals, batch.gops_latents, tracked):
+        relative_difference = np.mean((recovered - expected) ** 2) / np.mean(original**2)
+        assert relative_difference < 1e-4

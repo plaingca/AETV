@@ -379,6 +379,25 @@ class ReceivePanel(QWidget):
         self.statusChanged.emit(state.message)
         self.progress.setValue(min(100, max(5, state.gops * 8)))
 
+    def prepare_emulator(self, label: str) -> None:
+        self.preview.clear()
+        self.status.setText(f"Waiting for {label} loopback…")
+        self.statusChanged.emit(self.status.text())
+        self.progress.setValue(0)
+
+    def show_emulated(self, video, state: RxState) -> None:
+        """Display locally recovered modem video in the normal receive pane."""
+        mode = self.station.require_codec().mode
+        self.preview.enqueue_rgb(
+            video,
+            fps=mode.fps,
+            prebuffer_frames=mode.gop_frames,
+            boundary_blend_frames=4,
+        )
+        self.status.setText(state.message)
+        self.statusChanged.emit(state.message)
+        self.progress.setValue(min(100, max(5, state.gops * 8)))
+
     def _apply_ring(self, ring) -> None:
         if self._waterfall is None:
             return

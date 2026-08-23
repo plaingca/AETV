@@ -32,6 +32,7 @@ from .codec import AETVCodec, resolve_checkpoint
 from .config import AETV_MODES
 from .kiwi import KiwiCapture
 from .flex import FlexVitaSession
+from .hfchannel import CHANNEL_PROFILES, StreamingChannelEmulator
 from .modem import (
     StreamingDemodulator,
     modulate_continuous_chunks,
@@ -240,6 +241,7 @@ class TxEngine:
         ptt=None,
         player=None,
         camera_frames=None,
+        on_loopback=None,
     ):
         self.station = station
         self._on_state = on_state or (lambda _state: None)
@@ -248,6 +250,7 @@ class TxEngine:
         self._ptt_override = ptt
         self._player = player
         self._camera_frames = camera_frames
+        self._on_loopback = on_loopback or (lambda _video, _state: None)
         self._cancel = threading.Event()
         self.state = TxState()
         self.last_wav: np.ndarray | None = None
@@ -320,6 +323,7 @@ class TxEngine:
             chunks = modulate_continuous_chunks(
                 encoded_gops, mode_name=codec.mode.name, callsign=settings.callsign
             )
+            channel_profile = settings.tx_channel_profile
 
             if settings.debug_capture:
                 tx_prefix = _debug_prefix(settings, f"tx_{codec.mode.name}_{settings.callsign}")
@@ -335,12 +339,13 @@ class TxEngine:
                     "requested_gops": n_gops,
                     "framing": "continuous",
                     "payload_gop_seconds": 1.0,
-                    "expected_waveform_seconds": n_gops + 0.34,
+                    "expected_waveform_seconds": n_gops + 0.65,
                     "tx_level": settings.tx_level,
                     "frequency_mhz": settings.freq_mhz,
                     "flex_host": settings.flex_host,
                     "waveform": str(tx_recorder.path),
                     "gop_timings": self.gop_timings,
+                    "channel_profile": channel_profile,
                 }
                 self.station.log(f"TX waveform debug: {tx_recorder.path}")
 
@@ -360,10 +365,15 @@ class TxEngine:
                     if peak > 0:
                         audio = audio * (settings.tx_level / peak)
                     self.last_wav = audio
-                    if tx_recorder is not None:
+                    if tx_recorder is not None and channel_profile == "radio":
                         tx_recorder.write(audio)
                     yield audio
 
+            if channel_profile != "radio":
+                return self._emulated_send_stream(
+                    leveled_chunks(), codec.mode.geometry.fs, n_gops, codec,
+                    channel_profile, tx_recorder,
+                )
             return self._keyed_send_stream(leveled_chunks(), codec.mode.geometry.fs, n_gops)
         except Exception as error:
             self._on_error(str(error))
@@ -380,6 +390,77 @@ class TxEngine:
                     json.dumps(tx_metadata, indent=2, allow_nan=True) + "\n",
                     encoding="utf-8",
                 )
+
+    def _emulated_send_stream(
+        self,
+        chunks,
+        fs: int,
+        n_gops: int,
+        codec,
+        profile_key: str,
+        recorder: _PcmWaveRecorder | None = None,
+    ) -> bool:
+        """Incrementally run TX through the channel and production RX modem."""
+        profile = CHANNEL_PROFILES[profile_key]
+        self._set(TxPhase.SENDING, 0.0, f"streaming {profile.label} into receiver")
+        channel = StreamingChannelEmulator(profile, fs=fs)
+        demodulator = StreamingDemodulator(
+            codec.mode.band,
+            continuous=True,
+            mode_name=codec.mode.name,
+        )
+        decoded_count = 0
+        transmitted_chunks = 0
+        block_samples = max(1, fs // 10)
+        for clean in chunks:
+            if self._cancel.is_set():
+                self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+                return False
+            impaired = channel.process(clean)
+            peak = float(np.max(np.abs(impaired))) if impaired.size else 0.0
+            if peak > 0:
+                impaired *= self.station.settings.tx_level / peak
+            self.last_wav = impaired
+            if recorder is not None:
+                recorder.write(impaired)
+            transmitted_chunks += 1
+            for start in range(0, len(impaired), block_samples):
+                results = demodulator.feed(impaired[start : start + block_samples])
+                for result in results:
+                    for latents, weights in zip(result.gops_latents, result.gops_weights):
+                        with self.station.codec_lock:
+                            decoded = codec.decode_gop(latents, weights)
+                        decoded_count += 1
+                        state = RxState(
+                            listening=False,
+                            source="emulator",
+                            gops=decoded_count,
+                            frames=decoded_count * codec.mode.gop_frames,
+                            freq_offset=result.freq_offset,
+                            sync_metric=result.sync_metric,
+                            snr_db=result.snr_db,
+                            callsign=result.callsign,
+                            message=(
+                                f"{profile.label} loopback  {decoded_count}/{n_gops} GOP  "
+                                f"SNR {result.snr_db:.1f} dB"
+                            ),
+                        )
+                        self._on_loopback(decoded, state)
+                        self._set(
+                            TxPhase.SENDING,
+                            decoded_count / max(1, n_gops),
+                            state.message,
+                        )
+        if transmitted_chunks == 0:
+            raise SyncError("modulator produced no loopback audio")
+        if decoded_count == 0:
+            raise SyncError(f"{profile.label} loopback recovered no GOPs")
+        self._set(
+            TxPhase.DONE,
+            1.0,
+            f"{profile.label} loopback decoded {decoded_count}/{n_gops} GOPs",
+        )
+        return True
 
     def _capture(self, source: str, codec) -> np.ndarray | None:
         mode = codec.mode
