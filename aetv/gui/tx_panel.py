@@ -36,6 +36,7 @@ class TransmitPanel(QWidget):
     _errorArrived = Signal(str)
     _previewArrived = Signal(object)
     _previewStopped = Signal()
+    _workerFinished = Signal()
     _camerasArrived = Signal(object)
     _outputsArrived = Signal(object)
 
@@ -60,6 +61,7 @@ class TransmitPanel(QWidget):
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._previewArrived.connect(self._show_preview, Qt.ConnectionType.QueuedConnection)
         self._previewStopped.connect(self._on_preview_stopped, Qt.ConnectionType.QueuedConnection)
+        self._workerFinished.connect(self._on_worker_finished, Qt.ConnectionType.QueuedConnection)
         self._camerasArrived.connect(self._apply_cameras, Qt.ConnectionType.QueuedConnection)
         self._outputsArrived.connect(self._apply_outputs, Qt.ConnectionType.QueuedConnection)
         self._file_path = ""
@@ -116,16 +118,27 @@ class TransmitPanel(QWidget):
         self.status.setText("cancelling…")
 
     def _run_send(self, source: str) -> None:
-        preview = self._preview_thread
-        if preview is not None and preview.is_alive():
-            preview.join(timeout=3.0)
-        self._start_gate.wait()
-        if self._cancel_requested.is_set():
-            self._stateArrived.emit(
-                TxState(TxPhase.CANCELLED, 0.0, "cancelled")
-            )
-            return
-        self.engine.transmit(source)
+        try:
+            preview = self._preview_thread
+            if preview is not None and preview.is_alive():
+                preview.join(timeout=3.0)
+            self._start_gate.wait()
+            if self._cancel_requested.is_set():
+                self._stateArrived.emit(
+                    TxState(TxPhase.CANCELLED, 0.0, "cancelled")
+                )
+                return
+            self.engine.transmit(source)
+        finally:
+            # Terminal state signals can reach the event loop before this
+            # thread returns.  Clear the worker first, then let the UI restart
+            # the camera knowing transmitting() is definitively false.
+            self._thread = None
+            self._workerFinished.emit()
+
+    def _on_worker_finished(self) -> None:
+        if self.cam_radio.isChecked():
+            self._start_preview()
 
     def allow_transmit(self) -> None:
         """Release the TX worker after half-duplex receive has shut down."""
@@ -350,8 +363,6 @@ class TransmitPanel(QWidget):
             self.cancel_button.setEnabled(False)
             if state.phase != TxPhase.IDLE:
                 self.transmitFinished.emit()
-            if self.cam_radio.isChecked():
-                self._start_preview()
 
     def _on_error(self, message: str) -> None:
         self.status.setText(message)
