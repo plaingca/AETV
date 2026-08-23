@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -90,6 +90,44 @@ class _FlexDiscoveryThread(QThread):
             self.finished_list.emit([], str(error))
 
 
+class _DeviceInventorySignals(QObject):
+    finished = Signal(object)
+
+
+class _DeviceInventoryTask(QRunnable):
+    """Enumerate hardware without stalling construction of the dialog."""
+
+    def __init__(self):
+        super().__init__()
+        self.signals = _DeviceInventorySignals()
+
+    def run(self) -> None:
+        inventory = {"cameras": [], "audio": {}, "hamlib": [], "serial": []}
+        try:
+            inventory["cameras"] = list_cameras()
+        except Exception:
+            pass
+        for kind in ("input", "output"):
+            try:
+                inventory["audio"][kind] = list_audio_devices(kind)
+            except Exception as error:
+                inventory["audio"][kind] = error
+        try:
+            inventory["hamlib"] = list_hamlib_models()
+        except Exception:
+            pass
+        try:
+            inventory["serial"] = list_serial_ports()
+        except Exception:
+            pass
+        try:
+            self.signals.finished.emit(inventory)
+        except RuntimeError:
+            # The dialog/application may have closed while enumeration was in
+            # flight.  In that case there is no UI left to receive the result.
+            pass
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: StationSettings, parent=None):
         super().__init__(parent)
@@ -97,6 +135,7 @@ class SettingsDialog(QDialog):
         self._settings = settings
         self._cat_thread: _CatTestThread | None = None
         self._flex_thread: _FlexDiscoveryThread | None = None
+        self._inventory_task: _DeviceInventoryTask | None = None
         tabs = QTabWidget()
         tabs.addTab(self._station_tab(), "Station")
         tabs.addTab(self._audio_tab(), "Audio")
@@ -112,6 +151,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(tabs)
         layout.addWidget(buttons)
         self.resize(520, 480)
+        QTimer.singleShot(0, self._load_device_inventory)
         if self._settings.cat_backend == "flex" and self._settings.flex_host:
             QTimer.singleShot(0, self._discover_flex)
 
@@ -188,7 +228,7 @@ class SettingsDialog(QDialog):
         self.gops.setValue(self._settings.gops)
         self.gops.setSuffix(" s")
         self.camera = QComboBox()
-        self._fill_cameras()
+        self.camera.addItem("Loading cameras…", self._settings.camera_index)
         self.level_db = QDoubleSpinBox()
         self.level_db.setRange(-24.0, 0.0)
         self.level_db.setSingleStep(0.5)
@@ -212,9 +252,10 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         self.audio_input = QComboBox()
         self.audio_output = QComboBox()
-        self._fill_audio()
+        self.audio_input.addItem("Loading devices…", self._settings.audio_input)
+        self.audio_output.addItem("Loading devices…", self._settings.audio_output)
         refresh = QPushButton("Refresh devices")
-        refresh.clicked.connect(self._fill_audio)
+        refresh.clicked.connect(self._load_device_inventory)
         self.rx_source = QComboBox()
         self.rx_source.addItem("Soundcard", "soundcard")
         self.rx_source.addItem("FlexRadio network audio (automatic)", "flex")
@@ -252,15 +293,9 @@ class SettingsDialog(QDialog):
         self.cat_backend.setCurrentIndex(max(0, self.cat_backend.findData(self._settings.cat_backend)))
         self.hamlib_model = QComboBox()
         self.hamlib_model.setEditable(True)
-        self.hamlib_model.addItem("Choose your radio…", 0)
-        for item in list_hamlib_models():
-            self.hamlib_model.addItem(item.label, item.model_id)
-        model_index = self.hamlib_model.findData(self._settings.hamlib_model)
-        if model_index >= 0:
-            self.hamlib_model.setCurrentIndex(model_index)
+        self.hamlib_model.addItem("Loading radio models…", self._settings.hamlib_model)
         self.hamlib_device = QComboBox()
         self.hamlib_device.setEditable(True)
-        self.hamlib_device.addItems(list_serial_ports())
         self.hamlib_device.setCurrentText(self._settings.hamlib_device)
         self.hamlib_device.setPlaceholderText("COM3 or network address")
         self.hamlib_baud = QComboBox()
@@ -295,7 +330,6 @@ class SettingsDialog(QDialog):
         self.require_mode = QLineEdit(self._settings.require_mode)
         self.serial_port = QComboBox()
         self.serial_port.setEditable(True)
-        self.serial_port.addItems(list_serial_ports())
         if self._settings.serial_port:
             self.serial_port.setCurrentText(self._settings.serial_port)
         self.ptt_lead = QDoubleSpinBox()
@@ -415,30 +449,33 @@ class SettingsDialog(QDialog):
         form.addRow(self.debug_capture)
         return page
 
-    def _fill_audio(self) -> None:
+    def _load_device_inventory(self) -> None:
+        if self._inventory_task is not None:
+            return
+        self._inventory_task = _DeviceInventoryTask()
+        self._inventory_task.signals.finished.connect(self._apply_device_inventory)
+        QThreadPool.globalInstance().start(self._inventory_task)
+
+    def _apply_device_inventory(self, inventory: dict) -> None:
+        self._inventory_task = None
         for combo, kind, current in (
             (self.audio_input, "input", self._settings.audio_input),
             (self.audio_output, "output", self._settings.audio_output),
         ):
             combo.clear()
             combo.addItem("System default", "")
-            try:
-                devices = list_audio_devices(kind)
-            except AudioUnavailable as error:
-                combo.addItem(str(error), "")
-                continue
+            devices = inventory["audio"].get(kind, [])
+            if isinstance(devices, Exception):
+                combo.addItem(str(devices), "")
+                devices = []
             for item in devices:
                 combo.addItem(item.label(), item.name)
             index = combo.findData(current)
             if index >= 0:
                 combo.setCurrentIndex(index)
 
-    def _fill_cameras(self) -> None:
         self.camera.clear()
-        try:
-            cameras = list_cameras()
-        except Exception:
-            cameras = []
+        cameras = inventory["cameras"]
         if not cameras:
             self.camera.addItem("Camera 0", 0)
         for item in cameras:
@@ -446,6 +483,22 @@ class SettingsDialog(QDialog):
         index = self.camera.findData(self._settings.camera_index)
         if index >= 0:
             self.camera.setCurrentIndex(index)
+
+        self.hamlib_model.clear()
+        self.hamlib_model.addItem("Choose your radio…", 0)
+        for item in inventory["hamlib"]:
+            self.hamlib_model.addItem(item.label, item.model_id)
+        model_index = self.hamlib_model.findData(self._settings.hamlib_model)
+        if model_index >= 0:
+            self.hamlib_model.setCurrentIndex(model_index)
+
+        for combo, current in (
+            (self.hamlib_device, self._settings.hamlib_device),
+            (self.serial_port, self._settings.serial_port),
+        ):
+            combo.clear()
+            combo.addItems(inventory["serial"])
+            combo.setCurrentText(current)
 
     def _browse_checkpoint(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "AETV checkpoint", "", "PyTorch (*.pt);;All files (*)")

@@ -55,6 +55,9 @@ class MainWindow(QMainWindow):
         self.settings = settings or load_settings()
         self.station = Station(self.settings)
         self._codec_thread: _CodecThread | None = None
+        self._tx_waiting_for_rx = False
+        self._tx_finished_while_stopping_rx = False
+        self._resume_rx = False
         self._build()
         self._load_codec()
 
@@ -103,6 +106,7 @@ class MainWindow(QMainWindow):
         self._refresh_station_label()
 
         self.rx.statusChanged.connect(self.rx_status.setText)
+        self.rx.stopFinished.connect(self._on_rx_stopped_for_tx)
         self.rx.logMessage.connect(self._log)
         self.tx.logMessage.connect(self._log)
         self.tx.pttChanged.connect(self.ptt_lamp.set_keyed)
@@ -213,18 +217,35 @@ class MainWindow(QMainWindow):
             self.rig_label.setText(f"{backend} {self.settings.serial_port}")
 
     def _on_tx_started(self) -> None:
+        self._tx_finished_while_stopping_rx = False
         if self.rx.listening() and self.settings.rx_source != "kiwi":
             self.rx.stop()
             self._resume_rx = True
+            self._tx_waiting_for_rx = True
             self._log("receive paused for half-duplex transmit")
         else:
             self._resume_rx = False
+            self._tx_waiting_for_rx = False
             if self.rx.listening() and self.settings.rx_source == "kiwi":
                 self._log("Kiwi receive remains live for full-duplex monitoring")
+            self.tx.allow_transmit()
+
+    def _on_rx_stopped_for_tx(self) -> None:
+        if not self._tx_waiting_for_rx:
+            return
+        self._tx_waiting_for_rx = False
+        self.tx.allow_transmit()
+        if self._tx_finished_while_stopping_rx and self._resume_rx:
+            self.rx.start()
+            self._resume_rx = False
+            self._tx_finished_while_stopping_rx = False
 
     def _on_tx_finished(self) -> None:
         self.ptt_lamp.set_keyed(False)
         if getattr(self, "_resume_rx", False):
+            if self._tx_waiting_for_rx:
+                self._tx_finished_while_stopping_rx = True
+                return
             self.rx.start()
             self._resume_rx = False
 
@@ -260,7 +281,7 @@ class MainWindow(QMainWindow):
             if self.tx._thread is not None:
                 self.tx._thread.join(timeout=8.0)
         if self.rx.listening():
-            self.rx.stop()
+            self.rx.stop_blocking()
         self.tx.stop_preview()
         save_settings(self.settings)
         event.accept()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -52,10 +54,12 @@ class ReceivePanel(QWidget):
     statusChanged = Signal(str)
     listeningChanged = Signal(bool)
     logMessage = Signal(str)
+    stopFinished = Signal()
     _stateArrived = Signal(object)
     _errorArrived = Signal(str)
     _videoArrived = Signal(object, object)
     _ringArrived = Signal(object)
+    _stopArrived = Signal()
 
     def __init__(self, station, parent=None):
         super().__init__(parent)
@@ -70,10 +74,12 @@ class ReceivePanel(QWidget):
         self._waterfall = None
         self._kiwi_thread: _KiwiListThread | None = None
         self._receivers: list[KiwiReceiver] = []
+        self._stop_thread: threading.Thread | None = None
         self._stateArrived.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._videoArrived.connect(self._show_video, Qt.ConnectionType.QueuedConnection)
         self._ringArrived.connect(self._apply_ring, Qt.ConnectionType.QueuedConnection)
+        self._stopArrived.connect(self._finish_stop, Qt.ConnectionType.QueuedConnection)
         self._build()
 
     def attach_waterfall(self, waterfall) -> None:
@@ -122,11 +128,38 @@ class ReceivePanel(QWidget):
         return True
 
     def stop(self) -> None:
-        self.engine.stop()
+        if self._stop_thread is not None and self._stop_thread.is_alive():
+            return
+        self.status.setText("stopping…")
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self._stop_thread = threading.Thread(
+            target=self._stop_worker, daemon=True, name="aetv-rx-stop"
+        )
+        self._stop_thread.start()
+
+    def _stop_worker(self) -> None:
+        try:
+            self.engine.stop()
+        except Exception as error:
+            self._errorArrived.emit(str(error))
+        finally:
+            self._stopArrived.emit()
+
+    def _finish_stop(self) -> None:
         self.progress.setValue(0)
         self._set_listening(False)
         if self._waterfall is not None:
             self._waterfall.set_ring(None)
+        self.stopFinished.emit()
+
+    def stop_blocking(self) -> None:
+        """Stop synchronously during application shutdown."""
+        thread = self._stop_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=6.0)
+        elif self.engine.listening:
+            self.engine.stop()
 
     def save_current(self) -> None:
         try:

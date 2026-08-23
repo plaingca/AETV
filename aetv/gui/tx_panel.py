@@ -35,6 +35,9 @@ class TransmitPanel(QWidget):
     _stateArrived = Signal(object)
     _errorArrived = Signal(str)
     _previewArrived = Signal(object)
+    _previewStopped = Signal()
+    _camerasArrived = Signal(object)
+    _outputsArrived = Signal(object)
 
     def __init__(self, station, parent=None):
         super().__init__(parent)
@@ -46,11 +49,19 @@ class TransmitPanel(QWidget):
             on_preview=self._previewArrived.emit,
         )
         self._thread: threading.Thread | None = None
+        self._start_gate = threading.Event()
+        self._cancel_requested = threading.Event()
         self._preview_stop = threading.Event()
         self._preview_thread: threading.Thread | None = None
+        self._preview_restart_pending = False
+        self._camera_load_active = False
+        self._output_load_active = False
         self._stateArrived.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._previewArrived.connect(self._show_preview, Qt.ConnectionType.QueuedConnection)
+        self._previewStopped.connect(self._on_preview_stopped, Qt.ConnectionType.QueuedConnection)
+        self._camerasArrived.connect(self._apply_cameras, Qt.ConnectionType.QueuedConnection)
+        self._outputsArrived.connect(self._apply_outputs, Qt.ConnectionType.QueuedConnection)
         self._file_path = ""
         self._build()
 
@@ -84,21 +95,41 @@ class TransmitPanel(QWidget):
         if problems:
             self.status.setText(problems[0])
             return
-        self._stop_preview()
+        # Some camera backends take seconds to return from read().  Ask the
+        # preview to stop here, but wait for it only in the TX worker.
+        self._preview_stop.set()
         source = "webcam" if self.cam_radio.isChecked() else self._file_path
         self.send_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setValue(0)
+        self.status.setText("preparing transmit…")
+        self._start_gate.clear()
+        self._cancel_requested.clear()
         self.transmitStarted.emit()
         self._thread = threading.Thread(target=self._run_send, args=(source,), daemon=True, name="aetv-tx")
         self._thread.start()
 
     def cancel(self) -> None:
+        self._cancel_requested.set()
+        self._start_gate.set()
         self.engine.cancel()
         self.status.setText("cancelling…")
 
     def _run_send(self, source: str) -> None:
+        preview = self._preview_thread
+        if preview is not None and preview.is_alive():
+            preview.join(timeout=3.0)
+        self._start_gate.wait()
+        if self._cancel_requested.is_set():
+            self._stateArrived.emit(
+                TxState(TxPhase.CANCELLED, 0.0, "cancelled")
+            )
+            return
         self.engine.transmit(source)
+
+    def allow_transmit(self) -> None:
+        """Release the TX worker after half-duplex receive has shut down."""
+        self._start_gate.set()
 
     def _build(self) -> None:
         self.preview = VideoView("Choose a webcam or a video file")
@@ -183,8 +214,10 @@ class TransmitPanel(QWidget):
     def _restart_preview(self, _index: int) -> None:
         if not hasattr(self, "cam_radio"):
             return
-        self._stop_preview()
-        self._start_preview()
+        self._preview_restart_pending = True
+        self._preview_stop.set()
+        if self._preview_thread is None or not self._preview_thread.is_alive():
+            self._on_preview_stopped()
 
     def _start_preview(self) -> None:
         if self.transmitting() or not self.cam_radio.isChecked():
@@ -211,6 +244,14 @@ class TransmitPanel(QWidget):
         except Exception as error:
             if not self._preview_stop.is_set():
                 self._errorArrived.emit(f"Webcam preview unavailable: {error}")
+        finally:
+            self._previewStopped.emit()
+
+    def _on_preview_stopped(self) -> None:
+        if not self._preview_restart_pending:
+            return
+        self._preview_restart_pending = False
+        self._start_preview()
 
     def _stop_preview(self) -> None:
         self._preview_stop.set()
@@ -233,12 +274,27 @@ class TransmitPanel(QWidget):
         self.file_radio.setChecked(True)
 
     def _fill_cameras(self) -> None:
-        current = self.station.settings.camera_index
+        if self._camera_load_active:
+            return
+        self._camera_load_active = True
         self.camera.clear()
+        self.camera.addItem("Loading cameras…", self.station.settings.camera_index)
+        threading.Thread(
+            target=self._load_cameras, daemon=True, name="aetv-camera-list"
+        ).start()
+
+    def _load_cameras(self) -> None:
         try:
             cameras = list_cameras()
         except Exception:
             cameras = []
+        self._camerasArrived.emit(cameras)
+
+    def _apply_cameras(self, cameras) -> None:
+        self._camera_load_active = False
+        current = self.station.settings.camera_index
+        self.camera.blockSignals(True)
+        self.camera.clear()
         if not cameras:
             self.camera.addItem("Camera 0", 0)
         for item in cameras:
@@ -246,16 +302,32 @@ class TransmitPanel(QWidget):
         index = self.camera.findData(current)
         if index >= 0:
             self.camera.setCurrentIndex(index)
+        self.camera.blockSignals(False)
 
     def _fill_outputs(self) -> None:
+        if self._output_load_active:
+            return
+        self._output_load_active = True
+        self.output.clear()
+        self.output.addItem("Loading devices…", self.station.settings.audio_output)
+        threading.Thread(
+            target=self._load_outputs, daemon=True, name="aetv-audio-list"
+        ).start()
+
+    def _load_outputs(self) -> None:
+        try:
+            outputs = list_audio_devices("output")
+        except AudioUnavailable:
+            outputs = []
+        self._outputsArrived.emit(outputs)
+
+    def _apply_outputs(self, outputs) -> None:
+        self._output_load_active = False
         current = self.station.settings.audio_output
         self.output.clear()
         self.output.addItem("System default", "")
-        try:
-            for item in list_audio_devices("output"):
-                self.output.addItem(item.label(), item.name)
-        except AudioUnavailable:
-            return
+        for item in outputs:
+            self.output.addItem(item.label(), item.name)
         index = self.output.findData(current)
         if index >= 0:
             self.output.setCurrentIndex(index)
