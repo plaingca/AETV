@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
 import torch
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -28,6 +29,9 @@ from aetv.gui.settings_dialog import SettingsDialog
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.gui.waterfall import Waterfall
 from aetv.gui.widgets import LogPane, PttLamp
+
+
+APP_ICON = Path(__file__).resolve().parent.parent / "assets" / "aetv-logo.png"
 
 
 class _CodecThread(QThread):
@@ -53,6 +57,8 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: StationSettings | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("AETV — Autoencoder Television")
+        if APP_ICON.is_file():
+            self.setWindowIcon(QIcon(str(APP_ICON)))
         self.settings = settings or load_settings()
         self.station = Station(self.settings)
         self._codec_thread: _CodecThread | None = None
@@ -362,8 +368,9 @@ class MainWindow(QMainWindow):
             self,
             "About AETV",
             "AETV — Autoencoder Television\n"
-            "Analog video over HF OFDM for amateur radio.\n\n"
-            "Published mode: V7 Flex-8k, 256×144 @ 12 fps, 24 kHz audio.\n"
+            "Live video built for challenging amateur-radio links.\n\n"
+            "Standard channel: 192×108 @ 6 fps.\n"
+            "Wide 8 kHz: 256×144 @ 12 fps.\n"
             "Identify every transmission. This software does not replace "
             "a license or a band-plan check.\n\n"
             "Artistic License 2.0",
@@ -405,6 +412,8 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("AETV")
     app.setApplicationDisplayName("AETV")
     app.setOrganizationName("AETV")
+    if APP_ICON.is_file():
+        app.setWindowIcon(QIcon(str(APP_ICON)))
     window = MainWindow()
     window.show()
     return app.exec()

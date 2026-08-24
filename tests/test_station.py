@@ -134,6 +134,13 @@ def test_settings_roundtrip(tmp_path: Path):
     assert loaded.tx_channel_profile == "mpp6"
 
 
+def test_settings_migrate_historical_mode_to_standard_release(tmp_path: Path):
+    path = tmp_path / "settings.json"
+    save_settings(StationSettings(mode="V1"), path)
+
+    assert load_settings(path).mode == "V8"
+
+
 def test_settings_reject_unknown_channel_profile():
     settings = StationSettings(tx_channel_profile="invented")
     assert "unknown TX channel profile 'invented'" in settings.validate()

@@ -310,7 +310,7 @@ AETV_MODES: dict[str, AETVModeSpec] = {
         gop_frames=12,
         latents_per_gop=LATENTS_PER_GOP_U,  # 10112
         causal=False,
-        description="Flex-8k: 256x144 16:9 @ 12 fps (128:1 sweet spot), 8 kHz wide channel (24 kHz audio)",
+        description="Wide 8 kHz: 256x144 16:9 @ 12 fps for wide transmit audio",
     ),
     "V8": AETVModeSpec(
         name="V8",
@@ -322,8 +322,18 @@ AETV_MODES: dict[str, AETVModeSpec] = {
         gop_frames=6,
         latents_per_gop=LATENTS_PER_GOP_W,  # 2816
         causal=False,
-        description="HF-3k experimental: 192x108 16:9 @ 6 fps, standard SSB channel",
+        description="Standard channel: 192x108 16:9 @ 6 fps for typical HF/VHF SSB audio",
     ),
+}
+
+
+# Modes with pinned, checksum-verified release checkpoints. Historical modes
+# remain decodable at the protocol layer, but are intentionally hidden from the
+# release GUI until they have validated weights of their own.
+RELEASE_MODES: tuple[str, ...] = ("V8", "V7")
+RELEASE_MODE_LABELS = {
+    "V8": "Standard channel — 192×108 @ 6 fps",
+    "V7": "Wide 8 kHz — 256×144 @ 12 fps",
 }
 
 

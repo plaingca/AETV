@@ -6,11 +6,17 @@ downloads the selected mode's default into its per-user cache and verifies the
 published SHA-256 automatically. Set `AETV_MODEL_DIR` to choose another cache
 directory or `AETV_OFFLINE=1` to disable network access.
 
-The application defaults to the receiver-adapted OTA fine-tune:
+The two GUI modes use these defaults:
+
+| GUI mode | File | Purpose | SHA-256 |
+|---|---|---|---|
+| Standard channel | `v8-hf3k-face-gan.pt` | Default app mode; face/detail-tuned 192×108 model for standard radio audio | `f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40` |
+| Wide 8 kHz | `v8-flex8k-ota-rxfix.pt` | Receiver-adapted 256×144 model verified on a 71-GOP OTA sweep | `294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f` |
+
+Additional Wide 8 kHz research checkpoints:
 
 | File | Purpose | SHA-256 |
 |---|---|---|
-| `v8-flex8k-ota-rxfix.pt` | Default; adapted to noise-aware MMSE confidence and verified on a 71-GOP OTA sweep | `294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f` |
 | `v8-flex8k-ota-perceptual.pt` | Previous OTA-perceptual default using the legacy equalizer contract | `425f112924693170c61cebb6ab5865bd526714a4afae9aec88a37709441b5d47` |
 | `v7-flex8k-severe.pt` | Alternate; strongest 0/-2 dB and MPP recovery | `78f990e34625cfbc6a5d80b673dd8fb0ffea6a565cf9a80796e110c40e0cdf14` |
 | `v7-flex8k-severe-balanced.pt` | Alternate with slightly more clean-channel fidelity | `59c0b8338b4a59e10b2ded81e8cecec1b04871d620b66af93be400008089c666` |

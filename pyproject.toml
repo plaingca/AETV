@@ -1,7 +1,7 @@
 [project]
 name = "aetv"
 version = "0.1.0"
-description = "Autoencoder Television: analog video over HF OFDM for amateur radio"
+description = "Live learned video over challenging amateur-radio channels"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

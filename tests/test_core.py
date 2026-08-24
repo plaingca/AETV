@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from aetv import (
     AETV_MODES,
     AETV_MODES_BY_INDEX,
+    RELEASE_MODES,
     BAND_N,
     BAND_U,
     BAND_W,
@@ -156,6 +157,7 @@ def test_aetv_modes_specs():
     assert AETV_MODES["V8"].height == 108
     assert AETV_MODES["V8"].fps == 6.0
     assert AETV_MODES["V8"].geometry.tx_bandpass[1] <= 3000.0
+    assert RELEASE_MODES == ("V8", "V7")
 
 
 def test_v8_transmit_waveform_stays_inside_nominal_3khz_channel():

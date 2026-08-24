@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from aetv.audio_io import AudioUnavailable, list_audio_devices
-from aetv.config import AETV_MODES
+from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.hfchannel import CHANNEL_PROFILES
 from aetv.source import CameraFrameBuffer, list_cameras
 from aetv.station import TxEngine, TxPhase, TxState
@@ -186,8 +186,8 @@ class TransmitPanel(QWidget):
         self.file_button.clicked.connect(self._choose_file)
         self.file_label = ElidingLabel("No file selected")
         self.mode = QComboBox()
-        for name, spec in AETV_MODES.items():
-            self.mode.addItem(f"{name} — {spec.width}×{spec.height} @ {spec.fps:g} fps", name)
+        for name in RELEASE_MODES:
+            self.mode.addItem(RELEASE_MODE_LABELS[name], name)
         self.gops = QSpinBox()
         self.gops.setRange(1, 300)
         self.gops.setSuffix(" s")

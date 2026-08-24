@@ -12,7 +12,7 @@ import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-from .config import AETV_MODES
+from .config import RELEASE_MODES
 from .hfchannel import CHANNEL_PROFILES
 from .kiwi import normalize_kiwi_host
 
@@ -43,7 +43,7 @@ def normalize_callsign(text: str) -> str:
 @dataclass
 class StationSettings:
     callsign: str = "N0CALL"
-    mode: str = "V7"
+    mode: str = "V8"
     checkpoint: str = ""
     torch_device: str = ""
 
@@ -102,8 +102,8 @@ class StationSettings:
         self.callsign = normalize_callsign(self.callsign) or "N0CALL"
         if not CALLSIGN_RE.match(self.callsign):
             problems.append("callsign must be 1-8 characters from A-Z, 0-9, /")
-        if self.mode not in AETV_MODES:
-            problems.append(f"unknown mode {self.mode!r}")
+        if self.mode not in RELEASE_MODES:
+            problems.append(f"mode {self.mode!r} is not a validated release mode")
         if not 0.05 <= self.tx_level <= 1.0:
             problems.append("TX level must be between 0.05 and 1.0")
         if self.gops < 1:
@@ -151,6 +151,8 @@ def load_settings(path: Path | None = None) -> StationSettings:
     allowed = {item.name for item in fields(StationSettings)}
     clean = {key: value for key, value in raw.items() if key in allowed}
     settings = StationSettings(**clean)
+    if settings.mode not in RELEASE_MODES:
+        settings.mode = StationSettings.mode
     if settings.kiwi_host:
         try:
             settings.kiwi_host = normalize_kiwi_host(settings.kiwi_host)

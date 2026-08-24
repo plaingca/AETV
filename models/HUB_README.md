@@ -10,8 +10,8 @@ tags:
 
 # AETV release checkpoints
 
-Inference checkpoints for [AETV](https://github.com/plaingca/AETV), an
-experimental neural video codec and OFDM modem for amateur-radio HF channels.
+Inference checkpoints for [AETV](https://github.com/plaingca/AETV), a learned
+video codec and OFDM modem for challenging amateur-radio HF/VHF channels.
 The application downloads the selected mode's default checkpoint from this
 repository automatically and verifies its byte count and SHA-256 before use.
 

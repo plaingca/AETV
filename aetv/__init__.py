@@ -3,6 +3,8 @@
 from .config import (
     AETV_MODES,
     AETV_MODES_BY_INDEX,
+    RELEASE_MODES,
+    RELEASE_MODE_LABELS,
     AETVBandGeometry,
     AETVModeSpec,
     BAND_N,
@@ -44,6 +46,8 @@ from .sync import Acquisition, SyncError, acquire
 __all__ = [
     "AETV_MODES",
     "AETV_MODES_BY_INDEX",
+    "RELEASE_MODES",
+    "RELEASE_MODE_LABELS",
     "AETVBandGeometry",
     "AETVModeSpec",
     "BAND_N",

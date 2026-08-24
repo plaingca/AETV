@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from aetv.audio_io import AudioUnavailable, list_audio_devices
 from aetv.cat import CatConfig, list_hamlib_models, list_serial_ports, open_ptt
-from aetv.config import AETV_MODES
+from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.flex import FlexRadioInfo, discover_radios, with_probed_path_mtu
 from aetv.kiwi import normalize_kiwi_host
 from aetv.settings import StationSettings, normalize_callsign
@@ -159,7 +159,12 @@ class SettingsDialog(QDialog):
         settings.callsign = normalize_callsign(self.callsign.text()) or "N0CALL"
         settings.mode = self.mode.currentData()
         settings.checkpoint = self.checkpoint.text().strip()
-        settings.torch_device = self.torch_device.currentText().strip()
+        selected_device = self.torch_device.currentData()
+        settings.torch_device = (
+            str(selected_device)
+            if selected_device is not None
+            else self.torch_device.currentText().strip()
+        )
         settings.gops = int(self.gops.value())
         settings.camera_index = int(self.camera.currentData() or 0)
         settings.tx_level = float(10 ** (self.level_db.value() / 20.0))
@@ -212,8 +217,8 @@ class SettingsDialog(QDialog):
         self.callsign = QLineEdit(self._settings.callsign)
         self.callsign.setMaxLength(8)
         self.mode = QComboBox()
-        for name, spec in AETV_MODES.items():
-            self.mode.addItem(f"{name} — {spec.description}", name)
+        for name in RELEASE_MODES:
+            self.mode.addItem(RELEASE_MODE_LABELS[name], name)
         self.mode.setCurrentIndex(max(0, self.mode.findData(self._settings.mode)))
         self.checkpoint = QLineEdit(self._settings.checkpoint)
         self.checkpoint.setPlaceholderText("selected mode's default checkpoint")
@@ -226,8 +231,13 @@ class SettingsDialog(QDialog):
         ck_row.addWidget(browse)
         self.torch_device = QComboBox()
         self.torch_device.setEditable(True)
-        self.torch_device.addItems(["", "cuda", "cpu"])
-        if self._settings.torch_device:
+        self.torch_device.addItem("Automatic (NVIDIA GPU when available)", "")
+        self.torch_device.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.torch_device.addItem("CPU", "cpu")
+        device_index = self.torch_device.findData(self._settings.torch_device)
+        if device_index >= 0:
+            self.torch_device.setCurrentIndex(device_index)
+        elif self._settings.torch_device:
             self.torch_device.setCurrentText(self._settings.torch_device)
         self.gops = QSpinBox()
         self.gops.setRange(1, 300)
@@ -244,11 +254,14 @@ class SettingsDialog(QDialog):
         form.addRow("Callsign", self.callsign)
         form.addRow("Mode", self.mode)
         form.addRow("Checkpoint", ck)
-        form.addRow("Torch device", self.torch_device)
+        form.addRow("Compute", self.torch_device)
         form.addRow("Transmit length", self.gops)
         form.addRow("Webcam", self.camera)
         form.addRow("TX peak", self.level_db)
-        note = QLabel("The beacon carries this callsign. Identify with your own.")
+        note = QLabel(
+            "The beacon carries this callsign. Standard channel can run live on a "
+            "modern 8-core CPU; Wide 8 kHz is intended for CUDA."
+        )
         note.setWordWrap(True)
         form.addRow("", note)
         return page

@@ -16,11 +16,11 @@ import torch
 from .config import AETV_MODES, AETVModeSpec
 from .models import AETVAutoencoder
 
-DEFAULT_CHECKPOINT = Path("models") / "v8-flex8k-ota-rxfix.pt"
+DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-face-gan.pt"
 MODE_DEFAULT_CHECKPOINTS = {
-    "V8": Path("models") / "v8-hf3k-face-gan.pt",
+    "V7": Path("models") / "v8-flex8k-ota-rxfix.pt",
 }
-DEFAULT_MODE = "V7"
+DEFAULT_MODE = "V8"
 HF_MODEL_REPO = "AETV/AETV"
 HF_MODEL_REVISION = "7ed90b4a902937248c4408d9e02c29b876b07a75"
 RELEASE_CHECKPOINTS = {
@@ -160,6 +160,15 @@ class AETVCodec:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+        self.cpu_threads: int | None = None
+        if self.device.type == "cpu":
+            configured_threads = os.environ.get("AETV_CPU_THREADS")
+            logical_threads = (
+                int(configured_threads) if configured_threads else (os.cpu_count() or 1)
+            )
+            if logical_threads > 0 and torch.get_num_threads() != logical_threads:
+                torch.set_num_threads(logical_threads)
+            self.cpu_threads = torch.get_num_threads()
         self.checkpoint_path = resolve_checkpoint(checkpoint, mode=mode)
         payload = torch.load(self.checkpoint_path, map_location="cpu", weights_only=False)
         args = payload.get("args", {}) or {}
