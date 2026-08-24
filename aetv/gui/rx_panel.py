@@ -25,13 +25,13 @@ from PySide6.QtWidgets import (
 from aetv.audio_io import AudioUnavailable, list_audio_devices
 from aetv.kiwi import KiwiReceiver, find_receivers, normalize_kiwi_host, probe_receiver
 from aetv.propagation import (
+    MIN_AUTO_SNR_DB,
     PropagationPredictor,
     antenna_gain_db,
     fetch_space_weather,
     frequency_search_radius_km,
     initial_bearing_deg,
     parse_planning_frequencies,
-    record_ota_failure,
     record_ota_measurement,
 )
 from aetv.settings import normalize_callsign
@@ -600,6 +600,30 @@ class ReceivePanel(QWidget):
             self.logMessage.emit(message)
             self._start_after_kiwi_pick = False
             return
+        viable = [
+            pair
+            for pair in pairs
+            if pair[2].calibrated_snr_db >= MIN_AUTO_SNR_DB
+        ]
+        if not viable:
+            receiver, frequency, estimate = pairs[0]
+            place = receiver.loc or receiver.name or receiver.host
+            message = (
+                f"no viable AETV path predicted; kept the current receiver. "
+                f"Least-bad result was {place} at {frequency:.6f} MHz, "
+                f"{estimate.calibrated_snr_db:.1f} dB (minimum "
+                f"{MIN_AUTO_SNR_DB:.1f} dB)"
+            )
+            self.status.setText(message)
+            self.kiwi_recommendation.setText(message)
+            self.kiwi_recommendation.setStyleSheet(
+                "QLabel { padding: 5px 8px; border: 1px solid #742d2d; "
+                "border-radius: 4px; background: #742d2d; color: white; }"
+            )
+            self.logMessage.emit(message)
+            self._start_after_kiwi_pick = False
+            return
+        pairs = viable
         _best_receiver, best_frequency, best_estimate = pairs[0]
         selected_receivers = []
         seen = set()
@@ -715,7 +739,14 @@ class ReceivePanel(QWidget):
             (item for item in usable if item.success_probability is not None),
             usable[0] if usable else None,
         )
-        self._recommended_receiver = best
+        viable_best = (
+            best
+            if best is not None
+            and best.predicted_snr_db is not None
+            and best.predicted_snr_db >= MIN_AUTO_SNR_DB
+            else None
+        )
+        self._recommended_receiver = viable_best
         if best is not None:
             probability = (
                 f"{best.success_probability:.0f}% chance of a usable decode"
@@ -728,32 +759,47 @@ class ReceivePanel(QWidget):
                 else "unknown SNR"
             )
             place = best.loc or best.name or best.host
-            condition = (
-                "Good" if (best.success_probability or 0.0) >= 70 else
-                "Marginal" if (best.success_probability or 0.0) >= 35 else "Poor"
-            )
-            self.kiwi_recommendation.setText(
-                f"Best now: {place} at {self.station.settings.kiwi_dial_mhz:.6f} MHz\n"
-                f"{condition} conditions · {probability} · "
-                f"{snr} · {best.km or 0:.0f} km"
+            if viable_best is None:
+                condition = "No viable automatic path"
+                self.kiwi_recommendation.setText(
+                    f"{condition}; current receiver retained\n"
+                    f"Least-bad: {place} · {snr} · minimum "
+                    f"{MIN_AUTO_SNR_DB:.1f} dB"
+                )
+            else:
+                condition = (
+                    "Good" if (best.success_probability or 0.0) >= 70 else
+                    "Marginal" if (best.success_probability or 0.0) >= 35 else "Poor"
+                )
+                self.kiwi_recommendation.setText(
+                    f"Best now: {place} at {self.station.settings.kiwi_dial_mhz:.6f} MHz\n"
+                    f"{condition} conditions · {probability} · "
+                    f"{snr} · {best.km or 0:.0f} km"
             )
             probability_value = best.success_probability or 0.0
-            color = "#285b32" if probability_value >= 70 else "#725c1d" if probability_value >= 35 else "#742d2d"
+            color = (
+                "#742d2d"
+                if viable_best is None
+                else "#285b32"
+                if probability_value >= 70
+                else "#725c1d"
+                if probability_value >= 35
+                else "#742d2d"
+            )
             self.kiwi_recommendation.setStyleSheet(
                 f"QLabel {{ padding: 5px 8px; border: 1px solid {color}; "
                 f"border-radius: 4px; background: {color}; color: white; }}"
             )
         auto_pick = (self.auto_kiwi.isChecked() or self._kiwi_force_auto) and not self.listening()
-        if best is not None and auto_pick:
-            self.kiwi_host.setText(best.host)
-            self.station.settings.kiwi_host = best.host
-            self.set_probe_receiver(best)
-            current = best.host
+        if viable_best is not None and auto_pick:
+            self.kiwi_host.setText(viable_best.host)
+            self.station.settings.kiwi_host = viable_best.host
+            self.set_probe_receiver(viable_best)
+            current = viable_best.host
             self.logMessage.emit(
-                f"automatically selected Kiwi {best.host}: "
-                f"{best.predicted_snr_db:.1f} dB, {best.success_probability:.0f}% predicted success"
-                if best.predicted_snr_db is not None
-                else f"automatically selected Kiwi {best.host}"
+                f"automatically selected Kiwi {viable_best.host}: "
+                f"{viable_best.predicted_snr_db:.1f} dB, "
+                f"{viable_best.success_probability:.0f}% predicted success"
             )
         if not current and usable:
             self.kiwi_host.setText(usable[0].host)
@@ -763,9 +809,15 @@ class ReceivePanel(QWidget):
             if index >= 0:
                 self.kiwi_list.setCurrentIndex(index)
         self._kiwi_force_auto = False
-        if self._start_after_kiwi_pick and best is not None:
+        if self._start_after_kiwi_pick and viable_best is not None:
             self._start_after_kiwi_pick = False
             QTimer.singleShot(0, self.start)
+        elif self._start_after_kiwi_pick:
+            self._start_after_kiwi_pick = False
+            self.status.setText(
+                "receive not started: no predicted AETV path meets the "
+                f"{MIN_AUTO_SNR_DB:.1f} dB automatic-selection floor"
+            )
 
     def _apply_kiwi_choice(self, index: int) -> None:
         host = self.kiwi_list.itemData(index)
@@ -848,49 +900,14 @@ class ReceivePanel(QWidget):
             or self._probe_decode_seen
         ):
             return
-        settings = self.station.settings
-        try:
-            host = normalize_kiwi_host(settings.kiwi_host)
-        except ValueError:
-            return
-        receiver = self._probe_tx_receiver
-        if receiver is None or receiver.host != host:
-            receiver = next((item for item in self._receivers if item.host == host), None)
-        lat, lon = float(settings.kiwi_lat), float(settings.kiwi_lon)
-        frequency = float(settings.kiwi_dial_mhz)
-        power = max(0.1, float(settings.flex_power))
-        callsign = normalize_callsign(settings.callsign)
-
-        def save_failure() -> None:
-            target = receiver or probe_receiver(host, timeout=5.0)
-            if target is None:
-                self.logMessage.emit(f"failed probe skipped: no coordinates for {host}")
-                return
-            if not (-90.0 <= target.lat <= 90.0 and -180.0 <= target.lon <= 180.0):
-                self.logMessage.emit(f"failed probe skipped: invalid coordinates for {host}")
-                return
-            try:
-                bearing = initial_bearing_deg(lat, lon, target.lat, target.lon)
-                gain = antenna_gain_db(
-                    settings.prop_antenna_pattern,
-                    bearing,
-                    settings.prop_antenna_azimuth_deg,
-                    settings.prop_antenna_gain_dbi,
-                )
-                measurement = record_ota_failure(
-                    target, lat, lon, frequency, power, gain, callsign
-                )
-                self.logMessage.emit(
-                    f"propagation miss saved: {host} did not decode {duration:.1f} s "
-                    f"at {frequency:.6f} MHz; P.533 predicted "
-                    f"{measurement.predicted_snr_db:.1f} dB"
-                )
-            except Exception as error:
-                self.logMessage.emit(f"failed probe calibration error: {error}")
-
-        threading.Thread(
-            target=save_failure, daemon=True, name="aetv-probe-failure"
-        ).start()
+        # A missing decode is not proof of a failed propagation path. It can be
+        # caused by a modem defect, wrong dial, stream gap, occupied channel or
+        # a receiver that never delivered IQ. Only successful AETV decodes and
+        # explicit network-wide FT8 probe outcomes calibrate the model.
+        self.logMessage.emit(
+            f"OTA non-decode ({duration:.1f} s) not used for propagation "
+            "calibration because RF presence was not independently confirmed"
+        )
 
     def _normalize_kiwi_entry(self) -> None:
         text = self.kiwi_host.text().strip()

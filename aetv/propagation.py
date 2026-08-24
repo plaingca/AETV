@@ -23,12 +23,20 @@ from pathlib import Path
 from .kiwi import KiwiReceiver, great_circle_km
 from .settings import config_dir
 
-SWPC_SOLAR_URL = (
+SWPC_R12_FORECAST_URL = (
+    "https://services.swpc.noaa.gov/json/solar-cycle/"
+    "predicted-solar-cycle.json"
+)
+SWPC_R12_OBSERVED_URL = (
     "https://services.swpc.noaa.gov/json/solar-cycle/"
     "observed-solar-cycle-indices.json"
 )
 SWPC_KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 TARGET_SNR_DB = 9.0
+MIN_AUTO_SNR_DB = 6.0
+CALIBRATION_RESIDUAL_LIMIT_DB = 12.0
+GENERAL_CALIBRATION_LIMIT_DB = 6.0
+HOST_CALIBRATION_LIMIT_DB = 8.0
 
 # Planning dials, not a band-plan authorization. The emitted AETV passband is
 # above the suppressed-carrier dial, so users must edit this list for their
@@ -197,12 +205,21 @@ def native_runtime_status(month: int | None = None) -> tuple[bool, Path]:
 
 
 def fetch_space_weather(timeout: float = 8.0) -> SpaceWeather:
-    """Read current SSN and Kp, using a six-hour disk cache when possible."""
+    """Read current P.533 R12 and Kp, using a six-hour disk cache.
+
+    ITU-R P.533 requires the 12-month smoothed sunspot number R12, not the
+    current raw monthly count or daily 10.7 cm solar flux. NOAA cannot publish
+    a centered observed R12 for the current month until six months later, so
+    use its current-month smoothed-cycle forecast for planning.
+    """
     cache = config_dir() / "space_weather.json"
     now = datetime.now(timezone.utc).timestamp()
     try:
         payload = json.loads(cache.read_text(encoding="utf-8"))
-        if now - float(payload["cached_at"]) < 6 * 3600:
+        if (
+            payload.get("solar_index") == "R12"
+            and now - float(payload["cached_at"]) < 6 * 3600
+        ):
             return SpaceWeather(float(payload["ssn"]), float(payload["kp"]), "NOAA cache")
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -212,19 +229,52 @@ def fetch_space_weather(timeout: float = 8.0) -> SpaceWeather:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    solar_source = "default R12"
+    ssn = 100.0
     try:
-        solar = read_json(SWPC_SOLAR_URL)
-        usable = [row for row in solar if float(row.get("ssn", -1)) >= 0]
-        ssn = float(usable[-1]["ssn"])
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        forecast = read_json(SWPC_R12_FORECAST_URL)
+        matching = [row for row in forecast if row.get("time-tag") == month]
+        if not matching:
+            raise ValueError(f"NOAA R12 forecast has no row for {month}")
+        ssn = float(matching[-1]["predicted_ssn"])
+        solar_source = "NOAA SWPC R12 forecast"
+    except Exception:
+        try:
+            observed = read_json(SWPC_R12_OBSERVED_URL)
+            usable = [
+                row
+                for row in observed
+                if float(row.get("smoothed_ssn", -1)) >= 0
+            ]
+            ssn = float(usable[-1]["smoothed_ssn"])
+            solar_source = "NOAA SWPC observed R12"
+        except Exception:
+            pass
+
+    kp = 2.0
+    try:
         kp_rows = read_json(SWPC_KP_URL)
         kp = float(kp_rows[-1][1] if isinstance(kp_rows[-1], list) else kp_rows[-1]["Kp"])
+    except Exception:
+        pass
+    try:
         cache.write_text(
-            json.dumps({"cached_at": now, "ssn": ssn, "kp": kp}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "cached_at": now,
+                    "ssn": ssn,
+                    "kp": kp,
+                    "solar_index": "R12",
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
-        return SpaceWeather(ssn, kp, "NOAA SWPC")
-    except Exception:
-        return SpaceWeather()
+    except OSError:
+        pass
+    return SpaceWeather(ssn, kp, solar_source)
 
 
 class CalibrationStore:
@@ -270,10 +320,19 @@ class CalibrationStore:
         if not rows:
             return 0.0, 6.0, 0
         weighted: list[tuple[float, float]] = []
-        exact_miss = False
+        exact: list[ProbeMeasurement] = []
         target_band = calibration_band(frequency_mhz)
         for row in rows:
             if calibration_band(row.frequency_mhz) != target_band:
+                continue
+            if row.host == host and not row.host.startswith("pskr:"):
+                exact.append(row)
+                continue
+            # A non-decode at some other Kiwi says nothing reliable about this
+            # receiver: it may have been tuning, capture, occupancy or decoder
+            # failure. Only network-wide FT8 no-report probes are allowed to
+            # contribute negative evidence across receivers.
+            if not row.decoded and row.directional:
                 continue
             angle = _angular_difference(bearing_deg, row.bearing_deg)
             direction_weight = (
@@ -282,24 +341,62 @@ class CalibrationStore:
             band_weight = math.exp(
                 -0.5 * (math.log(max(frequency_mhz, 0.1) / max(row.frequency_mhz, 0.1)) / 0.08) ** 2
             )
-            host_weight = (3.0 if not row.decoded else 2.0) if row.host == host else 1.0
-            weight = direction_weight * band_weight * host_weight
+            source_weight = 3.0 if not row.host.startswith("pskr:") else 1.0
+            weight = direction_weight * band_weight * source_weight
             if weight >= 0.02:
-                weighted.append((weight, row.residual_db))
-                exact_miss = exact_miss or (row.host == host and not row.decoded)
-        if not weighted:
+                residual = max(
+                    -CALIBRATION_RESIDUAL_LIMIT_DB,
+                    min(CALIBRATION_RESIDUAL_LIMIT_DB, row.residual_db),
+                )
+                weighted.append((weight, residual))
+        if not weighted and not exact:
             return 0.0, 6.0, 0
-        total = sum(weight for weight, _ in weighted)
-        mean = sum(weight * value for weight, value in weighted) / total
-        # Shrink sparse calibration toward the physical model.
-        effective = min(len(weighted), total)
-        # A completed transmission missed by this exact receiver is stronger
-        # categorical evidence than a noisy SNR estimate from another path.
-        prior_strength = 1.0 if exact_miss else 3.0
-        correction = mean * effective / (effective + prior_strength)
-        variance = sum(weight * (value - mean) ** 2 for weight, value in weighted) / total
-        uncertainty = max(2.0, math.sqrt(variance + 9.0 / (effective + 1.0)))
-        return correction, uncertainty, len(weighted)
+        general_correction = 0.0
+        uncertainty = 6.0
+        if weighted:
+            total = sum(weight for weight, _ in weighted)
+            mean = sum(weight * value for weight, value in weighted) / total
+            effective = min(len(weighted), total)
+            # FT8 reports come from unknown antennas and noise environments.
+            # They may establish that a band/direction is open, but must never
+            # manufacture a 20 dB path gain for an unrelated Kiwi.
+            general_correction = mean * effective / (effective + 6.0)
+            general_correction = max(
+                -GENERAL_CALIBRATION_LIMIT_DB,
+                min(GENERAL_CALIBRATION_LIMIT_DB, general_correction),
+            )
+            variance = (
+                sum(weight * (value - mean) ** 2 for weight, value in weighted)
+                / total
+            )
+            uncertainty = max(
+                2.0, math.sqrt(variance + 9.0 / (effective + 1.0))
+            )
+
+        host_correction = 0.0
+        if exact:
+            latest = max(exact, key=lambda row: row.timestamp_utc)
+            if latest.decoded and latest.measured_snr_db is not None:
+                residual = max(
+                    -HOST_CALIBRATION_LIMIT_DB,
+                    min(HOST_CALIBRATION_LIMIT_DB, latest.residual_db),
+                )
+                # A decoded AETV transmission is direct, receiver-specific
+                # evidence in the exact modem reference bandwidth. Trust it
+                # ahead of population FT8 reports from unrelated stations.
+                host_correction = residual
+            else:
+                # Exact-host non-decodes are useful as a temporary blacklist,
+                # but are not generalized to other receivers or directions.
+                host_correction = -6.0
+        correction = max(
+            -CALIBRATION_RESIDUAL_LIMIT_DB,
+            min(
+                CALIBRATION_RESIDUAL_LIMIT_DB,
+                general_correction + host_correction,
+            ),
+        )
+        return correction, uncertainty, len(weighted) + len(exact)
 
 
 class PropagationPredictor:

@@ -215,3 +215,39 @@ def test_manual_kiwi_tx_dial_keeps_flex_frequency_aligned():
     assert panel.station.settings.kiwi_dial_mhz == 7.13
     assert panel.station.settings.freq_mhz == 7.13
     assert panel._recommended_receiver is None
+
+
+def test_rf_pair_selector_retains_current_path_when_all_candidates_are_bad():
+    class Widget:
+        text = ""
+        enabled = True
+
+        def setText(self, text):
+            self.text = text
+
+        def setStyleSheet(self, _style):
+            pass
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+    messages = []
+    settings = SimpleNamespace(kiwi_host="manual.example:8073", kiwi_dial_mhz=7.088)
+    panel = SimpleNamespace(
+        find_button=Widget(),
+        start_button=Widget(),
+        listening=lambda: False,
+        station=SimpleNamespace(codec=object(), settings=settings),
+        status=Widget(),
+        kiwi_recommendation=Widget(),
+        logMessage=SimpleNamespace(emit=messages.append),
+        _start_after_kiwi_pick=True,
+    )
+    receiver = KiwiReceiver("bad.example:8073", loc="Bad path")
+    estimate = SimpleNamespace(calibrated_snr_db=5.9)
+    ReceivePanel._on_rf_pairs(panel, [(receiver, 21.088, estimate)], "", "test")
+    assert settings.kiwi_host == "manual.example:8073"
+    assert settings.kiwi_dial_mhz == 7.088
+    assert not panel._start_after_kiwi_pick
+    assert "no viable AETV path" in panel.status.text
+    assert messages == [panel.status.text]
