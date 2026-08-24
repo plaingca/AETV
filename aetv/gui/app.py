@@ -213,8 +213,9 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(
             self,
             "AETV checkpoint",
-            message + "\n\nCopy the OTA receiver-adapted Flex-8k weights to "
-            "models/v8-flex8k-ota-rxfix.pt.",
+            message + "\n\nDefault checkpoints download automatically from "
+            "Hugging Face Hub. Check the network connection, or choose a local "
+            "checkpoint in Settings.",
         )
 
     def open_settings(self) -> None:

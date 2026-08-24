@@ -124,9 +124,14 @@ class VideoView(QWidget):
         *,
         fps: float,
         prebuffer_frames: int = 24,
-        boundary_blend_frames: int = 4,
+        boundary_blend_frames: int = 0,
     ) -> None:
-        """Queue decoded frames for clocked, jitter-buffered receive playout."""
+        """Queue decoded frames for clocked, jitter-buffered receive playout.
+
+        Boundary concealment is opt-in. Cross-fading independent GOP renders
+        hides a luminance jump but also creates the visible multi-frame smearing
+        that makes motion look as though it leaked across codec boundaries.
+        """
         if frames is None or frames.size == 0:
             return
         if fps > 0:

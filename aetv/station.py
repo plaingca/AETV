@@ -420,6 +420,8 @@ class TxEngine:
         decoded_count = 0
         transmitted_chunks = 0
         block_samples = max(1, fs // 10)
+        stream_started: float | None = None
+        delivered_samples = 0
         for clean in chunks:
             if self._cancel.is_set():
                 self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
@@ -429,11 +431,26 @@ class TxEngine:
             if peak > 0:
                 impaired *= self.station.settings.tx_level / peak
             self.last_wav = impaired
+            if stream_started is None:
+                # Encoding happens before the first audio buffer exists; the
+                # emulated on-air clock starts only once that buffer is ready.
+                stream_started = time.monotonic()
             if recorder is not None:
                 recorder.write(impaired)
             transmitted_chunks += 1
             for start in range(0, len(impaired), block_samples):
-                results = demodulator.feed(impaired[start : start + block_samples])
+                block = impaired[start : start + block_samples]
+                # A local channel has no soundcard to impose wall-clock
+                # timing. Deliver each block when its final sample would have
+                # arrived over the air so decoded GOPs cannot overrun the
+                # GUI's real-time playout queue.
+                delivered_samples += len(block)
+                deadline = stream_started + delivered_samples / fs
+                delay = deadline - time.monotonic()
+                if delay > 0 and self._cancel.wait(delay):
+                    self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+                    return False
+                results = demodulator.feed(block)
                 for result in results:
                     for latents, weights in zip(result.gops_latents, result.gops_weights):
                         with self.station.codec_lock:

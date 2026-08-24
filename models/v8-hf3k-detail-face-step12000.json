@@ -1,0 +1,10 @@
+{
+  "path": "models\\v8-hf3k-detail-face-step12000.pt",
+  "mode": "V8",
+  "step": 12000,
+  "source_run": "v8-hf3k-detail-face-saliency-20260824",
+  "bytes": 215764467,
+  "sha256": "d50cd2cf0bd05eaf9422b1bc9320f0a854c3ad85884114c4f2bf6cbae1381404",
+  "model_width": 128,
+  "latent_channels": 3
+}

@@ -1,11 +1,19 @@
 """Checkpoint load and V7 encode/decode smoke test."""
 
+import hashlib
+import io
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from aetv.codec import DEFAULT_CHECKPOINT, AETVCodec, resolve_checkpoint
+import aetv.codec as codec_module
+from aetv.codec import (
+    DEFAULT_CHECKPOINT,
+    AETVCodec,
+    download_default_checkpoint,
+    resolve_checkpoint,
+)
 from aetv.config import AETV_MODES
 from aetv.modem import demodulate_gop_stream, modulate_gop_stream
 
@@ -17,6 +25,45 @@ def test_resolve_checkpoint_from_environment(tmp_path, monkeypatch):
     checkpoint.touch()
     monkeypatch.setenv("AETV_CHECKPOINT", str(checkpoint))
     assert resolve_checkpoint() == checkpoint.resolve()
+
+
+def test_default_checkpoint_download_is_atomic_and_verified(tmp_path, monkeypatch):
+    payload = b"published model bytes"
+    monkeypatch.setitem(
+        codec_module.RELEASE_CHECKPOINTS,
+        "TEST",
+        {
+            "filename": "test.pt",
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(codec_module.urllib.request, "urlopen", fake_urlopen)
+    target = tmp_path / "models" / "test.pt"
+
+    assert download_default_checkpoint("TEST", destination=target) == target.resolve()
+    assert target.read_bytes() == payload
+    assert not list(target.parent.glob("*.download"))
+    assert len(calls) == 1
+    # A valid cached file is reused without touching the network.
+    assert download_default_checkpoint("TEST", destination=target) == target.resolve()
+    assert len(calls) == 1
+
+
+def test_explicit_missing_checkpoint_is_never_downloaded(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        codec_module,
+        "download_default_checkpoint",
+        lambda _mode: pytest.fail("explicit paths must not trigger a download"),
+    )
+    with pytest.raises(FileNotFoundError):
+        resolve_checkpoint(tmp_path / "missing.pt", mode="V8")
 
 
 @pytest.mark.skipif(

@@ -92,7 +92,12 @@ class StationSettings:
     window_layout: str = "split"
     tx_channel_profile: str = "radio"  # radio | a CHANNEL_PROFILES key
 
-    def validate(self) -> list[str]:
+    def validate(self, *, radio_tx: bool = True, receive: bool = True) -> list[str]:
+        """Validate shared settings and the hardware paths used by an action.
+
+        Local channel loopbacks use neither the radio transmit path nor the
+        configured receiver, so callers can skip those hardware-only checks.
+        """
         problems: list[str] = []
         self.callsign = normalize_callsign(self.callsign) or "N0CALL"
         if not CALLSIGN_RE.match(self.callsign):
@@ -109,7 +114,7 @@ class StationSettings:
             problems.append(f"unknown CAT backend {self.cat_backend!r}")
         if self.rx_source not in {"soundcard", "flex", "kiwi"}:
             problems.append(f"unknown receive source {self.rx_source!r}")
-        if self.rx_source == "kiwi" and not self.kiwi_host:
+        if receive and self.rx_source == "kiwi" and not self.kiwi_host:
             problems.append("KiwiSDR host is empty")
         elif self.kiwi_host:
             try:
@@ -118,13 +123,13 @@ class StationSettings:
                 problems.append(str(error))
         if self.prop_antenna_pattern not in {"unknown", "dipole", "directional"}:
             problems.append(f"unknown propagation antenna pattern {self.prop_antenna_pattern!r}")
-        if self.cat_backend == "flex" and not self.flex_host:
+        if radio_tx and self.cat_backend == "flex" and not self.flex_host:
             problems.append("Flex host is empty")
-        if self.cat_backend == "hamlib" and self.hamlib_model <= 0:
+        if radio_tx and self.cat_backend == "hamlib" and self.hamlib_model <= 0:
             problems.append("Hamlib radio model is not selected")
-        if self.rx_source == "flex" and not self.flex_host:
+        if receive and self.rx_source == "flex" and not self.flex_host:
             problems.append("Flex host is empty")
-        if self.cat_backend in {"rts", "dtr"} and not self.serial_port:
+        if radio_tx and self.cat_backend in {"rts", "dtr"} and not self.serial_port:
             problems.append("serial PTT port is empty")
         return problems
 

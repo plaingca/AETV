@@ -1,0 +1,10 @@
+{
+  "path": "models/v8-hf3k-face-gan.pt",
+  "mode": "V8",
+  "step": 600,
+  "source_run": "v8-hf3k-face-gan-sweep-20260824/adv-0.010",
+  "bytes": 215759785,
+  "sha256": "f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40",
+  "model_width": 128,
+  "latent_channels": 3
+}

@@ -1,4 +1,10 @@
-# Flex-8k checkpoints
+# AETV checkpoints
+
+Release weights are hosted at
+[AETV/AETV](https://huggingface.co/AETV/AETV). The app
+downloads the selected mode's default into its per-user cache and verifies the
+published SHA-256 automatically. Set `AETV_MODEL_DIR` to choose another cache
+directory or `AETV_OFFLINE=1` to disable network access.
 
 The application defaults to the receiver-adapted OTA fine-tune:
 
@@ -6,13 +12,13 @@ The application defaults to the receiver-adapted OTA fine-tune:
 |---|---|---|
 | `v8-flex8k-ota-rxfix.pt` | Default; adapted to noise-aware MMSE confidence and verified on a 71-GOP OTA sweep | `294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f` |
 | `v8-flex8k-ota-perceptual.pt` | Previous OTA-perceptual default using the legacy equalizer contract | `425f112924693170c61cebb6ab5865bd526714a4afae9aec88a37709441b5d47` |
-| `v7-flex8k-severe.pt` | Alternate; strongest 0/-2 dB and MPP recovery | `e900bd7da2f080d23926a64f76d4b2624c413e08ddcdb91fde81c8acdd9a53b4` |
-| `v7-flex8k-severe-balanced.pt` | Alternate with slightly more clean-channel fidelity | `18d610a35797f3bffb86f55bd8d9a79182d24b961640b19ffa27304763dcfa03` |
+| `v7-flex8k-severe.pt` | Alternate; strongest 0/-2 dB and MPP recovery | `78f990e34625cfbc6a5d80b673dd8fb0ffea6a565cf9a80796e110c40e0cdf14` |
+| `v7-flex8k-severe-balanced.pt` | Alternate with slightly more clean-channel fidelity | `59c0b8338b4a59e10b2ded81e8cecec1b04871d620b66af93be400008089c666` |
 | `v7-flex8k.pt` | Original published stage-2 baseline | `afe476e5c5681210817a8e0598ec38ef40bdbd609485ad10d7a13ae9e6cd460b` |
 
-Leave the checkpoint field empty in the GUI (or omit `--checkpoint`) to use
-`models/v8-flex8k-ota-rxfix.pt`. Set `AETV_CHECKPOINT` or pass `--checkpoint` to
-select either alternate.
+Leave the checkpoint field empty in the GUI (or omit `--checkpoint`) to use the
+selected mode's downloaded default. Set `AETV_CHECKPOINT` or pass
+`--checkpoint` to select an alternate local file.
 
 See `docs/v8-ota-rxfix.md` for the receiver correction and OTA replay, and
 `docs/v8-ota-perceptual.md` for the original 32-clip grid and VVC reference.
@@ -65,7 +71,8 @@ not stored in git; copy the exported inference checkpoints into `models/`:
 
 | File | Purpose | SHA-256 |
 |---|---|---|
-| `v8-hf3k-perceptual.pt` | V8 default; motion-aware perceptual fine-tune | `35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707` |
+| `v8-hf3k-face-gan.pt` | V8 default; OpenVid-1M stage-2 model with localized face perceptual/GAN fine-tuning | `f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40` |
+| `v8-hf3k-perceptual.pt` | Former V8 default; motion-aware perceptual fine-tune | `35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707` |
 | `v8-hf3k-robust.pt` | Alternate for 0 dB and severe MPP fading | `4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd` |
 
 See [`docs/v8-hf3k.md`](../docs/v8-hf3k.md) for the waveform contract,

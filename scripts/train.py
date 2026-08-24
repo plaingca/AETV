@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import queue
+import random
 import subprocess
 import sys
 import threading
@@ -47,7 +48,21 @@ from aetv import (
     modulate_gop_stream,
 )
 from aetv.hfchannel import awgn, fading, freq_shift
-from aetv.video_data import HFViewerVideoDataset, VideoClipSpec
+from aetv.attention import (
+    RegionAttentionTeacher,
+    face_crop_grid,
+    region_contrast_loss,
+    region_detail_loss,
+    region_gradient_loss,
+    region_reconstruction_loss,
+    sample_face_crops,
+)
+from aetv.video_data import (
+    HFDatasetsVideoDataset,
+    HFViewerVideoDataset,
+    VideoClipSpec,
+    _decode_clip,
+)
 
 
 def spatial_gradient_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -346,6 +361,14 @@ class BackgroundVideoStreamingQueue:
         cache_dir: Path | str = "data/openvid_aetv_cache",
         queue_size: int = 256,
         num_fetch_threads: int = 16,
+        backend: str = "native",
+        epoch_size: int = 1_000_000,
+        strict_stream: bool = True,
+        stream_timeout: float = 300.0,
+        max_stream_rate: float = 0.0,
+        lance_batch_size: int = 64,
+        lance_fetch_threads: int = 2,
+        encoded_queue_size: int = 64,
     ):
         self.mode_spec = mode_spec
         self.dataset_name = dataset_name
@@ -363,27 +386,211 @@ class BackgroundVideoStreamingQueue:
             width=mode_spec.width,
         )
         self.num_fetch_threads = num_fetch_threads
+        self.backend = backend
+        self.epoch_size = epoch_size
+        self.strict_stream = strict_stream
+        self.stream_timeout = stream_timeout
+        self.max_stream_rate = max_stream_rate
+        self.lance_batch_size = lance_batch_size
+        self.lance_fetch_threads = lance_fetch_threads
+        self.fetch_rate_lock = threading.Lock()
+        self.next_fetch_at = time.monotonic()
+        self.worker_errors: list[str] = []
+        self.completed_workers = 0
+        self.worker_state_lock = threading.Lock()
+        self.worker_target = num_fetch_threads
+        self.encoded_q: queue.Queue = queue.Queue(maxsize=encoded_queue_size)
+        self.encoded_sentinel = object()
 
-
-        # Start background stream producers
         self.worker_threads = []
-        for worker_id in range(num_fetch_threads):
-            t = threading.Thread(target=self._stream_producer, args=(worker_id,), daemon=True)
-            t.start()
-            self.worker_threads.append(t)
+        if backend == "native":
+            self._start_lance_pipeline()
+        else:
+            # Legacy Viewer producers download and decode in the same thread.
+            for worker_id in range(num_fetch_threads):
+                t = threading.Thread(
+                    target=self._stream_producer, args=(worker_id,), daemon=True
+                )
+                t.start()
+                self.worker_threads.append(t)
+
+    def _start_lance_pipeline(self) -> None:
+        import lance
+        from huggingface_hub import get_token
+
+        uri = f"hf://datasets/{self.dataset_name}/data/train.lance"
+        dataset = lance.dataset(
+            uri,
+            storage_options={"token": get_token()},
+        )
+        fragments = list(enumerate(dataset.get_fragments()))
+        random_order = np.random.default_rng(1000)
+        random_order.shuffle(fragments)
+        self.fragment_q: queue.Queue = queue.Queue()
+        for item in fragments:
+            self.fragment_q.put(item)
+        self.fetchers_remaining = self.lance_fetch_threads
+        self.fetcher_lock = threading.Lock()
+        print(
+            f"Direct Lance pipeline: {dataset.count_rows():,} rows in "
+            f"{len(fragments)} fragments, {self.lance_fetch_threads} scanners x "
+            f"{self.lance_batch_size}-row chunks -> {self.num_fetch_threads} FFmpeg decoders",
+            flush=True,
+        )
+        for fetcher_id in range(self.lance_fetch_threads):
+            thread = threading.Thread(
+                target=self._lance_fetch_producer,
+                args=(fetcher_id,),
+                daemon=True,
+            )
+            thread.start()
+            self.worker_threads.append(thread)
+        for decoder_id in range(self.num_fetch_threads):
+            thread = threading.Thread(
+                target=self._lance_decode_producer,
+                args=(decoder_id,),
+                daemon=True,
+            )
+            thread.start()
+            self.worker_threads.append(thread)
+
+    def _lance_fetch_producer(self, fetcher_id: int) -> None:
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    fragment_index, fragment = self.fragment_q.get_nowait()
+                except queue.Empty:
+                    break
+                offset = 0
+                failures = 0
+                while not self.stop_event.is_set():
+                    try:
+                        scanner = fragment.scanner(
+                            columns=["video_blob", "seconds"],
+                            batch_size=self.lance_batch_size,
+                            batch_readahead=1,
+                            offset=offset,
+                            blob_handling="all_binary",
+                        )
+                        for batch in scanner.to_batches():
+                            blobs = batch.column("video_blob")
+                            seconds_col = batch.column("seconds")
+                            for row in range(batch.num_rows):
+                                row_offset = offset
+                                offset += 1
+                                seconds = float(seconds_col[row].as_py() or 0.0)
+                                if seconds < self.spec.duration_s:
+                                    continue
+                                encoded = blobs[row].as_py()
+                                if not encoded:
+                                    continue
+                                seed = 104729 * fragment_index + row_offset
+                                self.encoded_q.put((encoded, seconds, seed))
+                                if self.stop_event.is_set():
+                                    break
+                            if self.stop_event.is_set():
+                                break
+                        break
+                    except Exception as error:
+                        failures += 1
+                        detail = (
+                            f"Lance fetcher {fetcher_id} fragment {fragment_index} "
+                            f"offset {offset}: {error!r}"
+                        )
+                        self.worker_errors.append(detail)
+                        wait_s = 300.0 if "429" in str(error) else min(2**failures, 60.0)
+                        print(
+                            f"WARNING: {detail}; retrying the same fragment row "
+                            f"in {wait_s:.0f}s",
+                            flush=True,
+                        )
+                        if self.stop_event.wait(wait_s):
+                            break
+                self.fragment_q.task_done()
+        finally:
+            with self.fetcher_lock:
+                self.fetchers_remaining -= 1
+                last_fetcher = self.fetchers_remaining == 0
+            if last_fetcher:
+                for _ in range(self.num_fetch_threads):
+                    self.encoded_q.put(self.encoded_sentinel)
+
+    def _lance_decode_producer(self, decoder_id: int) -> None:
+        rng = np.random.default_rng(2000 + decoder_id)
+        try:
+            while not self.stop_event.is_set():
+                item = self.encoded_q.get()
+                if item is self.encoded_sentinel:
+                    break
+                encoded, seconds, seed = item
+                max_start = max(0.0, seconds - self.spec.duration_s - 0.05)
+                try:
+                    clip = _decode_clip(
+                        encoded,
+                        self.spec,
+                        float(np.random.default_rng(seed).random()) * max_start,
+                    )
+                except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+                    self.worker_errors.append(
+                        f"FFmpeg decoder {decoder_id}: {error!r}"
+                    )
+                    continue
+                if len(self.cached_files) < 10000:
+                    cache_path = self.cache_dir / (
+                        f"clip_{decoder_id}_{time.time_ns()}.pt"
+                    )
+                    torch.save((clip * 255).byte(), cache_path)
+                    self.cached_files.append(cache_path)
+                self.q.put(clip)
+        finally:
+            with self.worker_state_lock:
+                self.completed_workers += 1
 
     def _stream_producer(self, worker_id: int):
         seed = 1000 + worker_id * 37
         while not self.stop_event.is_set():
             try:
-                stream = HFViewerVideoDataset(
-                    dataset=self.dataset_name,
-                    spec=self.spec,
-                    epoch_size=100_000,
-                    seed=seed,
-                    page_size=64,
-                )
-                for i, clip in enumerate(stream):
+                if self.backend == "native":
+                    # Every producer owns a disjoint Lance shard.  The old
+                    # Viewer path gave every thread a differently shuffled copy
+                    # of the same small converted window, so a nominal 1M-clip
+                    # epoch repeatedly trained on the same ~1,800 rows.
+                    stream = HFDatasetsVideoDataset(
+                        dataset=self.dataset_name,
+                        spec=self.spec,
+                        epoch_size=self.epoch_size,
+                        seed=1000,
+                        shuffle_buffer=64,
+                        shard_index=worker_id,
+                        num_shards=self.num_fetch_threads,
+                    )
+                else:
+                    stream = HFViewerVideoDataset(
+                        dataset=self.dataset_name,
+                        spec=self.spec,
+                        epoch_size=self.epoch_size,
+                        seed=seed,
+                        page_size=64,
+                    )
+                iterator = iter(stream)
+                while not self.stop_event.is_set():
+                    if self.max_stream_rate > 0:
+                        # Pace starts of remote reads globally. Multiple
+                        # workers still overlap network transfer and FFmpeg,
+                        # but cannot collectively exhaust the Hub resolver
+                        # quota in one burst.
+                        with self.fetch_rate_lock:
+                            now = time.monotonic()
+                            fetch_at = max(now, self.next_fetch_at)
+                            self.next_fetch_at = fetch_at + 1.0 / self.max_stream_rate
+                        if fetch_at > now:
+                            self.stop_event.wait(fetch_at - now)
+                        if self.stop_event.is_set():
+                            break
+                    try:
+                        clip = next(iterator)
+                    except StopIteration:
+                        break
                     if self.stop_event.is_set():
                         break
                     if len(self.cached_files) < 10000:
@@ -392,7 +599,20 @@ class BackgroundVideoStreamingQueue:
                         self.cached_files.append(cache_path)
                     
                     self.q.put(clip)
-            except Exception:
+                if self.backend == "native" and self.strict_stream:
+                    # A strict epoch must never wrap around to the start of a
+                    # fast shard while slower shards are still finishing.
+                    with self.worker_state_lock:
+                        self.completed_workers += 1
+                    return
+            except Exception as error:
+                detail = f"worker {worker_id}: {error!r}"
+                self.worker_errors.append(detail)
+                print(f"WARNING: stream {detail}", flush=True)
+                if self.backend == "native" and self.strict_stream:
+                    with self.worker_state_lock:
+                        self.completed_workers += 1
+                    return
                 time.sleep(0.5)
                 seed += 101
 
@@ -400,19 +620,47 @@ class BackgroundVideoStreamingQueue:
         """Fetch next batch of clips from queue or disk cache."""
         clips = []
         for _ in range(batch_size):
-            try:
-                clip = self.q.get(timeout=0.05)
-            except queue.Empty:
+            deadline = time.monotonic() + self.stream_timeout
+            stream_ended = False
+            while True:
+                if self.completed_workers >= self.worker_target and self.q.empty():
+                    if clips:
+                        stream_ended = True
+                        break
+                    raise DatasetExhausted("the direct Lance dataset is exhausted")
+                try:
+                    clip = self.q.get(timeout=min(1.0, max(0.01, deadline - time.monotonic())))
+                    break
+                except queue.Empty:
+                    if time.monotonic() < deadline:
+                        continue
+                if self.strict_stream:
+                    details = "; ".join(self.worker_errors[-3:]) or "no worker error reported"
+                    raise RuntimeError(
+                        "timed out waiting for a fresh streamed clip "
+                        f"({self.completed_workers}/{self.worker_target} workers finished); "
+                        + details
+                    )
                 if self.cached_files:
                     rand_f = np.random.choice(self.cached_files)
                     clip = torch.load(rand_f).float() / 255.0
                 else:
                     clip = torch.rand(3, self.mode_spec.gop_frames, self.mode_spec.height, self.mode_spec.width)
+                break
+            if stream_ended:
+                break
             clips.append(clip)
-        return torch.stack(clips, dim=0).to(device, non_blocking=True)
+        batch = torch.stack(clips, dim=0)
+        if device.type == "cuda":
+            batch = batch.pin_memory()
+        return batch.to(device, non_blocking=True)
 
     def close(self):
         self.stop_event.set()
+
+
+class DatasetExhausted(RuntimeError):
+    """Raised after every usable row in a strict one-pass stream was consumed."""
 
 
 def run_evaluation(
@@ -643,11 +891,61 @@ def main():
     ap.add_argument("--eval-interval", type=int, default=2000, help="Steps between modem evaluation runs")
     ap.add_argument("--tb-interval", type=int, default=50, help="Steps between TensorBoard scalar log updates")
     ap.add_argument("--checkpoint-interval", type=int, default=5000, help="Steps between saving model checkpoints")
+    ap.add_argument(
+        "--keep-checkpoints",
+        type=int,
+        default=0,
+        help="retain only the newest N numbered checkpoints (0 keeps all)",
+    )
     ap.add_argument("--clean-warmup", type=int, default=0, help="Steps with 100%% clean reconstruction warmup")
     ap.add_argument("--channel-ramp", type=int, default=1500, help="Steps to ramp channel noise from 0 to full")
     ap.add_argument("--batch", type=int, default=4, help="Batch size")
     ap.add_argument("--accum", type=int, default=1, help="Gradient accumulation steps")
     ap.add_argument("--threads", type=int, default=16, help="Streaming worker threads")
+    ap.add_argument(
+        "--data-backend",
+        choices=("native", "viewer"),
+        default="native",
+        help=(
+            "native streams the full Lance dataset with disjoint worker shards; "
+            "viewer is the legacy partial Dataset Viewer window"
+        ),
+    )
+    ap.add_argument(
+        "--allow-cache-fallback",
+        action="store_true",
+        help="reuse cached/random clips if streaming stalls (not a strict dataset epoch)",
+    )
+    ap.add_argument(
+        "--stream-timeout",
+        type=float,
+        default=300.0,
+        help="seconds to wait for a fresh strict-stream clip before aborting",
+    )
+    ap.add_argument(
+        "--max-stream-rate",
+        type=float,
+        default=0.0,
+        help="maximum fresh dataset clips started per second across all workers (0 is unlimited)",
+    )
+    ap.add_argument(
+        "--lance-batch-size",
+        type=int,
+        default=64,
+        help="encoded video rows per direct Lance range-read batch",
+    )
+    ap.add_argument(
+        "--lance-fetch-threads",
+        type=int,
+        default=2,
+        help="direct Lance fragment scanners (FFmpeg decoding still uses --threads)",
+    )
+    ap.add_argument(
+        "--encoded-queue-size",
+        type=int,
+        default=64,
+        help="maximum encoded videos buffered in RAM between Lance and FFmpeg",
+    )
     ap.add_argument("--lr", type=float, default=1.0e-4, help="Learning rate")
     ap.add_argument("--d-lr", type=float, default=3.0e-5, help="Discriminator learning rate (~30%% of --lr)")
     ap.add_argument("--d-every", type=int, default=4, help="Update discriminator on 1 of every N optimizer steps")
@@ -684,6 +982,28 @@ def main():
     ap.add_argument("--fm-weight", type=float, default=0.10, help="Discriminator feature-matching weight")
     ap.add_argument("--lecam-weight", type=float, default=0.001, help="LeCAM discriminator regularization weight")
     ap.add_argument(
+        "--face-adv-weight",
+        type=float,
+        default=0.0,
+        help="Hinge-GAN realism weight on tightly aligned face clips only",
+    )
+    ap.add_argument(
+        "--face-fm-weight",
+        type=float,
+        default=0.0,
+        help="Face-critic feature-matching weight",
+    )
+    ap.add_argument(
+        "--face-perceptual-weight",
+        type=float,
+        default=0.0,
+        help="VGG reference loss on aligned face crops",
+    )
+    ap.add_argument("--face-d-lr", type=float, default=1.0e-5, help="Face critic learning rate")
+    ap.add_argument("--face-d-every", type=int, default=2, help="Update face critic every N optimizer steps")
+    ap.add_argument("--face-disc-warmup", type=int, default=100, help="Steps before enabling the face critic")
+    ap.add_argument("--face-crop-size", type=int, default=64, help="Aligned face crop side length")
+    ap.add_argument(
         "--consistency-weight",
         type=float,
         default=1.5,
@@ -694,6 +1014,42 @@ def main():
         type=float,
         default=0.0,
         help="Auxiliary clean-render fidelity weight during channel fine-tuning",
+    )
+    ap.add_argument(
+        "--region-weight",
+        type=float,
+        default=0.0,
+        help="Face/object-weighted reference reconstruction loss (0 disables the teacher)",
+    )
+    ap.add_argument(
+        "--detail-weight",
+        type=float,
+        default=0.0,
+        help="Region-weighted two-band spatial high-pass loss",
+    )
+    ap.add_argument(
+        "--contrast-weight",
+        type=float,
+        default=0.0,
+        help="Region-weighted local contrast loss at 3x3 and 7x7 scales",
+    )
+    ap.add_argument(
+        "--region-boost",
+        type=float,
+        default=3.0,
+        help="Pixel emphasis inside masks before per-clip unit-mean normalization",
+    )
+    ap.add_argument(
+        "--face-model",
+        type=str,
+        default="data/teachers/face_detection_yunet_2023mar.onnx",
+        help="OpenCV YuNet ONNX detector used by region-weighted training",
+    )
+    ap.add_argument(
+        "--face-score-threshold",
+        type=float,
+        default=0.72,
+        help="YuNet face confidence threshold",
     )
     ap.add_argument(
         "--max-nonfinite",
@@ -733,15 +1089,31 @@ def main():
         "annealed LR are tuned to the old loss.",
     )
     ap.add_argument("--amp", action="store_true", default=True, help="Use automatic mixed precision (bfloat16)")
+    ap.add_argument(
+        "--compile",
+        choices=("none", "default", "reduce-overhead", "max-autotune"),
+        default="none",
+        help="torch.compile mode for the encoder and decoder training hot path",
+    )
 
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--seed", type=int, default=20260824, help="Training/data RNG seed")
     args = ap.parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     tb_dir = out_dir / "tensorboard"
     tb_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.benchmark = True
 
     # Initialize TensorBoard SummaryWriter
     writer = SummaryWriter(log_dir=str(tb_dir))
@@ -762,6 +1134,30 @@ def main():
         ap.error("--p-fading must be between 0 and 1")
     if not 0.0 <= args.p_measured_path <= 1.0:
         ap.error("--p-measured-path must be between 0 and 1")
+    if args.keep_checkpoints < 0:
+        ap.error("--keep-checkpoints must be non-negative")
+    if args.stream_timeout <= 0:
+        ap.error("--stream-timeout must be positive")
+    if args.max_stream_rate < 0:
+        ap.error("--max-stream-rate must be non-negative")
+    if args.lance_batch_size < 1:
+        ap.error("--lance-batch-size must be positive")
+    if args.lance_fetch_threads < 1:
+        ap.error("--lance-fetch-threads must be positive")
+    if args.encoded_queue_size < 1:
+        ap.error("--encoded-queue-size must be positive")
+    if (
+        args.region_weight < 0.0
+        or args.detail_weight < 0.0
+        or args.contrast_weight < 0.0
+        or args.region_boost < 0.0
+        or args.face_adv_weight < 0.0
+        or args.face_fm_weight < 0.0
+        or args.face_perceptual_weight < 0.0
+    ):
+        ap.error("region/detail/face weights and --region-boost must be non-negative")
+    if args.face_d_every < 1 or args.face_crop_size < 32:
+        ap.error("--face-d-every must be positive and --face-crop-size at least 32")
     focus_range = (
         None
         if args.snr_focus_min is None
@@ -793,6 +1189,9 @@ def main():
         f"consistency={args.consistency_weight} clean_anchor={args.clean_anchor_weight} "
         f"temporal_energy={args.temporal_energy_weight} "
         f"temporal_cosine={args.temporal_cosine_weight} "
+        f"region={args.region_weight} detail={args.detail_weight} "
+        f"contrast={args.contrast_weight} "
+        f"region_boost={args.region_boost} "
         f"adv={args.adv_weight} fm={args.fm_weight} lecam={args.lecam_weight}\n"
         "Attachment: transmitted-render losses score the noisy latent; the "
         "clean render is a detached consistency target and, when enabled, a "
@@ -846,9 +1245,26 @@ def main():
         except Exception:
             pass
 
+    # Compile callables rather than replacing the registered submodules.  This
+    # keeps checkpoint keys identical to eager inference checkpoints and lets
+    # periodic evaluation use eager mode without triggering extra graph shapes.
+    train_encoder = model.encoder
+    train_decoder = model.decoder
+    if args.compile != "none":
+        if not hasattr(torch, "compile"):
+            ap.error("--compile requires PyTorch 2.0 or newer")
+        compile_mode = None if args.compile == "default" else args.compile
+        print(f"Compiling encoder/decoder hot path (mode={args.compile})...", flush=True)
+        train_encoder = torch.compile(model.encoder, mode=compile_mode)
+        train_decoder = torch.compile(model.decoder, mode=compile_mode)
+
     # Initialize Shallow VGG Perceptual Loss (relu1_2, relu2_2, relu3_3)
     lpips_fn = None
-    if args.lpips_weight > 0.0 or args.temporal_lpips_weight > 0.0:
+    if (
+        args.lpips_weight > 0.0
+        or args.temporal_lpips_weight > 0.0
+        or args.face_perceptual_weight > 0.0
+    ):
         print(
             "Initializing multi-layer VGG16 perceptual loss "
             "(relu1_2, relu2_2, relu3_3, relu4_3, relu5_3; channel-normalized)...",
@@ -856,6 +1272,25 @@ def main():
         )
         from aetv.models import MultiLayerVGGPerceptualLoss
         lpips_fn = MultiLayerVGGPerceptualLoss().to(device).eval()
+
+    region_teacher = None
+    if (
+        args.region_weight > 0.0
+        or args.detail_weight > 0.0
+        or args.contrast_weight > 0.0
+        or args.face_adv_weight > 0.0
+        or args.face_fm_weight > 0.0
+        or args.face_perceptual_weight > 0.0
+    ):
+        print(
+            "Initializing YuNet face + LRASPP foreground attention teacher...",
+            flush=True,
+        )
+        region_teacher = RegionAttentionTeacher(
+            args.face_model,
+            device,
+            face_score_threshold=args.face_score_threshold,
+        )
 
     # Initialize Spatio-Temporal 3D Discriminator
     discriminator = None
@@ -878,6 +1313,35 @@ def main():
         for _ in range(start_step):
             lr_scheduler_d.step()
     lecam = LeCAM()
+
+    # A separate, lower-capacity critic only sees stabilized face crops.  This
+    # is intentionally independent of the global PatchGAN: it supplies the
+    # controlled hallucination pressure without rewarding invented texture in
+    # backgrounds, text, or non-face foregrounds.
+    face_discriminator = None
+    optimizer_face_d = None
+    lr_scheduler_face_d = None
+    if args.face_adv_weight > 0.0 or args.face_fm_weight > 0.0:
+        print("Initializing face-only spatio-temporal PatchGAN critic...", flush=True)
+        from aetv.models import SpatioTemporalPatchGAN3D
+        face_discriminator = SpatioTemporalPatchGAN3D(base_channels=32).to(device)
+        optimizer_face_d = torch.optim.AdamW(
+            face_discriminator.parameters(), lr=args.face_d_lr,
+            betas=(0.5, 0.9), weight_decay=1e-4,
+        )
+        lr_scheduler_face_d = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_face_d, T_max=args.steps, eta_min=1e-6
+        )
+        if isinstance(ckpt_data, dict) and "face_discriminator_state_dict" in ckpt_data:
+            try:
+                face_discriminator.load_state_dict(ckpt_data["face_discriminator_state_dict"])
+                if "optimizer_face_d_state_dict" in ckpt_data and not args.reset_steps:
+                    optimizer_face_d.load_state_dict(ckpt_data["optimizer_face_d_state_dict"])
+                print("Restored face critic weights from checkpoint.", flush=True)
+            except Exception as e:
+                print(f"Warning: could not restore face critic state ({e})", flush=True)
+        for _ in range(start_step):
+            lr_scheduler_face_d.step()
 
     # Initialize Channel
     if args.stage == 1:
@@ -963,7 +1427,40 @@ def main():
         dataset_name=args.hf_dataset,
         cache_dir=args.cache_dir,
         num_fetch_threads=args.threads,
+        backend=args.data_backend,
+        epoch_size=args.steps * args.batch,
+        strict_stream=not args.allow_cache_fallback,
+        stream_timeout=args.stream_timeout,
+        max_stream_rate=args.max_stream_rate,
+        lance_batch_size=args.lance_batch_size,
+        lance_fetch_threads=args.lance_fetch_threads,
+        encoded_queue_size=args.encoded_queue_size,
     )
+
+    def save_training_checkpoint(step: int) -> Path:
+        ckpt_path = out_dir / f"checkpoint_step_{step:06d}.pt"
+        state = {
+            "step": step,
+            "mode": mode_spec.name,
+            "stage": args.stage,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "args": vars(args),
+        }
+        if discriminator is not None:
+            state["discriminator_state_dict"] = discriminator.state_dict()
+            state["optimizer_d_state_dict"] = optimizer_d.state_dict()
+        if face_discriminator is not None:
+            state["face_discriminator_state_dict"] = face_discriminator.state_dict()
+            state["optimizer_face_d_state_dict"] = optimizer_face_d.state_dict()
+        torch.save(state, ckpt_path)
+        torch.save(state, out_dir / "checkpoint.pt")
+        if args.keep_checkpoints > 0:
+            numbered = sorted(out_dir.glob("checkpoint_step_*.pt"))
+            for stale in numbered[:-args.keep_checkpoints]:
+                stale.unlink()
+        print(f"--> Saved checkpoint to {ckpt_path}", flush=True)
+        return ckpt_path
 
     # Step 0 Baseline Evaluation
     if start_step == 0:
@@ -975,6 +1472,8 @@ def main():
     optimizer.zero_grad(set_to_none=True)
     if optimizer_d is not None:
         optimizer_d.zero_grad(set_to_none=True)
+    if optimizer_face_d is not None:
+        optimizer_face_d.zero_grad(set_to_none=True)
 
     # Carried across steps so the console line can report a real discriminator
     # value. --tb-interval and the --d-every cycle alias against each other, so
@@ -982,12 +1481,16 @@ def main():
     # steps while the discriminator is training normally.
     last_loss_d = 0.0
     last_disc_step = 0
+    last_loss_face_d = 0.0
+    last_face_disc_step = 0
 
     # Counted rather than tolerated silently: isolated bad batches are worth
     # skipping, a rising count means the run is diverging and should stop.
     nonfinite_g = 0
     nonfinite_d = 0
     lecam_rejected = 0
+    last_completed_step = start_step
+    dataset_exhausted = False
 
     for step in range(start_step + 1, args.steps + 1):
         model.train()
@@ -1001,7 +1504,25 @@ def main():
             channel_mix = 1.0
 
         # Fetch batch
-        video = stream_pipeline.get_batch(args.batch, device=device)
+        try:
+            video = stream_pipeline.get_batch(args.batch, device=device)
+        except DatasetExhausted:
+            dataset_exhausted = True
+            print(
+                f"Dataset exhausted after optimizer step {last_completed_step:,}; "
+                "saving the completed one-pass epoch.",
+                flush=True,
+            )
+            break
+
+        attention_mask = None
+        face_clips = torch.zeros(video.shape[0], dtype=torch.bool, device=device)
+        face_clip_fraction = video.new_zeros(())
+        attention_coverage = video.new_zeros(())
+        if region_teacher is not None:
+            attention_mask, face_clips = region_teacher(video)
+            face_clip_fraction = face_clips.float().mean()
+            attention_coverage = attention_mask.float().mean()
 
         # The discriminator updates on whole accumulation groups, 1 in --d-every,
         # so it learns more slowly than the generator rather than outrunning it.
@@ -1009,10 +1530,25 @@ def main():
         # reconstruction below is needed at all.
         disc_active = discriminator is not None and step > args.disc_warmup
         disc_training = disc_active and ((step - 1) // args.accum) % args.d_every == 0
+        face_disc_active = (
+            face_discriminator is not None and step > args.face_disc_warmup
+        )
+        face_disc_training = face_disc_active and (
+            ((step - 1) // args.accum) % args.face_d_every == 0
+        )
+
+        face_grid = None
+        face_indices = torch.empty(0, dtype=torch.long, device=device)
+        face_target = None
+        if attention_mask is not None and bool(face_clips.any()):
+            face_grid, face_indices = face_crop_grid(
+                attention_mask, face_clips, crop_size=args.face_crop_size
+            )
+            face_target = sample_face_crops(video, face_grid, face_indices)
 
         # Forward Pass
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, enabled=args.amp):
-            clean_z = model.encoder(video)
+            clean_z = train_encoder(video)
 
             if channel_mix > 0.0:
                 noisy_ch_z, weights_ch = channel(clean_z.float())
@@ -1025,19 +1561,24 @@ def main():
                 weights = torch.ones_like(clean_z)
 
             out_shape = (video.shape[2], video.shape[3], video.shape[4])
-            recon = model.decoder(noisy_z, weights, output_shape=out_shape)
+            recon = train_decoder(noisy_z, weights, output_shape=out_shape)
 
             # Clean-latent render is either a detached consistency target or,
             # when requested, a jointly optimized fidelity anchor that prevents
             # channel adaptation from buying robustness by softening the codec.
             recon_clean = None
-            if channel_mix > 0.0 and args.clean_anchor_weight > 0.0:
-                recon_clean = model.decoder(
+            if channel_mix > 0.0 and (
+                args.clean_anchor_weight > 0.0
+                or args.face_adv_weight > 0.0
+                or args.face_fm_weight > 0.0
+                or args.face_perceptual_weight > 0.0
+            ):
+                recon_clean = train_decoder(
                     clean_z, torch.ones_like(clean_z), output_shape=out_shape
                 )
             elif channel_mix > 0.0 and args.consistency_weight > 0.0:
                 with torch.no_grad():
-                    recon_clean = model.decoder(
+                    recon_clean = train_decoder(
                         clean_z.detach(), torch.ones_like(clean_z), output_shape=out_shape
                     )
 
@@ -1055,6 +1596,12 @@ def main():
                 err_p = (noisy_z.float() - clean_z.float()).pow(2).mean().clamp_min(1e-8)
                 latent_snr = sig_p / err_p
                 adv_conf = (latent_snr / (1.0 + latent_snr)).pow(args.adv_confidence_power)
+
+            face_recon = sample_face_crops(recon, face_grid, face_indices)
+            face_recon_clean = (
+                sample_face_crops(recon_clean, face_grid, face_indices)
+                if recon_clean is not None else face_recon
+            )
 
         # 1. Discriminator Optimization (if enabled)
         loss_d = torch.tensor(0.0, device=device)
@@ -1121,6 +1668,57 @@ def main():
                 optimizer_d.zero_grad(set_to_none=True)
                 lr_scheduler_d.step()
 
+        # Face-only hinge critic.  It trains on the clean-latent render so it
+        # learns the codec's missing facial texture, not arbitrary noise from a
+        # severely damaged channel.  The noisy render receives the prior below
+        # only in proportion to measured latent confidence.
+        loss_face_d = torch.tensor(0.0, device=device)
+        face_score_real = torch.tensor(0.0, device=device)
+        face_score_fake = torch.tensor(0.0, device=device)
+        face_disc_updated = False
+        if face_disc_training and face_target is not None:
+            with torch.amp.autocast(
+                device_type="cuda",
+                dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+                enabled=args.amp,
+            ):
+                pred_face_real, _ = face_discriminator(face_target.detach())
+                pred_face_fake, _ = face_discriminator(face_recon_clean.detach())
+                loss_face_d = 0.5 * (
+                    F.relu(1.0 - pred_face_real).mean()
+                    + F.relu(1.0 + pred_face_fake).mean()
+                )
+                face_score_real = pred_face_real.mean().detach()
+                face_score_fake = pred_face_fake.mean().detach()
+            last_loss_face_d = loss_face_d.item()
+            last_face_disc_step = step
+            if torch.isfinite(loss_face_d):
+                (loss_face_d / args.accum).backward()
+            else:
+                nonfinite_d += 1
+                print(
+                    f"WARNING: step {step} non-finite face critic loss; skipping",
+                    flush=True,
+                )
+
+        if face_discriminator is not None and step % args.accum == 0:
+            has_face_grad = any(p.grad is not None for p in face_discriminator.parameters())
+            if has_face_grad:
+                face_d_norm = torch.nn.utils.clip_grad_norm_(
+                    face_discriminator.parameters(), max_norm=1.0
+                )
+                if torch.isfinite(face_d_norm):
+                    optimizer_face_d.step()
+                    lr_scheduler_face_d.step()
+                    face_disc_updated = True
+                else:
+                    nonfinite_d += 1
+                    print(
+                        f"WARNING: step {step} non-finite face critic gradient; skipping",
+                        flush=True,
+                    )
+            optimizer_face_d.zero_grad(set_to_none=True)
+
         # 2. Generator Optimization
         with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16, enabled=args.amp):
             loss_mse = F.mse_loss(recon, video)
@@ -1130,6 +1728,25 @@ def main():
             loss_temporal_accel = temporal_acceleration_loss(recon, video)
             loss_temporal_energy = temporal_energy_loss(recon, video)
             loss_temporal_cosine = temporal_cosine_loss(recon, video)
+
+            loss_region = torch.tensor(0.0, device=device)
+            loss_detail = torch.tensor(0.0, device=device)
+            loss_contrast = torch.tensor(0.0, device=device)
+            if attention_mask is not None:
+                if args.region_weight > 0.0:
+                    loss_region = region_reconstruction_loss(
+                        recon, video, attention_mask, args.region_boost
+                    ) + 0.5 * region_gradient_loss(
+                        recon, video, attention_mask, args.region_boost
+                    )
+                if args.detail_weight > 0.0:
+                    loss_detail = region_detail_loss(
+                        recon, video, attention_mask, args.region_boost
+                    )
+                if args.contrast_weight > 0.0:
+                    loss_contrast = region_contrast_loss(
+                        recon, video, attention_mask, args.region_boost
+                    )
 
             loss_dwt = torch.tensor(0.0, device=device)
             if args.dwt_weight > 0.0:
@@ -1168,6 +1785,27 @@ def main():
                     + args.temporal_accel_weight
                     * temporal_acceleration_loss(recon_clean, video)
                 )
+                if attention_mask is not None:
+                    loss_clean_anchor = loss_clean_anchor + (
+                        args.region_weight
+                        * (
+                            region_reconstruction_loss(
+                                recon_clean, video, attention_mask, args.region_boost
+                            )
+                            + 0.5
+                            * region_gradient_loss(
+                                recon_clean, video, attention_mask, args.region_boost
+                            )
+                        )
+                        + args.detail_weight
+                        * region_detail_loss(
+                            recon_clean, video, attention_mask, args.region_boost
+                        )
+                        + args.contrast_weight
+                        * region_contrast_loss(
+                            recon_clean, video, attention_mask, args.region_boost
+                        )
+                    )
 
             loss_adv = torch.tensor(0.0, device=device)
             loss_fm = torch.tensor(0.0, device=device)
@@ -1188,6 +1826,41 @@ def main():
                 for p in discriminator.parameters():
                     p.requires_grad_(True)
 
+            loss_face_adv = torch.tensor(0.0, device=device)
+            loss_face_fm = torch.tensor(0.0, device=device)
+            loss_face_perceptual = torch.tensor(0.0, device=device)
+            if face_target is not None and lpips_fn is not None and args.face_perceptual_weight > 0.0:
+                # The crop-level reference keeps the realism prior attached to
+                # this person's actual geometry and identity.
+                loss_face_perceptual = 0.5 * (
+                    lpips_fn(face_recon_clean, face_target)
+                    + lpips_fn(face_recon, face_target)
+                )
+            if face_disc_active and face_target is not None:
+                for p in face_discriminator.parameters():
+                    p.requires_grad_(False)
+                pred_face_clean_g, feats_face_clean_g = face_discriminator(face_recon_clean)
+                pred_face_noisy_g, feats_face_noisy_g = face_discriminator(face_recon)
+                _, feats_face_real_g = face_discriminator(face_target.detach())
+                # Hinge generator prior on both renders.  The noisy path backs
+                # off as channel evidence disappears; clean loopback keeps the
+                # full sharpening pressure the user requested.
+                loss_face_adv = -(
+                    pred_face_clean_g.mean()
+                    + adv_conf * pred_face_noisy_g.mean()
+                ) / (1.0 + adv_conf.detach())
+                clean_fm = sum(
+                    F.l1_loss(fake, real.detach())
+                    for fake, real in zip(feats_face_clean_g, feats_face_real_g)
+                ) / len(feats_face_real_g)
+                noisy_fm = sum(
+                    F.l1_loss(fake, real.detach())
+                    for fake, real in zip(feats_face_noisy_g, feats_face_real_g)
+                ) / len(feats_face_real_g)
+                loss_face_fm = 0.5 * (clean_fm + noisy_fm)
+                for p in face_discriminator.parameters():
+                    p.requires_grad_(True)
+
             total_loss = (
                 args.mse_weight * loss_mse
                 + args.l1_weight * loss_l1
@@ -1197,6 +1870,14 @@ def main():
                 + args.temporal_accel_weight * loss_temporal_accel
                 + args.temporal_energy_weight * loss_temporal_energy
                 + args.temporal_cosine_weight * loss_temporal_cosine
+                # Reference losses remain active under channel damage, but
+                # retreat halfway as latent confidence falls so impossible
+                # fine detail does not turn into ringing or hallucinated faces.
+                + args.region_weight * (0.5 + 0.5 * adv_conf.detach()) * loss_region
+                + args.detail_weight * (0.5 + 0.5 * adv_conf.detach()) * loss_detail
+                + args.contrast_weight
+                * (0.5 + 0.5 * adv_conf.detach())
+                * loss_contrast
                 + args.lpips_weight * loss_lpips
                 + args.temporal_lpips_weight * loss_temporal_lpips
                 + args.consistency_weight * loss_consistency
@@ -1207,6 +1888,9 @@ def main():
                 # is wanted at full strength however bad the latent is.
                 + args.adv_weight * adv_conf * loss_adv
                 + args.fm_weight * loss_fm
+                + args.face_adv_weight * loss_face_adv
+                + args.face_fm_weight * loss_face_fm
+                + args.face_perceptual_weight * loss_face_perceptual
             )
 
         # One non-finite batch is otherwise fatal *and* silent. clip_grad_norm_
@@ -1230,12 +1914,18 @@ def main():
                     ("temporal_accel", loss_temporal_accel),
                     ("temporal_energy", loss_temporal_energy),
                     ("temporal_cosine", loss_temporal_cosine),
+                    ("region", loss_region),
+                    ("detail", loss_detail),
+                    ("contrast", loss_contrast),
                     ("perceptual", loss_lpips),
                     ("temporal_perceptual", loss_temporal_lpips),
                     ("consistency", loss_consistency),
                     ("clean_anchor", loss_clean_anchor),
                     ("adv", loss_adv),
                     ("fm", loss_fm),
+                    ("face_adv", loss_face_adv),
+                    ("face_fm", loss_face_fm),
+                    ("face_perceptual", loss_face_perceptual),
                     ("adv_conf", adv_conf),
                 )
                 if not torch.isfinite(t).all()
@@ -1276,12 +1966,18 @@ def main():
                 loss_grad,
                 loss_temporal,
                 loss_temporal_accel,
+                loss_region,
+                loss_detail,
+                loss_contrast,
                 loss_lpips,
                 loss_temporal_lpips,
                 loss_consistency,
                 loss_clean_anchor,
                 loss_adv,
                 loss_fm,
+                loss_face_adv,
+                loss_face_fm,
+                loss_face_perceptual,
                 adv_conf,
             )
             torch.cuda.empty_cache()
@@ -1302,6 +1998,8 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             lr_scheduler.step()
 
+        last_completed_step = step
+
 
         # TensorBoard & Console Logging
         if step % args.tb_interval == 0 or step == 1:
@@ -1319,6 +2017,11 @@ def main():
             writer.add_scalar("train/loss_dwt", loss_dwt.item(), step)
             writer.add_scalar("train/loss_temporal", loss_temporal.item(), step)
             writer.add_scalar("train/loss_temporal_accel", loss_temporal_accel.item(), step)
+            writer.add_scalar("train/loss_region", loss_region.item(), step)
+            writer.add_scalar("train/loss_detail", loss_detail.item(), step)
+            writer.add_scalar("train/loss_contrast", loss_contrast.item(), step)
+            writer.add_scalar("train/attention_face_clip_fraction", face_clip_fraction.item(), step)
+            writer.add_scalar("train/attention_mask_coverage", attention_coverage.item(), step)
             writer.add_scalar("train/loss_perceptual", loss_lpips.item(), step)
             writer.add_scalar("train/loss_temporal_perceptual", loss_temporal_lpips.item(), step)
             writer.add_scalar("train/adv_confidence", adv_conf.item(), step)
@@ -1327,6 +2030,9 @@ def main():
             writer.add_scalar("train/loss_clean_anchor", loss_clean_anchor.item(), step)
             writer.add_scalar("train/loss_adv", loss_adv.item(), step)
             writer.add_scalar("train/loss_feature_matching", loss_fm.item(), step)
+            writer.add_scalar("train/loss_face_adv", loss_face_adv.item(), step)
+            writer.add_scalar("train/loss_face_feature_matching", loss_face_fm.item(), step)
+            writer.add_scalar("train/loss_face_perceptual", loss_face_perceptual.item(), step)
             # Only on steps the discriminator actually trained: on the other
             # three of every four these hold defaults, and plotting those would
             # draw a sawtooth to zero that looks like a collapsing discriminator.
@@ -1335,6 +2041,10 @@ def main():
                 writer.add_scalar("train/loss_lecam", loss_lecam.item(), step)
                 writer.add_scalar("train/disc_real_score", score_real.item(), step)
                 writer.add_scalar("train/disc_fake_score", score_fake.item(), step)
+            if face_disc_training and face_target is not None:
+                writer.add_scalar("train/loss_face_disc", loss_face_d.item(), step)
+                writer.add_scalar("train/face_disc_real_score", face_score_real.item(), step)
+                writer.add_scalar("train/face_disc_fake_score", face_score_fake.item(), step)
             writer.add_scalar("train/psnr_db", psnr, step)
             writer.add_scalar("train/channel_mix", channel_mix, step)
             writer.add_scalar("train/rate_steps_per_sec", rate, step)
@@ -1345,9 +2055,15 @@ def main():
                 f"Step {step:6d}/{args.steps} [Mix: {channel_mix:4.2f}] | "
                 f"MSE: {clean_mse:.6f} | PSNR: {psnr:.2f} dB | Perc: {loss_lpips.item():.4f} | "
                 f"DWT: {loss_dwt.item():.4f} | Cons: {loss_consistency.item():.4f} | "
+                f"Region: {loss_region.item():.4f}/{loss_detail.item():.4f}/"
+                f"{loss_contrast.item():.4f} "
+                f"({face_clip_fraction.item():.0%} face) | "
                 f"Adv: {loss_adv.item():.4f}x{adv_conf.item():.2f} | "
                 f"D: {last_loss_d:.4f}"
                 f"{'' if last_disc_step == step else f'@{last_disc_step}'} | "
+                f"FaceAdv: {loss_face_adv.item():.3f}/{loss_face_perceptual.item():.3f} | "
+                f"FaceD: {last_loss_face_d:.3f}"
+                f"{'' if last_face_disc_step == step else f'@{last_face_disc_step}'} | "
                 f"Rate: {rate:.1f} steps/s | "
                 f"LR: {current_lr:.2e} | Cache: {len(stream_pipeline.cached_files)} | "
                 # Peak since the previous log line, not cumulative: a run that
@@ -1384,25 +2100,17 @@ def main():
 
         # Periodic Checkpoint
         if step % args.checkpoint_interval == 0 or step == args.steps:
-            ckpt_path = out_dir / f"checkpoint_step_{step:06d}.pt"
-            state = {
-                "step": step,
-                "mode": mode_spec.name,
-                "stage": args.stage,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "args": vars(args),
-            }
-            if discriminator is not None:
-                state["discriminator_state_dict"] = discriminator.state_dict()
-                state["optimizer_d_state_dict"] = optimizer_d.state_dict()
-            torch.save(state, ckpt_path)
-            torch.save(state, out_dir / "checkpoint.pt")
-            print(f"--> Saved checkpoint to {ckpt_path}", flush=True)
+            save_training_checkpoint(step)
 
     stream_pipeline.close()
+    if dataset_exhausted and last_completed_step % args.checkpoint_interval != 0:
+        save_training_checkpoint(last_completed_step)
     writer.close()
-    print(f"\n1-Epoch training complete! Final checkpoint saved to {out_dir / 'checkpoint.pt'}", flush=True)
+    print(
+        f"\n1-Epoch training complete at step {last_completed_step:,}! "
+        f"Final checkpoint saved to {out_dir / 'checkpoint.pt'}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

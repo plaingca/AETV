@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from aetv.source import CameraFrameBuffer
+from aetv.source import CameraFrameBuffer, iter_video_file
 
 
 class _StuckThread:
@@ -78,3 +78,25 @@ def test_camera_buffer_never_overlaps_a_stuck_native_worker():
 
     assert buffer._thread is worker
     assert worker.joins == [3.0]
+
+
+def test_video_file_repeats_to_fill_requested_transmission(monkeypatch):
+    mode = SimpleNamespace(fps=6.0, width=3, height=2)
+    requested_frames = 12
+    expected_bytes = requested_frames * mode.width * mode.height * 3
+    captured = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(
+            returncode=0,
+            stdout=bytes(expected_bytes),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr("aetv.source.subprocess.run", run)
+
+    frames = iter_video_file("short.mp4", mode, frames=requested_frames)
+
+    assert captured["command"][captured["command"].index("-stream_loop") + 1] == "-1"
+    assert frames.shape == (requested_frames, mode.height, mode.width, 3)

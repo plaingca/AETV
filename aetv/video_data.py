@@ -124,6 +124,8 @@ class HFDatasetsVideoDataset(IterableDataset):
         epoch_size: int = 1000,
         seed: int = 0,
         shuffle_buffer: int = 8,
+        shard_index: int = 0,
+        num_shards: int = 1,
     ):
         super().__init__()
         try:
@@ -140,6 +142,10 @@ class HFDatasetsVideoDataset(IterableDataset):
         self.epoch_size = epoch_size
         self.seed = seed
         self.shuffle_buffer = shuffle_buffer
+        if num_shards < 1 or not 0 <= shard_index < num_shards:
+            raise ValueError("shard_index must be in [0, num_shards)")
+        self.shard_index = shard_index
+        self.num_shards = num_shards
 
     def _load_stream(self):
         import lance
@@ -182,13 +188,17 @@ class HFDatasetsVideoDataset(IterableDataset):
         worker_id = worker.id if worker else 0
         workers = worker.num_workers if worker else 1
         stream = self._load_stream()
-        if workers > 1:
-            stream = stream.shard(num_shards=workers, index=worker_id)
+        total_shards = self.num_shards * workers
+        global_shard = self.shard_index * workers + worker_id
+        if total_shards > 1:
+            stream = stream.shard(num_shards=total_shards, index=global_shard)
         # Partition remote fragments before filling a per-worker shuffle
         # buffer, keeping startup I/O disjoint and bounded.
         stream = stream.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
         rng = random.Random(self.seed + 1009 * worker_id)
-        target = (self.epoch_size + workers - 1 - worker_id) // workers
+        target = (
+            self.epoch_size + total_shards - 1 - global_shard
+        ) // total_shards
         yielded = 0
         for row in stream:
             seconds = float(row.get("seconds") or 0.0)

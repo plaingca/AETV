@@ -107,7 +107,10 @@ class TransmitPanel(QWidget):
         if self.transmitting():
             return
         self._apply_panel_settings()
-        problems = self.station.settings.validate()
+        problems = self.station.settings.validate(
+            radio_tx=not self.emulating(),
+            receive=False,
+        )
         if self.file_radio.isChecked() and not self._file_path:
             problems.append("choose a video file to send")
         if self.station.codec is None:
@@ -450,9 +453,12 @@ class TransmitPanel(QWidget):
         self.logMessage.emit(message)
 
     def _show_preview(self, frames) -> None:
-        # Webcam TX has its own always-live preview subscriber. Do not replace
-        # it with a one-second GOP captured earlier for neural encoding.
-        if self.transmitting() and self.cam_radio.isChecked():
+        # The high-rate camera subscriber is stopped while TX owns the webcam.
+        # During a local loopback, show each newly captured GOP so the source
+        # preview remains live while the decoded result plays in the RX pane.
+        # Keep radio TX unchanged: painting there has previously destabilized
+        # some Windows webcam/CUDA driver combinations.
+        if self.transmitting() and self.cam_radio.isChecked() and not self.emulating():
             return
         self.preview.set_rgb(frames)
 

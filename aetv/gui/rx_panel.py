@@ -345,7 +345,7 @@ class ReceivePanel(QWidget):
             self.status.setText(str(error))
             self.statusChanged.emit(str(error))
             return False
-        problems = self.station.settings.validate()
+        problems = self.station.settings.validate(radio_tx=False, receive=True)
         if self.station.settings.rx_source == "kiwi" and not self.station.settings.kiwi_host:
             problems.append("pick a KiwiSDR or type a host:port")
         if problems:

@@ -139,6 +139,19 @@ def test_settings_reject_unknown_channel_profile():
     assert "unknown TX channel profile 'invented'" in settings.validate()
 
 
+def test_loopback_validation_does_not_require_offline_flex():
+    settings = StationSettings(
+        cat_backend="flex",
+        flex_host="",
+        rx_source="flex",
+        tx_channel_profile="clean",
+    )
+
+    assert settings.validate(radio_tx=False, receive=False) == []
+    assert "Flex host is empty" in settings.validate(radio_tx=True, receive=False)
+    assert "Flex host is empty" in settings.validate(radio_tx=False, receive=True)
+
+
 def test_native_flex_settings_do_not_silently_use_soundcard(tmp_path: Path):
     settings = StationSettings(
         cat_backend="flex", flex_host="192.0.2.1", flex_native_audio=True,
@@ -480,6 +493,67 @@ def test_channel_loopback_decodes_without_keying(monkeypatch):
     assert len(shown) == 2
     assert all(isinstance(state, RxState) and state.source == "emulator" for _, state in shown)
     assert engine.state.phase == TxPhase.DONE
+
+
+def test_channel_loopback_is_paced_by_audio_sample_time(monkeypatch):
+    from aetv.station import Station
+
+    clock = [100.0]
+    waits = []
+
+    class ClockedCancel:
+        def is_set(self):
+            return False
+
+        def wait(self, delay):
+            waits.append(delay)
+            clock[0] += delay
+            return False
+
+    class FakeChannel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def process(self, audio):
+            return audio
+
+    result = SimpleNamespace(
+        gops_latents=[np.array([1.0])],
+        gops_weights=[np.array([1.0])],
+        freq_offset=0.0,
+        sync_metric=0.9,
+        snr_db=12.0,
+        callsign="N0CALL",
+    )
+
+    class FakeDemodulator:
+        def __init__(self, *args, **kwargs):
+            self.samples = 0
+
+        def feed(self, audio):
+            self.samples += len(audio)
+            return [result] if self.samples == 10 else []
+
+    class Codec:
+        mode = SimpleNamespace(name="V7", band="U", gop_frames=2)
+
+        def decode_gop(self, latents, _weights):
+            return np.full((2, 2, 2, 3), latents[0], dtype=np.uint8)
+
+    monkeypatch.setattr("aetv.station.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("aetv.station.StreamingChannelEmulator", FakeChannel)
+    monkeypatch.setattr("aetv.station.StreamingDemodulator", FakeDemodulator)
+
+    shown_at = []
+    station = Station(StationSettings(tx_channel_profile="clean"))
+    engine = TxEngine(station, on_loopback=lambda _video, _state: shown_at.append(clock[0]))
+    engine._cancel = ClockedCancel()
+
+    assert engine._emulated_send_stream(
+        [np.ones(10, dtype=np.float32)], 10, 1, Codec(), "clean"
+    )
+    assert shown_at == [pytest.approx(101.0)]
+    assert sum(waits) == pytest.approx(1.0)
 
 
 def test_ptt_watchdog_fires(monkeypatch):

@@ -324,7 +324,11 @@ def iter_video_file(
         f"crop={mode.width}:{mode.height}"
     )
     command = [
-        "ffmpeg", "-v", "error", "-ss", f"{start_s:.3f}", "-i", str(path),
+        # The duration control describes the transmission length, not a
+        # maximum imposed by the selected clip. Repeat a short file so ffmpeg
+        # can always supply the requested whole GOPs.
+        "ffmpeg", "-v", "error", "-stream_loop", "-1",
+        "-ss", f"{start_s:.3f}", "-i", str(path),
         "-vf", video_filter, "-frames:v", str(frames),
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]

@@ -1,0 +1,10 @@
+{
+  "path": "models\\v8-hf3k-openvid-step56000.pt",
+  "mode": "V8",
+  "step": 56000,
+  "source_run": "v8-hf3k-openvid1m-lance64-20260823",
+  "bytes": 215762731,
+  "sha256": "8ca3c1642214640e6d4c479ae5af01af7d9e9fc11b843dfb5fd9de15e9d6e89d",
+  "model_width": 128,
+  "latent_channels": 3
+}

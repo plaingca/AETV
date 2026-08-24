@@ -24,9 +24,7 @@ digital codec plus modem does.
 
 ## Install
 
-You need Python 3.10+, [uv](https://docs.astral.sh/uv/), FFmpeg on `PATH`,
-and the OTA receiver-adapted Flex-8k weights in `models/v8-flex8k-ota-rxfix.pt`
-(see `models/README.md`).
+You need Python 3.10+, [uv](https://docs.astral.sh/uv/), and FFmpeg on `PATH`.
 
 ```powershell
 git clone https://github.com/plaingca/AETV.git
@@ -52,15 +50,19 @@ uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available
 Set **Torch device** to `cuda` in AETV Settings. The status bar includes the
 GPU name when the checkpoint is actually running there.
 
-Place `v8-flex8k-ota-rxfix.pt` in `models/`. The earlier OTA and severe-channel alternatives
-can be kept beside it, and the original published model as `v7-flex8k.pt` (see
-[`models/README.md`](models/README.md)), then:
+Then launch the app:
 
 ```powershell
 uv run aetv gui
 # or, on Windows:
 .\aetv-gui.ps1
 ```
+
+On first use, AETV downloads the selected mode's approximately 206 MiB default
+checkpoint from [AETV/AETV](https://huggingface.co/AETV/AETV), verifies its
+SHA-256, and stores it in the per-user cache. See
+[`models/README.md`](models/README.md) for alternate checkpoints, offline use,
+and cache configuration.
 
 ## Send and receive
 
@@ -124,7 +126,15 @@ uv run aetv train -- --mode V7 --stage 2 --out runs/v7 --steps 10000 --amp
 uv run aetv eval -- --checkpoint models/v8-flex8k-ota-rxfix.pt --out runs/eval --clips 8
 ```
 
-The trainer streams OpenVid-1M. Use `--init-checkpoint` to continue a
+The trainer's default `native` backend streams the full OpenVid-1M Lance
+dataset with bounded, direct Lance scanners feeding a separate FFmpeg decode
+pool. `--lance-batch-size` controls the number of encoded video rows per range
+read, `--lance-fetch-threads` controls network concurrency, and `--threads`
+controls FFmpeg concurrency. `--compile reduce-overhead` compiles the
+encoder/decoder training hot path while keeping checkpoint keys
+inference-compatible. The legacy `--data-backend viewer`
+only sees the Dataset Viewer's currently converted window and is intended for
+short smoke tests, not full epochs. Use `--init-checkpoint` to continue a
 curriculum and `--reset-steps` when the objective changes. The published V7
 checkpoint predates the corrected reference-bandwidth conversion: its stored
 training labels are 11.86 dB below the equivalent physical SNR (for example,
@@ -152,10 +162,10 @@ header acquires symbol timing from cyclic prefixes, identifies pilot/frame
 phase and the GOP boundary from the beacon, then jumps to the newest complete
 GOP. Encoding, modulation, acquisition, and decoding all run incrementally.
 
-V8 is the experimental standard-channel counterpart: it trades half the frame
+V8 is the standard-channel counterpart: it trades half the frame
 rate and one quarter of V7's latent throughput for 192×108 16:9 video on
-450–2650 Hz carriers. It can load the V7 checkpoint for a zero-shot trial and
-is designed to be fine-tuned from those weights. See
+450–2650 Hz carriers. Its default was trained on OpenVid-1M with the complete
+stage-2 HF channel and localized face-detail fine-tuning. See
 [`docs/v8-hf3k.md`](docs/v8-hf3k.md) for the waveform budget and commands.
 
 ## Credits

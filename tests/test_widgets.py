@@ -1,6 +1,7 @@
 import numpy as np
+import inspect
 
-from aetv.gui.widgets import blend_gop_boundary
+from aetv.gui.widgets import VideoView, blend_gop_boundary
 
 
 def test_gop_boundary_blend_reduces_jump_without_adding_frames():
@@ -25,3 +26,11 @@ def test_gop_boundary_blend_preserves_new_gop_motion():
 
     assert np.all(blended[0] == 40)
     assert np.array_equal(blended[1], frames[1])
+
+
+def test_receive_playout_does_not_blend_gops_by_default():
+    default = inspect.signature(VideoView.enqueue_rgb).parameters[
+        "boundary_blend_frames"
+    ].default
+
+    assert default == 0
