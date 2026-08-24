@@ -67,10 +67,32 @@ also required temporal correlation to improve and LPIPS not to regress.
 
 ## Warm-starting a V8 fine-tune
 
+Stage 2 now retains the broad HF channel distribution while drawing 40% of
+faded examples from a measured 40 m mixture. The mixture is centered on the
+K9CZI-1 capture: 0.45-0.75 ms differential delay, 0.18-0.30 Hz Doppler, a
+strong -2 to 0 dB echo, and -1 to 10.5 dB SNR. `ota40m` at 0.6 ms, 0.24 Hz and
+5 dB is included in every periodic modem evaluation so a run cannot improve
+the training average while silently regressing this path.
+
 ```powershell
 uv run aetv train -- --mode V8 --stage 2 --out runs/v8-hf3k `
   --init-checkpoint models/v7-flex8k-severe.pt --reset-steps --steps 10000 --amp
 ```
+
+For a short path-focused adaptation from the current V8 model, keep generic
+flat and fading examples in the batch rather than training solely on the new
+capture family:
+
+```powershell
+uv run aetv train -- --mode V8 --stage 2 --out runs/v8-hf3k-ota40m `
+  --init-checkpoint models/v8-hf3k-perceptual.pt --reset-steps `
+  --model-width 128 --latent-channels 3 --compact --steps 1000 `
+  --snr-min -2 --snr-max 12 --p-fading 0.60 --p-measured-path 0.60 --amp
+```
+
+In that recipe, 36% of all stage-2 examples use the measured-path family, 24%
+use the general Watterson distribution, and 40% remain non-fading. Set
+`--p-measured-path 0` to reproduce the earlier sampler.
 
 V8 has protocol mode index 8, so a receiver can distinguish it from the older
 W-band modes.

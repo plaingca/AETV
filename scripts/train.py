@@ -435,6 +435,7 @@ def run_evaluation(
     psnrs_6 = []
     psnrs_0 = []
     psnrs_fade_mpg = []
+    psnrs_fade_ota40m = []
     psnrs_fade_mpp = []
     # PSNR alone cannot show a perceptual-objective change: shifting weight from
     # MSE toward perceptual terms is expected to cost PSNR while improving the
@@ -442,6 +443,7 @@ def run_evaluation(
     lpips_clean = []
     lpips_6 = []
     lpips_0 = []
+    lpips_fade_ota40m = []
     lpips_fade_mpp = []
 
     print(f"\n--- Running OFDM Modem Evaluation at Step {step} (5 Clips) ---", flush=True)
@@ -511,7 +513,25 @@ def run_evaluation(
             p_mpg = compute_psnr(recon_mpg, video_dev)
             psnrs_fade_mpg.append(p_mpg)
 
-            # 7. Multipath Fading (mpp - CCIR Poor, deep notches)
+            # 7. Measured 40 m OTA path (K9CZI-1-like)
+            r_lat_ota40m, r_w_ota40m, _ = simulate_transmission(
+                lat_np,
+                mode_name=mode_spec.name,
+                fading_preset="ota40m",
+                snr_db=5.0,
+            )
+            recon_ota40m = model.decoder(
+                torch.from_numpy(r_lat_ota40m).unsqueeze(0).to(device),
+                torch.from_numpy(r_w_ota40m).unsqueeze(0).to(device),
+                (mode_spec.gop_frames, mode_spec.height, mode_spec.width),
+            )
+            p_ota40m = compute_psnr(recon_ota40m, video_dev)
+            psnrs_fade_ota40m.append(p_ota40m)
+            lpips_fade_ota40m.append(
+                lpips_metric(recon_ota40m, video_dev, device)
+            )
+
+            # 8. Multipath Fading (mpp - CCIR Poor, deep notches)
             r_lat_mpp, r_w_mpp, _ = simulate_transmission(lat_np, mode_name=mode_spec.name, fading_preset="mpp", snr_db=14.0)
             recon_mpp = model.decoder(
                 torch.from_numpy(r_lat_mpp).unsqueeze(0).to(device),
@@ -530,6 +550,7 @@ def run_evaluation(
                 (f"6 dB ({p_6:.1f} dB)", recon_6.cpu()),
                 (f"0 dB ({p_0:.1f} dB)", recon_0.cpu()),
                 (f"Fade mpg ({p_mpg:.1f} dB)", recon_mpg.cpu()),
+                (f"OTA40m 5 ({p_ota40m:.1f} dB)", recon_ota40m.cpu()),
                 (f"Fade mpp ({p_mpp:.1f} dB)", recon_mpp.cpu()),
             ]
 
@@ -545,11 +566,18 @@ def run_evaluation(
             writer.add_scalar(f"eval_per_clip/clip_{idx:02d}_clean_psnr", p_clean, step)
             writer.add_scalar(f"eval_per_clip/clip_{idx:02d}_6db_psnr", p_6, step)
             writer.add_scalar(f"eval_per_clip/clip_{idx:02d}_0db_psnr", p_0, step)
+            writer.add_scalar(
+                f"eval_per_clip/clip_{idx:02d}_ota40m_5db_psnr",
+                p_ota40m,
+                step,
+            )
             writer.add_scalar(f"eval_per_clip/clip_{idx:02d}_fading_mpp_psnr", p_mpp, step)
 
             print(
                 f"Eval Clip {idx}: Clean={p_clean:.2f} dB | 18dB={p_18:.2f} dB | 12dB={p_12:.2f} dB | "
-                f"6dB={p_6:.2f} dB | 0dB={p_0:.2f} dB | Fade mpg={p_mpg:.2f} dB | Fade mpp={p_mpp:.2f} dB",
+                f"6dB={p_6:.2f} dB | 0dB={p_0:.2f} dB | "
+                f"Fade mpg={p_mpg:.2f} dB | OTA40m 5={p_ota40m:.2f} dB | "
+                f"Fade mpp={p_mpp:.2f} dB",
                 flush=True,
             )
 
@@ -560,6 +588,7 @@ def run_evaluation(
     mean_6 = float(np.mean(psnrs_6))
     mean_0 = float(np.mean(psnrs_0))
     mean_fade_mpg = float(np.mean(psnrs_fade_mpg))
+    mean_fade_ota40m = float(np.mean(psnrs_fade_ota40m))
     mean_fade_mpp = float(np.mean(psnrs_fade_mpp))
 
     writer.add_scalar("eval/psnr_clean_mean", mean_clean, step)
@@ -568,26 +597,36 @@ def run_evaluation(
     writer.add_scalar("eval/psnr_6db_mean", mean_6, step)
     writer.add_scalar("eval/psnr_0db_mean", mean_0, step)
     writer.add_scalar("eval/psnr_fading_mpg_mean", mean_fade_mpg, step)
+    writer.add_scalar("eval/psnr_ota40m_5db_mean", mean_fade_ota40m, step)
     writer.add_scalar("eval/psnr_fading_mpp_mean", mean_fade_mpp, step)
 
     lp_clean = float(np.nanmean(lpips_clean)) if lpips_clean else float("nan")
     lp_6 = float(np.nanmean(lpips_6)) if lpips_6 else float("nan")
     lp_0 = float(np.nanmean(lpips_0)) if lpips_0 else float("nan")
+    lp_ota40m = (
+        float(np.nanmean(lpips_fade_ota40m))
+        if lpips_fade_ota40m
+        else float("nan")
+    )
     lp_mpp = float(np.nanmean(lpips_fade_mpp)) if lpips_fade_mpp else float("nan")
     if not math.isnan(lp_clean):
         writer.add_scalar("eval/lpips_clean_mean", lp_clean, step)
         writer.add_scalar("eval/lpips_6db_mean", lp_6, step)
         writer.add_scalar("eval/lpips_0db_mean", lp_0, step)
+        writer.add_scalar("eval/lpips_ota40m_5db_mean", lp_ota40m, step)
         writer.add_scalar("eval/lpips_fading_mpp_mean", lp_mpp, step)
 
     print(
         f"Step {step} Eval Summary: Mean Clean={mean_clean:.2f} dB | Mean 12dB={mean_12:.2f} dB | "
-        f"Mean 6dB={mean_6:.2f} dB | Mean 0dB={mean_0:.2f} dB | Mean Fade MPP={mean_fade_mpp:.2f} dB",
+        f"Mean 6dB={mean_6:.2f} dB | Mean 0dB={mean_0:.2f} dB | "
+        f"Mean OTA40m 5={mean_fade_ota40m:.2f} dB | "
+        f"Mean Fade MPP={mean_fade_mpp:.2f} dB",
         flush=True,
     )
     print(
         f"Step {step} Eval LPIPS (lower better): Clean={lp_clean:.4f} | 6dB={lp_6:.4f} | "
-        f"0dB={lp_0:.4f} | Fade MPP={lp_mpp:.4f}\n",
+        f"0dB={lp_0:.4f} | OTA40m 5={lp_ota40m:.4f} | "
+        f"Fade MPP={lp_mpp:.4f}\n",
         flush=True,
     )
     model.train()
@@ -676,6 +715,15 @@ def main():
     ap.add_argument("--snr-focus-max", type=float, default=None, help="Optional OTA-focused mixture maximum SNR (dB)")
     ap.add_argument("--p-snr-focus", type=float, default=0.0, help="Probability of sampling from the OTA-focused SNR range")
     ap.add_argument("--p-fading", type=float, default=0.70, help="Probability of Watterson frequency-selective fading")
+    ap.add_argument(
+        "--p-measured-path",
+        type=float,
+        default=0.40,
+        help=(
+            "Conditional fraction of fading examples drawn from the measured "
+            "40 m OTA mixture (about 0.6 ms delay, 0.24 Hz Doppler and 5 dB SNR)"
+        ),
+    )
     ap.add_argument("--init-checkpoint", type=str, default=None, help="Initial checkpoint path (optional)")
     ap.add_argument(
         "--reset-steps",
@@ -710,6 +758,10 @@ def main():
         ap.error("--snr-focus-min and --snr-focus-max must be supplied together")
     if not 0.0 <= args.p_snr_focus <= 1.0:
         ap.error("--p-snr-focus must be between 0 and 1")
+    if not 0.0 <= args.p_fading <= 1.0:
+        ap.error("--p-fading must be between 0 and 1")
+    if not 0.0 <= args.p_measured_path <= 1.0:
+        ap.error("--p-measured-path must be between 0 and 1")
     focus_range = (
         None
         if args.snr_focus_min is None
@@ -720,6 +772,7 @@ def main():
         snr_focus_range=focus_range,
         p_snr_focus=args.p_snr_focus,
         p_fading=args.p_fading,
+        p_measured_path=args.p_measured_path,
         p_truncate=args.p_truncate if args.stage == 1 else 0.0,
         erasure_rate_max=0.08 if args.stage == 1 else 0.0,
     )
@@ -755,7 +808,12 @@ def main():
         f"({'AETVLatentChannel, 0/1 weights' if args.stage == 1 else 'AETVWaveformChannel, continuous pilot-EQ weights'}) "
         f"snr={channel_cfg.snr_db_range[0]}..{channel_cfg.snr_db_range[1]} dB "
         f"focus={channel_cfg.snr_focus_range} p_focus={channel_cfg.p_snr_focus} "
-        f"p_fading={channel_cfg.p_fading} p_truncate={channel_cfg.p_truncate} "
+        f"p_fading={channel_cfg.p_fading} "
+        f"p_measured_path={channel_cfg.p_measured_path} "
+        f"measured={channel_cfg.measured_delay_range_ms} ms/"
+        f"{channel_cfg.measured_doppler_range_hz} Hz/"
+        f"{channel_cfg.measured_snr_db_range} dB "
+        f"p_truncate={channel_cfg.p_truncate} "
         f"erasure_max={channel_cfg.erasure_rate_max}",
         flush=True,
     )

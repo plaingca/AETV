@@ -24,6 +24,10 @@ class FadingPreset:
 
 FADING_PRESETS = {
     "mpg": FadingPreset("mpg", 0.1, 0.5),
+    # K9CZI-1 40 m OTA capture, 2026-08-23: dominant differential delay
+    # 0.58 ms and fitted fade-pattern Doppler 0.235 Hz. Rounded values avoid
+    # implying more precision than the 2.25 kHz pilot aperture supports.
+    "ota40m": FadingPreset("ota40m", 0.24, 0.6),
     "mpp": FadingPreset("mpp", 1.0, 2.0),
     "mpd": FadingPreset("mpd", 2.0, 4.0),
 }

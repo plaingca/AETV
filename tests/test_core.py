@@ -35,6 +35,7 @@ from aetv import beacon, framing, ofdm
 from aetv.config import PROTOCOL_VERSION, reference_noise_bandwidth_scale
 from aetv.hfchannel import (
     CHANNEL_PROFILES,
+    FADING_PRESETS,
     StreamingChannelEmulator,
     awgn,
     emulate,
@@ -568,6 +569,61 @@ def test_aetv_channel_ota_focus_mixture_can_override_broad_range():
     # 20 dB amplitude SNR produces sigma=0.1 and variance ~=0.01. Sampling
     # the broad -20 dB range instead would produce variance ~=100.
     assert noisy.square().mean().item() == pytest.approx(0.01, rel=0.08)
+
+
+def test_measured_40m_training_mixture_matches_ota_delay_and_doppler():
+    cfg = AETVChannelConfig(
+        p_fading=1.0,
+        p_measured_path=1.0,
+        measured_doppler_range_hz=(0.235, 0.235),
+        measured_delay_range_ms=(0.6, 0.6),
+        measured_echo_power_db_range=(0.0, 0.0),
+    )
+    channel = AETVWaveformChannel("W", cfg=cfg)
+
+    # Across random tap phases, the new sum-of-sinusoids generator preserves
+    # the Jakes correlation at the capture's fitted 0.235 Hz Doppler. The old
+    # smoothed-noise implementation collapsed this to roughly 0.22.
+    doppler = torch.full((2048,), 0.235)
+    taps = channel._smooth_gains(
+        len(doppler),
+        doppler,
+        torch.device("cpu"),
+        torch.Generator().manual_seed(23),
+    )
+    correlation = (taps[:, 0] * taps[:, -1].conj()).mean()
+    normalization = torch.sqrt(
+        taps[:, 0].abs().square().mean()
+        * taps[:, -1].abs().square().mean()
+    )
+    correlation /= normalization
+    assert correlation.real.item() == pytest.approx(0.545, abs=0.06)
+    assert correlation.imag.item() == pytest.approx(0.0, abs=0.06)
+
+    transfer, measured = channel._fading(
+        128, torch.device("cpu"), torch.Generator().manual_seed(24)
+    )
+    assert measured.all()
+    carrier_power = transfer.abs().square()
+    carrier_power -= carrier_power.mean(dim=2, keepdim=True)
+    delays_ms = torch.linspace(0.2, 1.2, 101)
+    delay_phasors = torch.exp(
+        2j
+        * np.pi
+        * channel.carrier_freqs[:, None]
+        * delays_ms[None, :]
+        * 1e-3
+    )
+    delay_score = torch.abs(
+        torch.einsum(
+            "bsc,ct->bst", carrier_power.to(torch.complex64), delay_phasors
+        )
+    ).mean(dim=(0, 1))
+    fitted_delay_ms = delays_ms[delay_score.argmax()].item()
+    assert fitted_delay_ms == pytest.approx(0.6, abs=0.05)
+
+    assert FADING_PRESETS["ota40m"].delay_ms == pytest.approx(0.6)
+    assert FADING_PRESETS["ota40m"].doppler_hz == pytest.approx(0.24)
 
 
 def test_aetv_waveform_channel_stage2():

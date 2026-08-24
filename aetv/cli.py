@@ -285,7 +285,11 @@ def build_parser() -> argparse.ArgumentParser:
     sim.add_argument("--camera", type=int, default=0)
     sim.add_argument("--snr", type=float, default=12.0)
     sim.add_argument("--cfo", type=float, default=0.0)
-    sim.add_argument("--fading", choices=("none", "mpg", "mpp", "mpd"), default="none")
+    sim.add_argument(
+        "--fading",
+        choices=("none", "mpg", "ota40m", "mpp", "mpd"),
+        default="none",
+    )
     sim.add_argument("--seed", type=int, default=42)
     sim.add_argument("--out", default="aetv_sim.mp4")
     sim.set_defaults(func=cmd_simulate)

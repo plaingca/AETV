@@ -44,6 +44,15 @@ class AETVChannelConfig:
     p_fading: float = 0.70  # 70% probability of Watterson multipath fading
     doppler_range_hz: tuple[float, float] = (0.1, 2.0)
     delay_range_ms: tuple[float, float] = (0.5, 4.0)
+    # Conditional mixture inside fading examples, calibrated from the
+    # 2026-08-23 K9CZI-1 40 m capture.  It keeps the broad HF distribution but
+    # makes the measured 0.6 ms / 0.24 Hz / roughly 5 dB regime common enough
+    # for the decoder to learn rather than encounter only by chance.
+    p_measured_path: float = 0.40
+    measured_doppler_range_hz: tuple[float, float] = (0.18, 0.30)
+    measured_delay_range_ms: tuple[float, float] = (0.45, 0.75)
+    measured_snr_db_range: tuple[float, float] = (-1.0, 10.5)
+    measured_echo_power_db_range: tuple[float, float] = (-2.0, 0.0)
     clip_headroom_db: float = CLIP_HEADROOM_DB
     p_truncate: float = 0.0
     erasure_rate_max: float = 0.0
@@ -196,41 +205,126 @@ class AETVWaveformChannel(nn.Module):
         symbols[:, :, 1:, g.beacon_carrier] = beacon_bits
         return symbols.view(b, self.N_SYMS, g.carriers)
 
-    def _smooth_gains(self, b: int, doppler: torch.Tensor, device: torch.device) -> torch.Tensor:
-        """(b, N_SYMS) complex tap gains, ~Gaussian Doppler spectrum."""
-        sym_rate = self.FS / self.NSYM
-        g = torch.complex(
-            torch.randn(b, self.N_SYMS, device=device),
-            torch.randn(b, self.N_SYMS, device=device),
-        )
-        sigma_syms = (sym_rate / (2 * np.pi * doppler)).clamp(1.0, max(2.0, self.N_SYMS / 4))
-        out = torch.empty_like(g)
-        half = min(int(3 * sigma_syms.max().item()), self.N_SYMS - 1)
-        half = max(1, half)
-        t = torch.arange(-half, half + 1, device=device).float()
-        for i in range(b):
-            k = torch.exp(-0.5 * (t / sigma_syms[i]) ** 2)
-            k = (k / k.sum())[None, None, :]
-            gr = F.conv1d(g[i].real[None, None, :], k, padding=half)[0, 0, : self.N_SYMS]
-            gi = F.conv1d(g[i].imag[None, None, :], k, padding=half)[0, 0, : self.N_SYMS]
-            out[i] = torch.complex(gr, gi)
-        return out / out.abs().pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-9)
+    def _smooth_gains(
+        self,
+        b: int,
+        doppler: torch.Tensor,
+        device: torch.device,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        """Return Jakes-like Rayleigh taps at the 25 ms OFDM symbol cadence.
 
-    def _fading(self, b: int, device: torch.device, generator: torch.Generator | None = None) -> torch.Tensor:
-        """(b, N_SYMS, NC) complex channel transfer matrix with 2-ray Watterson frequency-selective fading."""
+        A filtered 40-sample noise sequence previously clamped every Doppler
+        below about 0.64 Hz to the same smoothing width.  Sum-of-sinusoids
+        preserves the requested slow-fade rate and matches the stateful local
+        channel emulator's Watterson tap construction.
+        """
+        oscillators = 24
+        angles = (
+            np.pi
+            * (torch.arange(oscillators, device=device).float() + 0.5)
+            / oscillators
+        )
+        frequencies = doppler[:, None] * torch.cos(angles)[None, :]
+        phases = 2.0 * np.pi * torch.rand(
+            b, oscillators, device=device, generator=generator
+        )
+        times = (
+            torch.arange(self.N_SYMS, device=device).float()
+            * self.NSYM
+            / self.FS
+        )
+        arguments = (
+            2.0 * np.pi * frequencies[:, :, None] * times[None, None, :]
+            + phases[:, :, None]
+        )
+        # Unit power is an ensemble property of the Watterson tap.  Normalizing
+        # every one-second realization independently would condition on its
+        # future energy and, more importantly, collapse the requested Jakes
+        # time correlation on slow paths.
+        return torch.exp(1j * arguments).sum(dim=1) / np.sqrt(oscillators)
+
+    def _fading(
+        self,
+        b: int,
+        device: torch.device,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the 2-ray transfer matrix and measured-path draw mask."""
         cfg = self.cfg
+        fading = torch.rand(b, device=device, generator=generator) < cfg.p_fading
+        measured = fading & (
+            torch.rand(b, device=device, generator=generator)
+            < cfg.p_measured_path
+        )
+
         lo, hi = cfg.doppler_range_hz
         doppler = lo + torch.rand(b, device=device, generator=generator) * (hi - lo)
-        g1 = self._smooth_gains(b, doppler, device)
-        g2 = self._smooth_gains(b, doppler, device)
+        mlo, mhi = cfg.measured_doppler_range_hz
+        measured_doppler = mlo + torch.rand(
+            b, device=device, generator=generator
+        ) * (mhi - mlo)
+        doppler = torch.where(measured, measured_doppler, doppler)
+        g1 = self._smooth_gains(b, doppler, device, generator)
+        g2 = self._smooth_gains(b, doppler, device, generator)
+        # The captured selective pattern followed one slowly stable mode plus
+        # a coherent moving echo more closely than two equally mobile diffuse
+        # Watterson taps. A random angle maps the configured maximum Doppler
+        # to a per-example shift whose ensemble correlation is J0, while the
+        # echo remains strong enough to reproduce the observed deep notches.
+        echo_angle = np.pi * torch.rand(
+            b, device=device, generator=generator
+        )
+        echo_frequency = doppler * torch.cos(echo_angle)
+        echo_phase = 2.0 * np.pi * torch.rand(
+            b, device=device, generator=generator
+        )
+        symbol_times = (
+            torch.arange(self.N_SYMS, device=device).float()
+            * self.NSYM
+            / self.FS
+        )
+        coherent_echo = torch.exp(
+            1j
+            * (
+                2.0 * np.pi * echo_frequency[:, None] * symbol_times[None, :]
+                + echo_phase[:, None]
+            )
+        )
+        stable_first = g1[:, :1] / g1[:, :1].abs().clamp_min(1e-9)
+        g1 = torch.where(measured[:, None], stable_first.expand_as(g1), g1)
+        g2 = torch.where(measured[:, None], coherent_echo, g2)
+
         dlo, dhi = cfg.delay_range_ms
-        tau_s = (dlo + torch.rand(b, device=device, generator=generator) * (dhi - dlo)) * 1e-3
+        delay_ms = dlo + torch.rand(b, device=device, generator=generator) * (
+            dhi - dlo
+        )
+        mdlo, mdhi = cfg.measured_delay_range_ms
+        measured_delay_ms = mdlo + torch.rand(
+            b, device=device, generator=generator
+        ) * (mdhi - mdlo)
+        delay_ms = torch.where(measured, measured_delay_ms, delay_ms)
+        tau_s = delay_ms * 1e-3
+
+        echo_power_db = torch.zeros(b, device=device)
+        elo, ehi = cfg.measured_echo_power_db_range
+        measured_echo_power_db = elo + torch.rand(
+            b, device=device, generator=generator
+        ) * (ehi - elo)
+        echo_power_db = torch.where(
+            measured, measured_echo_power_db, echo_power_db
+        )
+        echo_amplitude = 10.0 ** (echo_power_db / 20.0)
+
         phase = -2 * np.pi * tau_s[:, None] * self.carrier_freqs[None, :]
         rot = torch.polar(torch.ones_like(phase), phase).to(torch.complex64)
-        h = (g1[:, :, None] + g2[:, :, None] * rot[:, None, :]) / np.sqrt(2)
-        flat = torch.rand(b, device=device, generator=generator) >= cfg.p_fading
-        h[flat] = 1.0 + 0j
-        return h
+        normalization = torch.sqrt(1.0 + echo_amplitude.square())
+        h = (
+            g1[:, :, None]
+            + echo_amplitude[:, None, None] * g2[:, :, None] * rot[:, None, :]
+        ) / normalization[:, None, None]
+        h[~fading] = 1.0 + 0j
+        return h, measured
 
     def _synthesize(self, symbols: torch.Tensor) -> torch.Tensor:
         samples = torch.einsum("bsc,nc->bsn", symbols, self.mod_mat).real
@@ -293,7 +387,7 @@ class AETVWaveformChannel(nn.Module):
 
 
         # Apply symbol-domain 2-ray Watterson frequency-selective fading
-        h_channel = self._fading(b, device, generator=generator)
+        h_channel, measured_path = self._fading(b, device, generator=generator)
         faded_symbols = symbols * h_channel
 
         # Synthesize audio waveform and apply clip-and-filter
@@ -302,6 +396,11 @@ class AETVWaveformChannel(nn.Module):
 
         # Channel simulation: AWGN over reference bandwidth in target SNR range
         snr_db = _sample_snr_db(self.cfg, b, device, generator)
+        measured_lo, measured_hi = self.cfg.measured_snr_db_range
+        measured_snr_db = measured_lo + torch.rand(
+            b, 1, device=device, generator=generator
+        ) * (measured_hi - measured_lo)
+        snr_db = torch.where(measured_path[:, None], measured_snr_db, snr_db)
         snr_linear = 10.0 ** (snr_db / 10.0)
         signal_pwr = tx_audio.square().mean(dim=1, keepdim=True)
         # ``snr_db`` is referenced to noise in SNR_REF_BW_HZ. The generated
