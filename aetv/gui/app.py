@@ -6,8 +6,6 @@ import sys
 import time
 from pathlib import Path
 
-import torch
-
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
@@ -46,9 +44,7 @@ class _CodecThread(QThread):
         try:
             codec = self._station.load_codec()
             device = str(codec.device)
-            if codec.device.type == "cuda":
-                device = f"{device} ({torch.cuda.get_device_name(codec.device)})"
-            self.loaded.emit(f"{codec.mode.name} on {device}")
+            self.loaded.emit(f"{codec.mode.name} on {device} ({codec.backend})")
         except Exception as error:
             self.failed.emit(str(error))
 
@@ -106,7 +102,7 @@ class MainWindow(QMainWindow):
         self.ptt_lamp = PttLamp()
         self.station_label = QLabel()
         self.rig_label = QLabel("CAT off")
-        self.model_label = QLabel("Loading model…")
+        self.model_label = QLabel("Loading/downloading model…")
         self.rx_status = QLabel()
         bar = QStatusBar()
         bar.addWidget(self.ptt_lamp)
@@ -187,7 +183,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about)
 
     def _load_codec(self) -> None:
-        self.model_label.setText("Loading model…")
+        self.model_label.setText("Loading/downloading model…")
         self.tx.send_button.setEnabled(False)
         self.rx.start_button.setEnabled(False)
         self._codec_thread = _CodecThread(self.station, self)
@@ -214,14 +210,14 @@ class MainWindow(QMainWindow):
 
     def _on_model_failed(self, message: str) -> None:
         self._resume_rx_after_codec_reload = False
-        self.model_label.setText("No checkpoint")
+        self.model_label.setText("No model")
         self._log(message)
         QMessageBox.warning(
             self,
-            "AETV checkpoint",
+            "AETV model",
             message + "\n\nDefault checkpoints download automatically from "
             "Hugging Face Hub. Check the network connection, or choose a local "
-            "checkpoint in Settings.",
+            "runtime model in Settings.",
         )
 
     def open_settings(self) -> None:

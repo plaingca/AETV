@@ -231,8 +231,8 @@ class SettingsDialog(QDialog):
         ck_row.addWidget(browse)
         self.torch_device = QComboBox()
         self.torch_device.setEditable(True)
-        self.torch_device.addItem("Automatic (NVIDIA GPU when available)", "")
-        self.torch_device.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.torch_device.addItem("Automatic (GPU when available)", "")
+        self.torch_device.addItem("GPU (DirectML/CUDA)", "cuda")
         self.torch_device.addItem("CPU", "cpu")
         device_index = self.torch_device.findData(self._settings.torch_device)
         if device_index >= 0:
@@ -260,7 +260,7 @@ class SettingsDialog(QDialog):
         form.addRow("TX peak", self.level_db)
         note = QLabel(
             "The beacon carries this callsign. Standard channel can run live on a "
-            "modern 8-core CPU; Wide 8 kHz is intended for CUDA."
+            "modern 8-core CPU; Wide 8 kHz is intended for GPU acceleration."
         )
         note.setWordWrap(True)
         form.addRow("", note)
@@ -562,7 +562,12 @@ class SettingsDialog(QDialog):
             combo.setCurrentText(current)
 
     def _browse_checkpoint(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "AETV checkpoint", "", "PyTorch (*.pt);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "AETV model",
+            "",
+            "AETV runtime (*.runtime.json);;PyTorch training checkpoint (*.pt);;All files (*)",
+        )
         if path:
             self.checkpoint.setText(path)
 

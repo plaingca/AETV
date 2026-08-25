@@ -29,9 +29,14 @@ own license and terms.
 FlexRadio network integration follows FlexRadio Systems' published SmartSDR
 TCP/IP API and Waveform SDK documentation. SmartSDR, DAX, and FlexRadio are
 trademarks or products of FlexRadio Systems; no FlexRadio SDK code is
-distributed with AETV. Hamlib support uses the Hamlib public C API and requires
-a compatible Hamlib 4.x shared library under the LGPL terms supplied by that
-project: https://github.com/Hamlib/Hamlib
+distributed with AETV.
+
+Portable packages include an unmodified, dynamically loaded Hamlib shared
+library under GNU LGPL 2.1 or later, plus the separately invoked rigctl utility
+under GNU GPL 2 or later. Hamlib is copyright its contributors. The package
+includes both licence texts and corresponding source information; users may
+replace the components with compatible builds. Upstream source and releases:
+https://github.com/Hamlib/Hamlib
 
 Do not commit copyrighted test video or third-party model weights.
 Identify every transmission with your callsign; this software does not

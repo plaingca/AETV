@@ -16,7 +16,6 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "pillow>=10.0",
-    "torch>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -30,9 +29,13 @@ gui = [
     "pyside6>=6.6",
     "websockets>=12.0",
     "pyserial>=3.5",
+    "onnxruntime>=1.20",
 ]
 train = [
+    "torch>=2.2",
     "torchvision>=0.17",
+    "onnx>=1.17",
+    "huggingface-hub>=0.30",
     "lpips>=0.1.4",
     "datasets>=2.18",
     "pylance>=10,<11",

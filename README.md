@@ -51,26 +51,26 @@ off-air receiver-validation sweep and the full measurement notes are in
 2. Extract it anywhere.
 3. Run `AETV.exe`.
 
-The portable builds include Python, the app libraries, and both validated model
-files. It does not install Python or download weights on first launch. Windows
-may show a SmartScreen prompt until release binaries are code-signed.
+The portable builds include Python and the app libraries, but no model weights
+or PyTorch. On first use of a mode, AETV downloads that mode's checksum-pinned
+ONNX graphs from [AETV/AETV on Hugging Face](https://huggingface.co/AETV/AETV)
+and caches them per user. Each mode is about 206 MiB. Windows may show a
+SmartScreen prompt until release binaries are code-signed.
 
-FlexRadio control, serial PTT, VOX/manual PTT, soundcards, and the models are
-self-contained. The optional **Hamlib — connect directly** backend still needs
-a Hamlib 4.x DLL beside the app until that third-party runtime is cleared for
-redistribution in AETV releases.
+FlexRadio control, serial PTT, VOX/manual PTT, soundcards, and Hamlib direct rig
+control are self-contained. Windows packages include the official dynamically
+loaded Hamlib 4.7.2 runtime under LGPL-2.1-or-later, its licence, and an exact
+source link. The DLL remains replaceable with an ABI-compatible Hamlib build.
 
-Choose the CPU build for the Standard channel mode. Choose the CUDA build for
-Wide 8 kHz or for extra processing headroom; it still falls back to CPU when a
-compatible NVIDIA GPU is unavailable.
+Choose the CPU build for the Standard channel mode. Choose the GPU build for
+Wide 8 kHz or for extra processing headroom. It uses Windows DirectML, so it can
+run on current NVIDIA, AMD, and Intel GPUs without bundling the multi-gigabyte
+CUDA/cuDNN training stack, and it still has a CPU fallback.
 
-Linux, Windows CPU, and Windows CUDA packages are built and smoke-tested on
+Linux, Windows CPU, and Windows GPU packages are built and smoke-tested on
 GitHub Actions workers. Run the **Release packages** workflow manually for
 short-lived downloadable artifacts; version tags such as `v0.1.0` publish the
-files to GitHub Releases. Because GitHub limits each Release asset to 2 GiB, the
-larger CUDA zip is published in numbered parts with PowerShell reassembly
-instructions, checksums for the downloaded parts, and a checksum for the
-reconstructed zip.
+files to GitHub Releases.
 
 ## What hardware works?
 
@@ -84,16 +84,20 @@ Measured on a Ryzen 7 5800X (8 cores/16 threads):
 | Standard channel, CPU | 414 ms | 629 ms | Real-time half-duplex transmit and receive |
 | Wide 8 kHz, CPU | 1,182 ms | 1,962 ms | Not real time |
 
-Measured on an RTX 4080:
+Measured on an RTX 4080 with the native CUDA development backend:
 
 | Release mode | Encode | Decode |
 |---|---:|---:|
 | Standard channel, CUDA | 13 ms | 19 ms |
 | Wide 8 kHz, CUDA | 34 ms | 71 ms |
 
+The redistributable GPU package uses DirectML rather than the CUDA development
+backend, so timings vary by Windows driver and GPU. Run its included benchmark
+to measure the deployed backend directly.
+
 For CPU-only use, a recent 8-core/16-thread desktop is a practical baseline for
 Standard channel mode. Slower machines can still decode recordings, but may not
-keep up live. Wide 8 kHz should be treated as a CUDA mode for now. Run the
+keep up live. Wide 8 kHz should be treated as a GPU mode for now. Run the
 included benchmark on another rig for a direct answer:
 
 ```powershell
@@ -122,29 +126,46 @@ release.
 ```powershell
 git clone https://github.com/plaingca/AETV.git
 cd AETV
-uv sync --extra gui
+uv sync --extra gui --extra train
 uv run aetv-gui
 ```
 
-Without a bundled release model, the source build downloads the selected pinned
-checkpoint from [AETV/AETV on Hugging Face](https://huggingface.co/AETV/AETV)
-and verifies its size and SHA-256 hash. Set `AETV_OFFLINE=1` to forbid network
-model downloads or `AETV_MODEL_DIR` to choose the cache location.
+Source development keeps PyTorch available for native checkpoints and training.
+The GUI prefers the same ONNX runtime downloads as the portable packages and
+verifies every component's size and SHA-256. Set `AETV_OFFLINE=1` to forbid
+network model downloads or `AETV_MODEL_DIR` to choose the cache location.
+
+The release builders use two isolated environments: a temporary CPU-only Torch
+environment exports each checkpoint to fixed-shape ONNX encoder/decoder graphs,
+then a clean ONNX Runtime environment freezes the GUI. PyTorch remains in the
+`train` extra and is never copied into an operator package.
 
 ## Build, test, and contribute
 
 ```powershell
-uv sync --extra gui --extra dev
+uv sync --extra gui --extra train --extra dev
 uv run pytest -q
 uv run python scripts/benchmark_inference.py --mode V8 --device cpu
 ./scripts/build_windows.ps1 -Runtime cpu
 ./scripts/build_linux.sh
 ```
 
-The build creates a clean Python environment, fetches and verifies both pinned
-models when needed, bundles the runtime, and smoke-tests the packaged Standard
-model in offline mode before producing the zip. Use `-Runtime cuda` for the
-larger NVIDIA build.
+The build fetches and verifies both pinned training checkpoints, exports the
+runtime graphs for an offline packaged smoke test, then removes all model files
+before producing the archive. Use `-Runtime gpu` for the DirectML build
+(`-Runtime cuda` remains a compatibility alias).
+
+Training can capture and publish a final runtime bundle directly:
+
+```powershell
+uv run python scripts/train.py ... --export-onnx --runtime-name my-model
+uv run python scripts/train.py ... --push-onnx-to-hub `
+  --runtime-name my-model --runtime-repo AETV/AETV
+```
+
+Hub publication is opt-in and uses the normal `HF_TOKEN`/Hugging Face login.
+The exporter writes a `.release.json` containing the exact byte counts and
+SHA-256 values needed to pin a newly promoted release model.
 
 The modem contract, model experiments, OTA notes, training commands, and
 hardware integrations are kept in [docs](docs/) so the main page can stay

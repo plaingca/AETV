@@ -6,21 +6,22 @@ tags:
   - ofdm
   - joint-source-channel-coding
   - pytorch
+  - onnx
 ---
 
 # AETV release checkpoints
 
-Inference checkpoints for [AETV](https://github.com/plaingca/AETV), a learned
+Training checkpoints and ONNX runtime graphs for [AETV](https://github.com/plaingca/AETV), a learned
 video codec and OFDM modem for challenging amateur-radio HF/VHF channels.
-The application downloads the selected mode's default checkpoint from this
+The application downloads the selected mode's default runtime bundle from this
 repository automatically and verifies its byte count and SHA-256 before use.
 
 ## Defaults
 
-| Mode | Checkpoint | Video/waveform |
-|---|---|---|
-| V7 | `v8-flex8k-ota-rxfix.pt` | 256×144 at 12 fps; receiver-corrected Flex-8k OTA model |
-| V8 | `v8-hf3k-face-gan.pt` | 192×108 at 6 fps; OpenVid-1M stage-2 model with face-crop perceptual/GAN fine-tuning |
+| Mode | Training checkpoint | Runtime bundle | Video/waveform |
+|---|---|---|---|
+| V7 | `v8-flex8k-ota-rxfix.pt` | `v8-flex8k-ota-rxfix.{encoder,decoder}.onnx` | 256×144 at 12 fps; receiver-corrected Flex-8k OTA model |
+| V8 | `v8-hf3k-face-gan.pt` | `v8-hf3k-face-gan.{encoder,decoder}.onnx` | 192×108 at 6 fps; face-perceptual/GAN model |
 
 The other files are reproducibility snapshots and operating-point variants.
 `v7-flex8k-severe*.pt` are inference-only exports; optimizer and discriminator

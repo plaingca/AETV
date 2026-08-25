@@ -1095,10 +1095,29 @@ def main():
         default="none",
         help="torch.compile mode for the encoder and decoder training hot path",
     )
+    ap.add_argument(
+        "--export-onnx",
+        action="store_true",
+        help="capture final fixed-shape encoder/decoder ONNX graphs",
+    )
+    ap.add_argument(
+        "--push-onnx-to-hub",
+        action="store_true",
+        help="export and publish the final ONNX bundle to Hugging Face",
+    )
+    ap.add_argument(
+        "--runtime-name",
+        help="published runtime filename stem, for example v8-hf3k-face-gan",
+    )
+    ap.add_argument("--runtime-repo", default="AETV/AETV")
+    ap.add_argument("--runtime-revision", default="main")
+    ap.add_argument("--runtime-create-pr", action="store_true")
 
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=20260824, help="Training/data RNG seed")
     args = ap.parse_args()
+    if args.push_onnx_to_hub and not args.runtime_name:
+        ap.error("--push-onnx-to-hub requires --runtime-name")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -2106,6 +2125,23 @@ def main():
     if dataset_exhausted and last_completed_step % args.checkpoint_interval != 0:
         save_training_checkpoint(last_completed_step)
     writer.close()
+    if args.export_onnx or args.push_onnx_to_hub:
+        from aetv.export_onnx import export_checkpoint, publish_runtime_bundles
+
+        manifest = export_checkpoint(
+            out_dir / "checkpoint.pt",
+            out_dir / "runtime",
+            runtime_name=args.runtime_name,
+        )
+        print(f"Exported ONNX runtime bundle: {manifest}", flush=True)
+        if args.push_onnx_to_hub:
+            url = publish_runtime_bundles(
+                [manifest],
+                repo_id=args.runtime_repo,
+                revision=args.runtime_revision,
+                create_pr=args.runtime_create_pr,
+            )
+            print(f"Published ONNX runtime bundle: {url}", flush=True)
     print(
         f"\n1-Epoch training complete at step {last_completed_step:,}! "
         f"Final checkpoint saved to {out_dir / 'checkpoint.pt'}",

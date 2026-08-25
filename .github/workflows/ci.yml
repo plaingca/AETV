@@ -35,7 +35,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Install test dependencies
-        run: uv sync --locked --extra gui --extra dev
+        run: uv sync --locked --extra gui --extra train --extra dev
       - name: Run tests
         run: uv run pytest
       - name: Build distributions

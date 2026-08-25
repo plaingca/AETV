@@ -27,11 +27,11 @@ jobs:
             artifact: aetv-windows-x64-cpu
             output: dist/windows-cpu/AETV-windows-x64-cpu.zip
             command: ./scripts/build_windows.ps1 -Runtime cpu
-          - name: Windows CUDA
+          - name: Windows GPU
             os: windows-latest
-            artifact: aetv-windows-x64-cuda
-            output: dist/windows-cuda/AETV-windows-x64-cuda.zip
-            command: ./scripts/build_windows.ps1 -Runtime cuda
+            artifact: aetv-windows-x64-gpu
+            output: dist/windows-gpu/AETV-windows-x64-gpu.zip
+            command: ./scripts/build_windows.ps1 -Runtime gpu
 
     steps:
       - uses: actions/checkout@v7
@@ -46,7 +46,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libhamlib4t64
 
       - name: Build and smoke-test portable package
         shell: pwsh
@@ -85,32 +85,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cuda_zip="$(find release-assets -type f -name '*windows-x64-cuda.zip' -print -quit)"
-          if [[ -n "$cuda_zip" ]] && (( $(stat -c %s "$cuda_zip") >= 2147483648 )); then
-            (
-              cd "$(dirname "$cuda_zip")"
-              sha256sum "$(basename "$cuda_zip")"
-            ) > release-assets/CUDA-RECONSTRUCTED-SHA256.txt
-            split -b 1900M -d -a 2 "$cuda_zip" "$cuda_zip.part-"
-            rm "$cuda_zip"
-            cat > release-assets/CUDA-REASSEMBLY.txt <<'EOF'
-          GitHub Release assets must each be under 2 GiB, so the Windows CUDA
-          zip is published in numbered parts. Reassemble it in PowerShell:
-
-          $parts = Get-ChildItem 'AETV-windows-x64-cuda.zip.part-*' | Sort-Object Name
-          $output = [IO.File]::Create('AETV-windows-x64-cuda.zip')
-          try {
-            foreach ($part in $parts) {
-              $input = [IO.File]::OpenRead($part.FullName)
-              try { $input.CopyTo($output) } finally { $input.Dispose() }
-            }
-          } finally { $output.Dispose() }
-
-          Then verify the reconstructed zip against
-          CUDA-RECONSTRUCTED-SHA256.txt. SHA256SUMS.txt covers every file as
-          downloaded, including each numbered part.
-          EOF
-          fi
           (
             cd release-assets
             find . -type f ! -name SHA256SUMS.txt -print0 \

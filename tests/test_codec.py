@@ -2,6 +2,8 @@
 
 import hashlib
 import io
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +15,9 @@ from aetv.codec import (
     DEFAULT_MODE,
     RELEASE_CHECKPOINTS,
     download_default_checkpoint,
+    download_runtime_bundle,
     resolve_checkpoint,
+    resolve_runtime_bundle,
 )
 from aetv.config import AETV_MODES
 from aetv.modem import demodulate_gop_stream, modulate_gop_stream
@@ -62,6 +66,37 @@ def test_default_checkpoint_download_is_atomic_and_verified(tmp_path, monkeypatc
     assert len(calls) == 1
 
 
+def test_runtime_bundle_downloads_every_component_once(tmp_path, monkeypatch):
+    payloads = {
+        "test.runtime.json": b'{"format":"aetv-onnx-v1"}',
+        "test.encoder.onnx": b"encoder",
+        "test.decoder.onnx": b"decoder",
+    }
+    monkeypatch.setitem(
+        codec_module.RELEASE_RUNTIME_FILES,
+        "TEST",
+        {
+            name: {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in payloads.items()
+        },
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        name = request.full_url.rsplit("/", 1)[-1].split("?", 1)[0]
+        calls.append((name, timeout))
+        return io.BytesIO(payloads[name])
+
+    monkeypatch.setattr(codec_module.urllib.request, "urlopen", fake_urlopen)
+    target = tmp_path / "runtime"
+    manifest = download_runtime_bundle("TEST", destination=target)
+    assert manifest == (target / "test.runtime.json").resolve()
+    assert {path.name: path.read_bytes() for path in target.iterdir()} == payloads
+    assert len(calls) == 3
+    assert download_runtime_bundle("TEST", destination=target) == manifest
+    assert len(calls) == 3
+
+
 def test_explicit_missing_checkpoint_is_never_downloaded(tmp_path, monkeypatch):
     monkeypatch.setattr(
         codec_module,
@@ -70,6 +105,21 @@ def test_explicit_missing_checkpoint_is_never_downloaded(tmp_path, monkeypatch):
     )
     with pytest.raises(FileNotFoundError):
         resolve_checkpoint(tmp_path / "missing.pt", mode="V8")
+
+
+def test_runtime_bundle_can_be_selected_without_pytorch(tmp_path, monkeypatch):
+    manifest = tmp_path / "test.runtime.json"
+    manifest.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("AETV_RUNTIME_MODEL", str(manifest))
+    assert resolve_runtime_bundle(mode="V8") == manifest.resolve()
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys, aetv; assert 'torch' not in sys.modules"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.skipif(
