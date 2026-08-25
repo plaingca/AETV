@@ -1,4 +1,4 @@
-# V8 experimental HF-3k mode
+# V8 standard-channel mode
 
 V8 is a narrow-channel derivative of the Flex-8k V7 work. It is intended for
 a conventional SSB transmit/receive filter rather than an 8 kHz DIGU slice.
@@ -20,26 +20,32 @@ the waterfall before transmitting.
 
 ## Checkpoints
 
-The primary checkpoint is `models/v8-hf3k-perceptual.pt`. Leaving the
-checkpoint field empty selects it automatically when V8 is selected. The
-alternate `models/v8-hf3k-robust.pt` trades some clean-channel fidelity for
-better recovery around 0 dB and under severe MPP fading.
+The release checkpoint is `v8-hf3k-face-gan.pt` (SHA-256
+`f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40`).
+Leaving the checkpoint field empty selects its downloaded ONNX runtime bundle
+when Standard channel/V8 is selected. Model Manager installs and verifies that
+bundle in the per-user model cache; a source checkout can instead use the
+training checkpoint in `models/`. The alternate `v8-hf3k-robust.pt` trades
+some clean-channel fidelity for better recovery around 0 dB and under severe
+MPP fading, while `v8-hf3k-perceptual.pt` is the former default.
 
 ```powershell
-uv run aetv send --mode V8 --checkpoint models/v8-hf3k-perceptual.pt `
+uv run aetv send --mode V8 --checkpoint models/v8-hf3k-face-gan.pt `
   --source clip.mp4 --callsign YOURCALL --gops 10 --out v8-test.wav
 
-uv run aetv receive --mode V8 --checkpoint models/v8-hf3k-perceptual.pt `
+uv run aetv receive --mode V8 --checkpoint models/v8-hf3k-face-gan.pt `
   --wav v8-test.wav --out v8-test.mp4
 ```
 
 Both ends must use the same checkpoint.
 
-## Held-out results
+## Earlier perceptual-checkpoint results
 
-Checkpoint selection used 32 real, disjoint OpenVid clips with identical modem
-and channel realizations for every model. LPIPS is lower-is-better and PSNR is
-higher-is-better.
+The table below records the evaluation that promoted the now-superseded
+`v8-hf3k-perceptual.pt` checkpoint. It is retained as experiment history, not
+as a claim about the current face-GAN release checkpoint. Selection used 32
+real, disjoint OpenVid clips with identical modem and channel realizations for
+every model. LPIPS is lower-is-better and PSNR is higher-is-better.
 
 | Condition | Zero-shot PSNR | V8 PSNR | Zero-shot LPIPS | V8 LPIPS |
 |---|---:|---:|---:|---:|
@@ -79,9 +85,9 @@ uv run aetv train -- --mode V8 --stage 2 --out runs/v8-hf3k `
   --init-checkpoint models/v7-flex8k-severe.pt --reset-steps --steps 10000 --amp
 ```
 
-For a short path-focused adaptation from the current V8 model, keep generic
-flat and fading examples in the batch rather than training solely on the new
-capture family:
+For a short path-focused adaptation that reproduces the former perceptual-model
+experiment, keep generic flat and fading examples in the batch rather than
+training solely on the new capture family:
 
 ```powershell
 uv run aetv train -- --mode V8 --stage 2 --out runs/v8-hf3k-ota40m `

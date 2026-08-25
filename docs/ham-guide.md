@@ -10,8 +10,8 @@ looks soft rather than blocky or silent.
 - The beacon carries an 8-character callsign. Set `--callsign` to yours.
 - Flex-8k occupies about 8 kHz of audio. That is not a standard 2.7 kHz SSB
   channel. Use a wide digital slice (DIGU) and stay inside the band plan.
-- Experimental V8 occupies about 2.25 kHz on 450-2650 Hz audio carriers and is
-  the mode intended for a nominal 3 kHz SSB channel.
+- Standard channel (protocol mode V8) occupies about 2.25 kHz on 450-2650 Hz
+  audio carriers and is intended for a nominal 3 kHz SSB channel.
 - Yesterday's clear frequency is not a check today. Listen first.
 
 ## Station app
@@ -23,8 +23,9 @@ uv run aetv gui
 
 The AETV station window has a receive waterfall across the top, decoded video
 on the left, and webcam or file transmit on the right. Settings persist under
-`%APPDATA%\AETV\settings.json` on Windows
-and `~/.config/AETV/settings.json` elsewhere.
+`%APPDATA%\AETV\settings.json` on Windows and, following the XDG configuration
+location, `$XDG_CONFIG_HOME/AETV/settings.json` or
+`~/.config/AETV/settings.json` elsewhere.
 
 **Receive** can come directly from a FlexRadio over VITA-49, from a local
 soundcard or from a public KiwiSDR. **Find Kiwis** reads the canonical
@@ -67,7 +68,9 @@ the UI.
 
 ## Radio
 
-The published mode is **V7** on a Flex 6000-series radio:
+AETV now ships two checksum-verified release modes. **Wide 8 kHz** (protocol
+mode V7) is intended for a Flex 6000-series radio or another genuinely wide
+audio path:
 
 - Sample rate 24 kHz over native VITA-49 or a soundcard
 - 160 OFDM carriers, 50 Hz spacing, first carrier 1000 Hz
@@ -77,11 +80,11 @@ The published mode is **V7** on a Flex 6000-series radio:
 A receiver needs the same checkpoint and the same mode. A narrow SSB filter
 will cut the upper carriers and the picture will collapse.
 
-For a standard channel, select **V8** at both ends. It uses 8 kHz audio, 45
-carriers from 450 through 2650 Hz, and 192x108 color at 6 frames/s. The V7
-checkpoint is structurally compatible for an initial experiment, but use the
-dedicated V8 checkpoint for transmission. V8 remains experimental until it is
-validated on-air. See
+For a standard channel, select **Standard channel** (protocol mode V8) at both
+ends. It uses 8 kHz audio, 45 carriers from 450 through 2650 Hz, and 192x108
+color at 6 frames/s. Its dedicated, checksum-pinned release checkpoint is
+`v8-hf3k-face-gan`; do not substitute a checkpoint trained for V7/Wide 8 kHz.
+See
 [`v8-hf3k.md`](v8-hf3k.md).
 
 ## Send
