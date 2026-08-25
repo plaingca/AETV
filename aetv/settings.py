@@ -1,7 +1,8 @@
 """Persisted ham-station settings. JSON in the user config directory.
 
-Device pickers store names, not PortAudio indices: a USB interface
-that moved from index 3 to 5 must not silently key the wrong card.
+Device pickers store stable endpoint IDs on Windows and names elsewhere,
+never transient audio indices: moving a USB interface must not silently
+select the wrong card.
 """
 
 from __future__ import annotations

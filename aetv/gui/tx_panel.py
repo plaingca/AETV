@@ -417,14 +417,18 @@ class TransmitPanel(QWidget):
 
     def _apply_outputs(self, outputs) -> None:
         self._output_load_active = False
-        current = self.station.settings.audio_output
+        current = self.output.currentData()
         self.output.clear()
         self.output.addItem("System default", "")
         for item in outputs:
-            self.output.addItem(item.label(), item.name)
+            self.output.addItem(item.label(), item.selection_value())
         index = self.output.findData(current)
-        if index >= 0:
-            self.output.setCurrentIndex(index)
+        if index < 0 and current not in {None, ""}:
+            index = next(
+                (i for i, item in enumerate(outputs, start=1) if item.name == str(current)),
+                -1,
+            )
+        self.output.setCurrentIndex(max(0, index))
 
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings

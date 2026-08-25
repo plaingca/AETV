@@ -532,13 +532,18 @@ class ReceivePanel(QWidget):
         self.input_device.clear()
         self.input_device.addItem("System default", "")
         try:
-            for item in list_audio_devices("input"):
-                self.input_device.addItem(item.label(), item.name)
+            devices = list_audio_devices("input")
+            for item in devices:
+                self.input_device.addItem(item.label(), item.selection_value())
         except AudioUnavailable:
             return
         index = self.input_device.findData(current)
-        if index >= 0:
-            self.input_device.setCurrentIndex(index)
+        if index < 0 and current not in {None, ""}:
+            index = next(
+                (i for i, item in enumerate(devices, start=1) if item.name == str(current)),
+                -1,
+            )
+        self.input_device.setCurrentIndex(max(0, index))
 
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings

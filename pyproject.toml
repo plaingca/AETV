@@ -21,10 +21,12 @@ dependencies = [
 [project.optional-dependencies]
 ham = [
     "sounddevice>=0.4.6",
+    "soundcard>=0.4.3; sys_platform == 'win32'",
     "opencv-python>=4.8",
 ]
 gui = [
     "sounddevice>=0.4.6",
+    "soundcard>=0.4.3; sys_platform == 'win32'",
     "opencv-python>=4.8",
     "pyside6>=6.6",
     "websockets>=12.0",

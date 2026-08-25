@@ -9,6 +9,40 @@ import numpy as np
 import aetv.audio_io as audio_io
 
 
+def test_wasapi_inventory_uses_stable_endpoint_ids(monkeypatch):
+    default = SimpleNamespace(id="speaker-2")
+    speakers = [
+        SimpleNamespace(id="speaker-1", name="Radio DAX", channels=2),
+        SimpleNamespace(id="speaker-2", name="Desk speakers", channels=2),
+    ]
+    sc = SimpleNamespace(
+        all_speakers=lambda: speakers,
+        default_speaker=lambda: default,
+    )
+    monkeypatch.setattr(audio_io, "_sc", lambda: sc)
+
+    devices = audio_io._list_wasapi_devices_direct("output")
+
+    assert [item.name for item in devices] == ["Radio DAX", "Desk speakers"]
+    assert devices[1].is_default
+    assert devices[0].selection_value() == "wasapi:speaker-1"
+
+
+def test_wasapi_device_accepts_prefixed_endpoint_id(monkeypatch):
+    selected = object()
+    calls = []
+    sc = SimpleNamespace(
+        get_microphone=lambda value, include_loopback: calls.append(
+            (value, include_loopback)
+        )
+        or selected,
+    )
+    monkeypatch.setattr(audio_io, "_sc", lambda: sc)
+
+    assert audio_io._wasapi_device("wasapi:mic-guid", "input") is selected
+    assert calls == [("mic-guid", False)]
+
+
 def test_default_output_uses_native_device_rate(monkeypatch):
     opened = {}
 

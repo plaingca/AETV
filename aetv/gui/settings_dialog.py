@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from aetv.audio_io import AudioUnavailable, list_audio_devices
+from aetv.audio_io import AudioUnavailable, DeviceInfo, list_audio_devices
 from aetv.cat import CatConfig, list_hamlib_models, list_serial_ports, open_ptt
 from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.flex import FlexRadioInfo, discover_radios, with_probed_path_mtu
@@ -126,6 +126,26 @@ class _DeviceInventoryTask(QRunnable):
             # The dialog/application may have closed while enumeration was in
             # flight.  In that case there is no UI left to receive the result.
             pass
+
+
+def _populate_audio_combo(
+    combo: QComboBox, devices: list[DeviceInfo], current: str | int | None
+) -> None:
+    """Populate an audio selector while preserving IDs and legacy names."""
+    combo.clear()
+    combo.addItem("System default", "")
+    for item in devices:
+        combo.addItem(item.label(), item.selection_value())
+
+    index = combo.findData(current)
+    if index < 0 and current not in {None, ""}:
+        # Older settings stored PortAudio's friendly name.  Migrate it to the
+        # stable WASAPI endpoint ID when the same device is still available.
+        for item_index, item in enumerate(devices, start=1):
+            if item.name == str(current):
+                index = item_index
+                break
+    combo.setCurrentIndex(max(0, index))
 
 
 class SettingsDialog(QDialog):
@@ -522,21 +542,20 @@ class SettingsDialog(QDialog):
 
     def _apply_device_inventory(self, inventory: dict) -> None:
         self._inventory_task = None
-        for combo, kind, current in (
-            (self.audio_input, "input", self._settings.audio_input),
-            (self.audio_output, "output", self._settings.audio_output),
+        for combo, kind in (
+            (self.audio_input, "input"),
+            (self.audio_output, "output"),
         ):
-            combo.clear()
-            combo.addItem("System default", "")
+            # The combo initially carries the saved setting in its Loading
+            # item. On a manual refresh it carries the user's unsaved choice.
+            current = combo.currentData()
             devices = inventory["audio"].get(kind, [])
             if isinstance(devices, Exception):
-                combo.addItem(str(devices), "")
+                combo.setToolTip(str(devices))
                 devices = []
-            for item in devices:
-                combo.addItem(item.label(), item.name)
-            index = combo.findData(current)
-            if index >= 0:
-                combo.setCurrentIndex(index)
+            else:
+                combo.setToolTip("")
+            _populate_audio_combo(combo, devices, current)
 
         self.camera.clear()
         cameras = inventory["cameras"]

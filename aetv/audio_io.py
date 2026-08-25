@@ -55,14 +55,18 @@ class DeviceInfo:
     channels: int
     default_samplerate: float
     is_default: bool
+    identifier: str = ""
 
     def label(self) -> str:
         star = " (default)" if self.is_default else ""
         return f"{self.index}: {self.name}{star}"
 
+    def selection_value(self) -> str:
+        return f"wasapi:{self.identifier}" if self.identifier else self.name
+
 
 class AudioUnavailable(RuntimeError):
-    """PortAudio/sounddevice could not be loaded or found no devices."""
+    """The platform audio backend could not be loaded or opened."""
 
 
 def _sd():
@@ -71,6 +75,14 @@ def _sd():
     except Exception as error:
         raise AudioUnavailable(f"sounddevice/PortAudio is not available: {error}") from error
     return sd
+
+
+def _sc():
+    try:
+        import soundcard as sc
+    except Exception as error:
+        raise AudioUnavailable(f"SoundCard/WASAPI is not available: {error}") from error
+    return sc
 
 
 def list_devices() -> list[dict]:
@@ -114,19 +126,47 @@ def _list_audio_devices_direct(kind: str) -> list[DeviceInfo]:
     return out
 
 
-def list_audio_devices(kind: str) -> list[DeviceInfo]:
-    """List devices without allowing a broken Windows driver to kill the GUI.
+def _list_wasapi_devices_direct(kind: str) -> list[DeviceInfo]:
+    if kind not in {"input", "output"}:
+        raise ValueError(f"kind must be input or output, got {kind!r}")
+    sc = _sc()
+    if kind == "input":
+        devices = sc.all_microphones(include_loopback=False)
+        default = sc.default_microphone()
+    else:
+        devices = sc.all_speakers()
+        default = sc.default_speaker()
+    default_id = str(getattr(default, "id", "")).lower()
+    return [
+        DeviceInfo(
+            index=index,
+            name=str(device.name),
+            channels=int(getattr(device, "channels", 1)),
+            # WASAPI shared mode performs the rate conversion itself.
+            default_samplerate=0.0,
+            is_default=str(device.id).lower() == default_id,
+            identifier=str(device.id),
+        )
+        for index, device in enumerate(devices)
+    ]
 
-    PortAudio enumerates every installed host API. Some stale ASIO/webcam audio
-    drivers crash inside native code rather than raising an exception, so the
-    Windows probe is isolated in a short-lived helper process.
+
+def list_audio_devices(kind: str) -> list[DeviceInfo]:
+    """List devices without allowing a broken native driver to kill the GUI.
+
+    Windows uses the native WASAPI endpoint inventory because PortAudio loads
+    every installed host API and one bad ASIO/webcam driver can abort the whole
+    enumeration. The probe remains isolated as a final safety boundary.
     """
-    if os.name != "nt" or os.environ.get("AETV_AUDIO_PROBE_CHILD") == "1":
+    if os.name != "nt":
         return _list_audio_devices_direct(kind)
+    probe = "_list_wasapi_devices_direct"
+    if os.environ.get("AETV_AUDIO_PROBE_CHILD") == "1":
+        return _list_wasapi_devices_direct(kind)
     code = (
         "import json; from dataclasses import asdict; "
-        "from aetv.audio_io import _list_audio_devices_direct; "
-        f"print(json.dumps([asdict(x) for x in _list_audio_devices_direct({kind!r})]))"
+        f"from aetv.audio_io import {probe}; "
+        f"print(json.dumps([asdict(x) for x in {probe}({kind!r})]))"
     )
     env = os.environ.copy()
     env["AETV_AUDIO_PROBE_CHILD"] = "1"
@@ -200,6 +240,10 @@ class StreamResampler:
 
 def play_audio(audio: np.ndarray, rate: int, device: str | int | None = None) -> None:
     """Play mono audio, resampling to the device rate when needed."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        if not _play_chunk_stream_isolated([audio], rate, device=device):
+            raise AudioUnavailable("soundcard output was cancelled")
+        return
     sd = _sd()
     device = resolve_device(device, "output")
     target_rate = _native_device_rate(sd, device, "output", rate)
@@ -217,6 +261,14 @@ def play_cancellable(
     on_progress=None,
 ) -> bool:
     """Play a prepared waveform; return False if `should_stop` fired."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        return _play_chunk_stream_isolated(
+            [audio],
+            rate,
+            device=device,
+            should_stop=should_stop,
+            on_chunk=(lambda _count: on_progress(1.0)) if on_progress else None,
+        )
     sd = _sd()
     device = resolve_device(device, "output")
     samples = np.asarray(audio, dtype=np.float32).reshape(-1)
@@ -503,6 +555,24 @@ def record_audio(
     device: str | int | None = None,
 ) -> np.ndarray:
     """Record mono float32 audio for ``duration_s`` seconds."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        chunks = []
+        lock = threading.Lock()
+
+        class Collector:
+            def write(self, samples) -> None:
+                with lock:
+                    chunks.append(np.asarray(samples, dtype=np.float32).copy())
+
+        stream, _native = open_input_stream(device, Collector(), rate)
+        try:
+            threading.Event().wait(max(0.0, float(duration_s)))
+        finally:
+            stream.stop()
+            stream.close()
+        with lock:
+            recorded = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
+        return recorded[: int(round(duration_s * rate))]
     sd = _sd()
     device = resolve_device(device, "input")
     capture_rate = _native_device_rate(sd, device, "input", rate)
@@ -658,6 +728,8 @@ def _open_input_stream_isolated(
 
 
 def _audio_play_worker(rate: int, device) -> int:
+    if os.name == "nt":
+        return _wasapi_play_worker(rate, device)
     sd = _sd()
     device = resolve_device(device, "output")
     target_rate = _native_device_rate(sd, device, "output", rate)
@@ -694,6 +766,8 @@ def _audio_play_worker(rate: int, device) -> int:
 
 
 def _audio_capture_worker(rate: int, device) -> int:
+    if os.name == "nt":
+        return _wasapi_capture_worker(rate, device)
     sd = _sd()
     device = resolve_device(device, "input")
     native = _native_device_rate(sd, device, "input", rate)
@@ -737,6 +811,77 @@ def _audio_capture_worker(rate: int, device) -> int:
     finally:
         stream.stop()
         stream.close()
+
+
+def _wasapi_device(device, kind: str):
+    sc = _sc()
+    if kind == "output":
+        if device in {None, ""}:
+            selected = sc.default_speaker()
+        else:
+            selector = str(device)
+            if selector.startswith("wasapi:"):
+                selector = selector.removeprefix("wasapi:")
+            selected = sc.get_speaker(selector)
+    else:
+        if device in {None, ""}:
+            selected = sc.default_microphone()
+        else:
+            selector = str(device)
+            if selector.startswith("wasapi:"):
+                selector = selector.removeprefix("wasapi:")
+            selected = sc.get_microphone(selector, include_loopback=False)
+    if selected is None:
+        raise AudioUnavailable(f"selected WASAPI {kind} device is unavailable")
+    return selected
+
+
+def _wasapi_play_worker(rate: int, device) -> int:
+    speaker = _wasapi_device(device, "output")
+    source = sys.stdin.buffer
+    target = sys.stdout.buffer
+    blocksize = max(256, int(rate) // 20)
+    with speaker.player(samplerate=rate, channels=1, blocksize=blocksize) as player:
+        target.write(b"R")
+        target.flush()
+        while True:
+            header = _read_exact(source, 4)
+            if not header:
+                break
+            if len(header) != 4:
+                raise AudioUnavailable("truncated audio output frame")
+            size = struct.unpack("<I", header)[0]
+            if size % 4 or size > 64 * 1024 * 1024:
+                raise AudioUnavailable("invalid audio output frame")
+            payload = _read_exact(source, size)
+            if len(payload) != size:
+                raise AudioUnavailable("truncated audio output samples")
+            samples = np.frombuffer(payload, dtype="<f4")
+            if samples.size:
+                player.play(samples.reshape(-1, 1))
+            target.write(b"A")
+            target.flush()
+    return 0
+
+
+def _wasapi_capture_worker(rate: int, device) -> int:
+    microphone = _wasapi_device(device, "input")
+    target = sys.stdout.buffer
+    blocksize = max(256, int(rate) // 20)
+    with microphone.recorder(
+        samplerate=rate, channels=1, blocksize=blocksize
+    ) as recorder:
+        try:
+            target.write(b"R" + struct.pack("<I", rate))
+            target.flush()
+            while True:
+                samples = recorder.record(numframes=blocksize)
+                payload = np.asarray(samples, dtype="<f4").reshape(-1).tobytes()
+                target.write(struct.pack("<I", len(payload)))
+                target.write(payload)
+                target.flush()
+        except (BrokenPipeError, OSError):
+            return 0
 
 
 def _audio_worker_main(args: list[str]) -> int:
