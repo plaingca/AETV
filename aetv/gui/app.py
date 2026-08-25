@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from aetv.codec import AETVCodec
 from aetv.settings import StationSettings, load_settings, save_settings
 from aetv.config import RELEASE_MODES
 from aetv.hfchannel import CHANNEL_PROFILES
@@ -36,23 +37,55 @@ APP_ICON = Path(__file__).resolve().parent.parent / "assets" / "aetv-logo.png"
 
 
 class _CodecThread(QThread):
-    loaded = Signal(str)
+    loaded = Signal(object, str)
     failed = Signal(str)
 
-    def __init__(self, station: Station, parent=None):
+    def __init__(self, config: tuple[str, str, str], parent=None):
         super().__init__(parent)
-        self._station = station
+        self.config = config
 
     def run(self) -> None:
         try:
             # GUI downloads are an explicit Model Manager action. Keeping
             # network access out of codec construction makes download timing
             # visible to the operator.
-            codec = self._station.load_codec(allow_download=False)
+            mode, checkpoint, device = self.config
+            codec = AETVCodec(
+                checkpoint=checkpoint or None,
+                device=device or None,
+                mode=mode,
+                allow_download=False,
+            )
             device = str(codec.device)
-            self.loaded.emit(f"{codec.mode.name} on {device} ({codec.backend})")
+            self.loaded.emit(
+                codec, f"{codec.mode.name} on {device} ({codec.backend})"
+            )
         except Exception as error:
             self.failed.emit(str(error))
+
+
+def _codec_config(settings: StationSettings) -> tuple[str, str, str]:
+    return settings.mode, settings.checkpoint, settings.torch_device
+
+
+def _rx_runtime_config(settings: StationSettings) -> tuple:
+    """Settings captured by an active receive engine rather than read live."""
+    return (
+        settings.rx_source,
+        settings.audio_input,
+        settings.flex_host,
+        settings.flex_power,
+        settings.freq_mhz,
+        settings.require_mode,
+        settings.kiwi_host,
+        settings.kiwi_dial_mhz,
+        settings.kiwi_user,
+        settings.kiwi_password,
+        settings.callsign,
+        settings.buffer_seconds,
+        settings.decode_every_s,
+        settings.debug_capture,
+    )
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +102,7 @@ class MainWindow(QMainWindow):
         self._resume_rx = False
         self._reload_codec_after_rx_stop = False
         self._resume_rx_after_codec_reload = False
+        self._restart_rx_after_settings_stop = False
         self._emulation_active = False
         self._path_planner = None
         self._ft8_calibration = None
@@ -123,6 +157,7 @@ class MainWindow(QMainWindow):
         self.rx.statusChanged.connect(self.rx_status.setText)
         self.rx.stopFinished.connect(self._on_rx_stopped_for_tx)
         self.rx.stopFinished.connect(self._on_rx_stopped_for_codec_reload)
+        self.rx.stopFinished.connect(self._on_rx_stopped_for_settings_restart)
         self.rx.logMessage.connect(self._log)
         self.rx.pathPlannerRequested.connect(self.open_path_planner)
         self.tx.logMessage.connect(self._log)
@@ -130,6 +165,7 @@ class MainWindow(QMainWindow):
         self.tx.pttChanged.connect(self.rx.on_local_ptt_changed)
         self.tx.transmitStarted.connect(self._on_tx_started)
         self.tx.transmitFinished.connect(self._on_tx_finished)
+        self.tx.modeRequested.connect(self._on_tx_mode_requested)
         self.tx.loopbackVideo.connect(self.rx.show_emulated)
 
         self._build_menu()
@@ -193,21 +229,36 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about)
 
     def _load_codec(self) -> None:
-        self.model_label.setText(f"Loading {self.settings.mode} model…")
+        config = _codec_config(self.settings)
+        self.model_label.setText(f"Loading {config[0]} model…")
         self.tx.send_button.setEnabled(False)
         self.rx.start_button.setEnabled(False)
-        self._codec_thread = _CodecThread(self.station, self)
-        self._codec_thread.loaded.connect(self._on_model_loaded)
-        self._codec_thread.failed.connect(self._on_model_failed)
-        self._codec_thread.start()
+        current = self._codec_thread
+        if current is not None and current.isRunning():
+            return
+        thread = _CodecThread(config, self)
+        thread.loaded.connect(
+            lambda codec, text, worker=thread: self._on_model_loaded(
+                worker, codec, text
+            )
+        )
+        thread.failed.connect(
+            lambda message, worker=thread: self._on_model_failed(worker, message)
+        )
+        thread.finished.connect(
+            lambda worker=thread: self._on_codec_thread_finished(worker)
+        )
+        self._codec_thread = thread
+        thread.start()
 
-    def _on_model_loaded(self, text: str) -> None:
-        if self.station.codec is None or self.station.codec.mode.name != self.settings.mode:
+    def _on_model_loaded(self, thread: _CodecThread, codec, text: str) -> None:
+        if thread.config != _codec_config(self.settings):
             self._log(
                 f"discarding stale codec load ({text}); loading {self.settings.mode}"
             )
-            self._load_codec()
             return
+        with self.station.codec_lock:
+            self.station.codec = codec
         self.model_label.setText(text)
         self.model_label.setToolTip(
             f"Model: {self.station.codec.checkpoint_path}\n"
@@ -222,9 +273,17 @@ class MainWindow(QMainWindow):
             self._log(f"restarting receive with {self.settings.mode}")
             self.rx.start()
 
-    def _on_model_failed(self, message: str) -> None:
+    def _on_codec_thread_finished(self, thread: _CodecThread) -> None:
+        if thread.config != _codec_config(self.settings):
+            self._load_codec()
+
+    def _on_model_failed(self, thread: _CodecThread, message: str) -> None:
+        if thread.config != _codec_config(self.settings):
+            self._log(f"discarding stale codec error: {message}")
+            return
         self._resume_rx_after_codec_reload = False
         self.model_label.setText("No model — open Model Manager")
+        self.tx.mode.setEnabled(True)
         self._log(message)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
@@ -318,11 +377,13 @@ class MainWindow(QMainWindow):
             self._load_codec()
 
     def open_settings(self) -> None:
-        previous_codec_config = (
-            self.settings.mode,
-            self.settings.checkpoint,
-            self.settings.torch_device,
-        )
+        if self.tx.transmitting():
+            message = "settings cannot be changed during a transmission"
+            self.tx.status.setText(message)
+            self._log(message)
+            return
+        previous_codec_config = _codec_config(self.settings)
+        previous_rx_config = _rx_runtime_config(self.settings)
         dialog = SettingsDialog(self.settings, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
@@ -334,29 +395,56 @@ class MainWindow(QMainWindow):
         self.waterfall.set_mode(self.settings.mode)
         self._refresh_station_label()
         self._log("settings saved")
-        codec_config = (
-            self.settings.mode,
-            self.settings.checkpoint,
-            self.settings.torch_device,
-        )
-        if (
+        codec_config = _codec_config(self.settings)
+        codec_changed = (
             self.station.codec is None
             or self.station.codec.mode.name != self.settings.mode
             or codec_config != previous_codec_config
-        ):
-            if self.rx.listening():
+        )
+        rx_changed = _rx_runtime_config(self.settings) != previous_rx_config
+        if self.rx.listening() and (codec_changed or rx_changed):
+            if codec_changed:
                 self._reload_codec_after_rx_stop = True
                 self._resume_rx_after_codec_reload = True
                 self._log("receive stopping to apply the new mode/checkpoint")
-                self.rx.stop()
             else:
-                self._load_codec()
+                self._restart_rx_after_settings_stop = True
+                self._log("receive restarting to apply the new source settings")
+            self.rx.stop()
+        elif codec_changed:
+            self._load_codec()
 
     def _on_rx_stopped_for_codec_reload(self) -> None:
         if not self._reload_codec_after_rx_stop:
             return
         self._reload_codec_after_rx_stop = False
         self._load_codec()
+
+    def _on_rx_stopped_for_settings_restart(self) -> None:
+        if not self._restart_rx_after_settings_stop:
+            return
+        self._restart_rx_after_settings_stop = False
+        self.rx.start()
+
+    def _on_tx_mode_requested(self, mode: str) -> None:
+        if mode == self.settings.mode or self.tx.transmitting():
+            return
+        previous = self.settings.mode
+        self.settings.mode = mode
+        # A local runtime bundle belongs to one geometry and cannot be reused
+        # after selecting the other release mode.
+        self.settings.checkpoint = ""
+        save_settings(self.settings)
+        self.station.settings = self.settings
+        self.waterfall.set_mode(mode)
+        self._refresh_station_label()
+        self._log(f"mode changed from {previous} to {mode}; loading model")
+        if self.rx.listening():
+            self._reload_codec_after_rx_stop = True
+            self._resume_rx_after_codec_reload = True
+            self.rx.stop()
+        else:
+            self._load_codec()
 
     def open_path_planner(self) -> None:
         from aetv.gui.path_planner import PathPlannerDialog

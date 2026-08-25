@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 import json
 import os
+import queue
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -53,14 +55,18 @@ class DeviceInfo:
     channels: int
     default_samplerate: float
     is_default: bool
+    identifier: str = ""
 
     def label(self) -> str:
         star = " (default)" if self.is_default else ""
         return f"{self.index}: {self.name}{star}"
 
+    def selection_value(self) -> str:
+        return f"wasapi:{self.identifier}" if self.identifier else self.name
+
 
 class AudioUnavailable(RuntimeError):
-    """PortAudio/sounddevice could not be loaded or found no devices."""
+    """The platform audio backend could not be loaded or opened."""
 
 
 def _sd():
@@ -69,6 +75,14 @@ def _sd():
     except Exception as error:
         raise AudioUnavailable(f"sounddevice/PortAudio is not available: {error}") from error
     return sd
+
+
+def _sc():
+    try:
+        import soundcard as sc
+    except Exception as error:
+        raise AudioUnavailable(f"SoundCard/WASAPI is not available: {error}") from error
+    return sc
 
 
 def list_devices() -> list[dict]:
@@ -112,19 +126,47 @@ def _list_audio_devices_direct(kind: str) -> list[DeviceInfo]:
     return out
 
 
-def list_audio_devices(kind: str) -> list[DeviceInfo]:
-    """List devices without allowing a broken Windows driver to kill the GUI.
+def _list_wasapi_devices_direct(kind: str) -> list[DeviceInfo]:
+    if kind not in {"input", "output"}:
+        raise ValueError(f"kind must be input or output, got {kind!r}")
+    sc = _sc()
+    if kind == "input":
+        devices = sc.all_microphones(include_loopback=False)
+        default = sc.default_microphone()
+    else:
+        devices = sc.all_speakers()
+        default = sc.default_speaker()
+    default_id = str(getattr(default, "id", "")).lower()
+    return [
+        DeviceInfo(
+            index=index,
+            name=str(device.name),
+            channels=int(getattr(device, "channels", 1)),
+            # WASAPI shared mode performs the rate conversion itself.
+            default_samplerate=0.0,
+            is_default=str(device.id).lower() == default_id,
+            identifier=str(device.id),
+        )
+        for index, device in enumerate(devices)
+    ]
 
-    PortAudio enumerates every installed host API. Some stale ASIO/webcam audio
-    drivers crash inside native code rather than raising an exception, so the
-    Windows probe is isolated in a short-lived helper process.
+
+def list_audio_devices(kind: str) -> list[DeviceInfo]:
+    """List devices without allowing a broken native driver to kill the GUI.
+
+    Windows uses the native WASAPI endpoint inventory because PortAudio loads
+    every installed host API and one bad ASIO/webcam driver can abort the whole
+    enumeration. The probe remains isolated as a final safety boundary.
     """
-    if os.name != "nt" or os.environ.get("AETV_AUDIO_PROBE_CHILD") == "1":
+    if os.name != "nt":
         return _list_audio_devices_direct(kind)
+    probe = "_list_wasapi_devices_direct"
+    if os.environ.get("AETV_AUDIO_PROBE_CHILD") == "1":
+        return _list_wasapi_devices_direct(kind)
     code = (
         "import json; from dataclasses import asdict; "
-        "from aetv.audio_io import _list_audio_devices_direct; "
-        f"print(json.dumps([asdict(x) for x in _list_audio_devices_direct({kind!r})]))"
+        f"from aetv.audio_io import {probe}; "
+        f"print(json.dumps([asdict(x) for x in {probe}({kind!r})]))"
     )
     env = os.environ.copy()
     env["AETV_AUDIO_PROBE_CHILD"] = "1"
@@ -152,6 +194,12 @@ def resolve_device(name_or_index: str | int | None, kind: str) -> str | int | No
         if item.name == text:
             return item.index
     return text
+
+
+def _native_device_rate(sd, device, kind: str, requested_rate: int) -> int:
+    """Return the selected device rate, including PortAudio's default device."""
+    info = sd.query_devices(device, kind)
+    return int(round(info.get("default_samplerate") or requested_rate))
 
 
 def resample_ratio(src_rate: int, dst_rate: int) -> tuple[int, int]:
@@ -192,15 +240,15 @@ class StreamResampler:
 
 def play_audio(audio: np.ndarray, rate: int, device: str | int | None = None) -> None:
     """Play mono audio, resampling to the device rate when needed."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        if not _play_chunk_stream_isolated([audio], rate, device=device):
+            raise AudioUnavailable("soundcard output was cancelled")
+        return
     sd = _sd()
     device = resolve_device(device, "output")
-    target_rate = rate
-    if device is not None:
-        info = sd.query_devices(device)
-        native = int(info.get("default_samplerate") or rate)
-        if native != rate:
-            audio = resample_audio(audio, rate, native)
-            target_rate = native
+    target_rate = _native_device_rate(sd, device, "output", rate)
+    if target_rate != rate:
+        audio = resample_audio(audio, rate, target_rate)
     sd.play(audio.astype(np.float32), samplerate=target_rate, device=device)
     sd.wait()
 
@@ -213,16 +261,20 @@ def play_cancellable(
     on_progress=None,
 ) -> bool:
     """Play a prepared waveform; return False if `should_stop` fired."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        return _play_chunk_stream_isolated(
+            [audio],
+            rate,
+            device=device,
+            should_stop=should_stop,
+            on_chunk=(lambda _count: on_progress(1.0)) if on_progress else None,
+        )
     sd = _sd()
     device = resolve_device(device, "output")
     samples = np.asarray(audio, dtype=np.float32).reshape(-1)
-    target_rate = rate
-    if device is not None:
-        info = sd.query_devices(device)
-        native = int(info.get("default_samplerate") or rate)
-        if native != rate:
-            samples = resample_audio(samples, rate, native)
-            target_rate = native
+    target_rate = _native_device_rate(sd, device, "output", rate)
+    if target_rate != rate:
+        samples = resample_audio(samples, rate, target_rate)
     cursor = 0
     done = threading.Event()
     cancelled = threading.Event()
@@ -273,12 +325,33 @@ def play_chunk_stream(
     on_chunk=None,
 ) -> bool:
     """Write a lazy sequence of waveform chunks to one PortAudio stream."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        return _play_chunk_stream_isolated(
+            chunks,
+            rate,
+            device=device,
+            should_stop=should_stop,
+            on_chunk=on_chunk,
+        )
+    return _play_chunk_stream_direct(
+        chunks,
+        rate,
+        device=device,
+        should_stop=should_stop,
+        on_chunk=on_chunk,
+    )
+
+
+def _play_chunk_stream_direct(
+    chunks,
+    rate: int,
+    device: str | int | None = None,
+    should_stop=None,
+    on_chunk=None,
+) -> bool:
     sd = _sd()
     device = resolve_device(device, "output")
-    target_rate = rate
-    if device is not None:
-        info = sd.query_devices(device)
-        target_rate = int(info.get("default_samplerate") or rate)
+    target_rate = _native_device_rate(sd, device, "output", rate)
     resampler = (
         None if target_rate == rate else StreamResampler(*resample_ratio(rate, target_rate))
     )
@@ -298,20 +371,211 @@ def play_chunk_stream(
     return not (should_stop is not None and should_stop())
 
 
+def _audio_worker_args(operation: str, rate: int, device) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "aetv.audio_io",
+        "--audio-worker",
+        operation,
+        str(int(rate)),
+        json.dumps(device),
+    ]
+
+
+def _start_audio_worker(operation: str, rate: int, device):
+    env = os.environ.copy()
+    env["AETV_AUDIO_WORKER_CHILD"] = "1"
+    env["AETV_AUDIO_PROBE_CHILD"] = "1"
+    return subprocess.Popen(
+        _audio_worker_args(operation, rate, device),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        bufsize=0,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def _worker_error(proc, operation: str) -> AudioUnavailable:
+    code = proc.poll()
+    if code is None:
+        try:
+            code = proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            pass
+    detail = ""
+    if code is not None and proc.stderr is not None:
+        try:
+            detail = proc.stderr.read().decode("utf-8", "replace").strip()
+        except OSError:
+            pass
+    if code is not None and (code & 0xFFFFFFFF) == 0xC0000374:
+        detail = "an installed Windows audio driver reported heap corruption"
+    suffix = f": {detail.splitlines()[-1]}" if detail else ""
+    return AudioUnavailable(
+        f"soundcard {operation} helper stopped"
+        f" (exit {code if code is not None else 'unknown'}){suffix}"
+    )
+
+
+def _terminate_worker(proc) -> None:
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _signal_reader(pipe, signals: queue.Queue) -> None:
+    try:
+        while True:
+            value = pipe.read(1)
+            signals.put(value or None)
+            if not value:
+                return
+    except OSError:
+        signals.put(None)
+
+
+def _wait_for_worker_signal(
+    proc,
+    signals: queue.Queue,
+    expected: bytes,
+    *,
+    operation: str,
+    should_stop=None,
+    timeout_s: float = 15.0,
+) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if should_stop is not None and should_stop():
+            _terminate_worker(proc)
+            return False
+        try:
+            value = signals.get(timeout=0.05)
+        except queue.Empty:
+            if proc.poll() is not None:
+                raise _worker_error(proc, operation)
+            continue
+        if value == expected:
+            return True
+        raise _worker_error(proc, operation)
+    _terminate_worker(proc)
+    raise AudioUnavailable(f"soundcard {operation} helper did not respond")
+
+
+def _play_chunk_stream_isolated(
+    chunks,
+    rate: int,
+    device: str | int | None = None,
+    should_stop=None,
+    on_chunk=None,
+) -> bool:
+    """Stream via a child so a faulty native Windows driver cannot kill Qt."""
+    proc = _start_audio_worker("play", rate, device)
+    assert proc.stdin is not None and proc.stdout is not None
+    signals: queue.Queue = queue.Queue()
+    reader = threading.Thread(
+        target=_signal_reader,
+        args=(proc.stdout, signals),
+        daemon=True,
+        name="aetv-audio-output-status",
+    )
+    reader.start()
+    cancelled = False
+    try:
+        if not _wait_for_worker_signal(
+            proc, signals, b"R", operation="output", should_stop=should_stop
+        ):
+            return False
+        for index, chunk in enumerate(chunks):
+            if should_stop is not None and should_stop():
+                cancelled = True
+                return False
+            samples = np.asarray(chunk, dtype=np.float32).reshape(-1)
+            payload = samples.astype("<f4", copy=False).tobytes()
+            try:
+                proc.stdin.write(struct.pack("<I", len(payload)))
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError) as error:
+                raise _worker_error(proc, "output") from error
+            duration = len(samples) / max(1, rate)
+            if not _wait_for_worker_signal(
+                proc,
+                signals,
+                b"A",
+                operation="output",
+                should_stop=should_stop,
+                timeout_s=max(15.0, duration + 10.0),
+            ):
+                cancelled = True
+                return False
+            if on_chunk is not None:
+                on_chunk(index + 1)
+        proc.stdin.close()
+        try:
+            code = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired as error:
+            _terminate_worker(proc)
+            raise AudioUnavailable(
+                "soundcard output helper did not close cleanly"
+            ) from error
+        if code != 0:
+            raise _worker_error(proc, "output")
+        return not (should_stop is not None and should_stop())
+    finally:
+        if proc.poll() is None:
+            if not cancelled:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            _terminate_worker(proc)
+
+
 def record_audio(
     duration_s: float,
     rate: int,
     device: str | int | None = None,
 ) -> np.ndarray:
     """Record mono float32 audio for ``duration_s`` seconds."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        chunks = []
+        lock = threading.Lock()
+
+        class Collector:
+            def write(self, samples) -> None:
+                with lock:
+                    chunks.append(np.asarray(samples, dtype=np.float32).copy())
+
+        stream, _native = open_input_stream(device, Collector(), rate)
+        try:
+            threading.Event().wait(max(0.0, float(duration_s)))
+        finally:
+            stream.stop()
+            stream.close()
+        with lock:
+            recorded = np.concatenate(chunks) if chunks else np.zeros(0, np.float32)
+        return recorded[: int(round(duration_s * rate))]
     sd = _sd()
     device = resolve_device(device, "input")
-    capture_rate = rate
-    if device is not None:
-        info = sd.query_devices(device)
-        native = int(info.get("default_samplerate") or rate)
-        if native != rate:
-            capture_rate = native
+    capture_rate = _native_device_rate(sd, device, "input", rate)
     recorded = sd.rec(
         int(round(duration_s * capture_rate)),
         samplerate=capture_rate,
@@ -326,28 +590,42 @@ def record_audio(
     return mono.astype(np.float32)
 
 
-def open_input_stream(device, ring, samplerate: int, on_error=None):
+def open_input_stream(
+    device, ring, samplerate: int, on_error=None, on_discontinuity=None
+):
     """Open a capture stream that writes resampled mono float audio into `ring`."""
+    if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
+        return _open_input_stream_isolated(
+            device, ring, samplerate, on_error, on_discontinuity
+        )
+    return _open_input_stream_direct(
+        device, ring, samplerate, on_error, on_discontinuity
+    )
+
+
+def _open_input_stream_direct(
+    device, ring, samplerate: int, on_error=None, on_discontinuity=None
+):
     sd = _sd()
     device = resolve_device(device, "input")
     report = on_error or (lambda _msg: None)
+    report_gap = on_discontinuity or (lambda: None)
 
     def make_callback(resample_fn=None):
         def callback(indata, _frames, _time, status):
             if status:
                 report(f"audio in: {status}")
+                report_gap()
             mono = indata[:, 0] if indata.ndim > 1 else indata
             ring.write(resample_fn(mono) if resample_fn else mono)
 
         return callback
 
-    native = samplerate
-    if device is not None:
-        try:
-            native = int(round(sd.query_devices(device, "input").get("default_samplerate") or samplerate))
-        except Exception as error:
-            report(f"audio in: could not query device rate ({error})")
-            native = samplerate
+    try:
+        native = _native_device_rate(sd, device, "input", samplerate)
+    except Exception as error:
+        report(f"audio in: could not query device rate ({error})")
+        native = samplerate
     resampler = None if native == samplerate else StreamResampler(*resample_ratio(native, samplerate))
     stream = sd.InputStream(
         samplerate=native,
@@ -358,3 +636,287 @@ def open_input_stream(device, ring, samplerate: int, on_error=None):
     )
     stream.start()
     return stream, native
+
+
+def _read_exact(pipe, size: int) -> bytes:
+    parts = []
+    remaining = size
+    while remaining:
+        part = pipe.read(remaining)
+        if not part:
+            break
+        parts.append(part)
+        remaining -= len(part)
+    return b"".join(parts)
+
+
+class _InputProcessStream:
+    def __init__(self, proc, ring, report, report_gap):
+        self._proc = proc
+        self._ring = ring
+        self._report = report
+        self._report_gap = report_gap
+        self._stopping = threading.Event()
+        self._thread = threading.Thread(
+            target=self._read,
+            daemon=True,
+            name="aetv-audio-input-reader",
+        )
+        self._thread.start()
+
+    def _read(self) -> None:
+        pipe = self._proc.stdout
+        assert pipe is not None
+        while not self._stopping.is_set():
+            header = _read_exact(pipe, 4)
+            if len(header) != 4:
+                break
+            size = struct.unpack("<I", header)[0]
+            if size == 0:
+                self._report("audio in: helper buffer overrun; reacquiring")
+                self._report_gap()
+                continue
+            if size % 4 or size > 16 * 1024 * 1024:
+                self._report("audio in: invalid helper frame")
+                break
+            payload = _read_exact(pipe, size)
+            if len(payload) != size:
+                break
+            self._ring.write(np.frombuffer(payload, dtype="<f4").copy())
+        if not self._stopping.is_set():
+            try:
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                _terminate_worker(self._proc)
+            self._report(str(_worker_error(self._proc, "input")))
+
+    def stop(self) -> None:
+        if self._stopping.is_set():
+            return
+        self._stopping.set()
+        _terminate_worker(self._proc)
+        self._thread.join(timeout=3)
+
+    def close(self) -> None:
+        self.stop()
+
+
+def _open_input_stream_isolated(
+    device, ring, samplerate: int, on_error=None, on_discontinuity=None
+):
+    report = on_error or (lambda _msg: None)
+    report_gap = on_discontinuity or (lambda: None)
+    proc = _start_audio_worker("capture", samplerate, device)
+    assert proc.stdout is not None
+    ready: queue.Queue = queue.Queue()
+
+    def read_ready() -> None:
+        ready.put(_read_exact(proc.stdout, 5))
+
+    bootstrap = threading.Thread(target=read_ready, daemon=True)
+    bootstrap.start()
+    try:
+        header = ready.get(timeout=15)
+    except queue.Empty:
+        _terminate_worker(proc)
+        raise AudioUnavailable("soundcard input helper did not respond")
+    if len(header) != 5 or header[:1] != b"R":
+        _terminate_worker(proc)
+        raise _worker_error(proc, "input")
+    native = struct.unpack("<I", header[1:])[0]
+    return _InputProcessStream(proc, ring, report, report_gap), native
+
+
+def _audio_play_worker(rate: int, device) -> int:
+    if os.name == "nt":
+        return _wasapi_play_worker(rate, device)
+    sd = _sd()
+    device = resolve_device(device, "output")
+    target_rate = _native_device_rate(sd, device, "output", rate)
+    resampler = (
+        None if target_rate == rate else StreamResampler(*resample_ratio(rate, target_rate))
+    )
+    source = sys.stdin.buffer
+    target = sys.stdout.buffer
+    with sd.OutputStream(
+        samplerate=target_rate, channels=1, dtype="float32", device=device
+    ) as stream:
+        target.write(b"R")
+        target.flush()
+        while True:
+            header = _read_exact(source, 4)
+            if not header:
+                break
+            if len(header) != 4:
+                raise AudioUnavailable("truncated audio output frame")
+            size = struct.unpack("<I", header)[0]
+            if size % 4 or size > 64 * 1024 * 1024:
+                raise AudioUnavailable("invalid audio output frame")
+            payload = _read_exact(source, size)
+            if len(payload) != size:
+                raise AudioUnavailable("truncated audio output samples")
+            samples = np.frombuffer(payload, dtype="<f4")
+            if resampler is not None:
+                samples = resampler(samples).astype(np.float32)
+            if samples.size:
+                stream.write(samples.reshape(-1, 1))
+            target.write(b"A")
+            target.flush()
+    return 0
+
+
+def _audio_capture_worker(rate: int, device) -> int:
+    if os.name == "nt":
+        return _wasapi_capture_worker(rate, device)
+    sd = _sd()
+    device = resolve_device(device, "input")
+    native = _native_device_rate(sd, device, "input", rate)
+    resampler = None if native == rate else StreamResampler(*resample_ratio(native, rate))
+    blocks: queue.Queue = queue.Queue(maxsize=32)
+    overflow = threading.Event()
+
+    def callback(indata, _frames, _time, status):
+        if status:
+            overflow.set()
+        mono = indata[:, 0] if indata.ndim > 1 else indata
+        samples = resampler(mono) if resampler is not None else mono
+        if len(samples):
+            try:
+                blocks.put_nowait(np.asarray(samples, dtype="<f4").tobytes())
+            except queue.Full:
+                overflow.set()
+
+    stream = sd.InputStream(
+        samplerate=native,
+        channels=1,
+        dtype="float32",
+        device=device,
+        callback=callback,
+    )
+    stream.start()
+    target = sys.stdout.buffer
+    try:
+        target.write(b"R" + struct.pack("<I", native))
+        target.flush()
+        while True:
+            payload = blocks.get()
+            if overflow.is_set():
+                overflow.clear()
+                target.write(struct.pack("<I", 0))
+            target.write(struct.pack("<I", len(payload)))
+            target.write(payload)
+            target.flush()
+    except (BrokenPipeError, OSError):
+        return 0
+    finally:
+        stream.stop()
+        stream.close()
+
+
+def _wasapi_device(device, kind: str):
+    sc = _sc()
+    if kind == "output":
+        if device in {None, ""}:
+            selected = sc.default_speaker()
+        else:
+            selector = str(device)
+            if selector.startswith("wasapi:"):
+                selector = selector.removeprefix("wasapi:")
+            selected = sc.get_speaker(selector)
+    else:
+        if device in {None, ""}:
+            selected = sc.default_microphone()
+        else:
+            selector = str(device)
+            if selector.startswith("wasapi:"):
+                selector = selector.removeprefix("wasapi:")
+            selected = sc.get_microphone(selector, include_loopback=False)
+    if selected is None:
+        raise AudioUnavailable(f"selected WASAPI {kind} device is unavailable")
+    return selected
+
+
+def _wasapi_play_worker(rate: int, device) -> int:
+    speaker = _wasapi_device(device, "output")
+    source = sys.stdin.buffer
+    target = sys.stdout.buffer
+    blocksize = max(256, int(rate) // 20)
+    # SoundCard's WASAPI backend has a long-standing single-channel capture
+    # bug. Keep both sides of the Windows path stereo so virtual cables and
+    # hardware endpoints negotiate an ordinary interleaved stream.
+    with speaker.player(samplerate=rate, channels=2, blocksize=blocksize) as player:
+        target.write(b"R")
+        target.flush()
+        while True:
+            header = _read_exact(source, 4)
+            if not header:
+                break
+            if len(header) != 4:
+                raise AudioUnavailable("truncated audio output frame")
+            size = struct.unpack("<I", header)[0]
+            if size % 4 or size > 64 * 1024 * 1024:
+                raise AudioUnavailable("invalid audio output frame")
+            payload = _read_exact(source, size)
+            if len(payload) != size:
+                raise AudioUnavailable("truncated audio output samples")
+            samples = np.frombuffer(payload, dtype="<f4")
+            if samples.size:
+                # SoundCard duplicates a one-column array to the requested
+                # stereo channel map.
+                player.play(samples.reshape(-1, 1))
+            target.write(b"A")
+            target.flush()
+    return 0
+
+
+def _wasapi_capture_worker(rate: int, device) -> int:
+    microphone = _wasapi_device(device, "input")
+    target = sys.stdout.buffer
+    blocksize = max(256, int(rate) // 20)
+    with microphone.recorder(
+        samplerate=rate, channels=2, blocksize=blocksize
+    ) as recorder:
+        try:
+            target.write(b"R" + struct.pack("<I", rate))
+            target.flush()
+            while True:
+                samples = recorder.record(numframes=blocksize)
+                payload = _downmix_wasapi_capture(samples).astype(
+                    "<f4", copy=False
+                ).tobytes()
+                target.write(struct.pack("<I", len(payload)))
+                target.write(payload)
+                target.flush()
+        except (BrokenPipeError, OSError):
+            return 0
+
+
+def _downmix_wasapi_capture(samples: np.ndarray) -> np.ndarray:
+    """Convert the stereo WASAPI transport to the modem's mono stream."""
+    array = np.asarray(samples, dtype=np.float32)
+    if array.ndim == 1:
+        return array
+    if array.shape[1] == 1:
+        return array[:, 0]
+    return np.mean(array, axis=1, dtype=np.float32)
+
+
+def _audio_worker_main(args: list[str]) -> int:
+    if len(args) != 4 or args[0] != "--audio-worker":
+        return 2
+    operation, rate_text, device_text = args[1:]
+    try:
+        rate = int(rate_text)
+        device = json.loads(device_text)
+        if operation == "play":
+            return _audio_play_worker(rate, device)
+        if operation == "capture":
+            return _audio_capture_worker(rate, device)
+        raise ValueError(f"unknown audio operation {operation!r}")
+    except Exception as error:
+        print(f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_audio_worker_main(sys.argv[1:]))

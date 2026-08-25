@@ -532,22 +532,27 @@ class ReceivePanel(QWidget):
         self.input_device.clear()
         self.input_device.addItem("System default", "")
         try:
-            for item in list_audio_devices("input"):
-                self.input_device.addItem(item.label(), item.name)
+            devices = list_audio_devices("input")
+            for item in devices:
+                self.input_device.addItem(item.label(), item.selection_value())
         except AudioUnavailable:
             return
         index = self.input_device.findData(current)
-        if index >= 0:
-            self.input_device.setCurrentIndex(index)
+        if index < 0 and current not in {None, ""}:
+            index = next(
+                (i for i, item in enumerate(devices, start=1) if item.name == str(current)),
+                -1,
+            )
+        self.input_device.setCurrentIndex(max(0, index))
 
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings
         settings.rx_source = self.source.currentData()
         settings.audio_input = self.input_device.currentData() or ""
-        settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
-        self.kiwi_host.setText(settings.kiwi_host)
         settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
         if settings.rx_source == "kiwi":
+            settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
+            self.kiwi_host.setText(settings.kiwi_host)
             settings.freq_mhz = settings.kiwi_dial_mhz
         settings.kiwi_auto_select = self.auto_kiwi.isChecked()
 
@@ -925,6 +930,17 @@ class ReceivePanel(QWidget):
         self.start_button.setEnabled(not on)
         self.stop_button.setEnabled(on)
         self.find_button.setEnabled(not on)
+        for control in (
+            self.source,
+            self.input_device,
+            self.refresh_audio,
+            self.kiwi_host,
+            self.kiwi_list,
+            self.kiwi_dial,
+            self.auto_kiwi,
+            self.path_planner_button,
+        ):
+            control.setEnabled(not on)
         self.listeningChanged.emit(on)
 
     def _apply_state(self, state: RxState) -> None:

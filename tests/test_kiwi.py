@@ -81,6 +81,60 @@ def test_live_probe_rejects_impossible_operator_coordinates(monkeypatch):
     assert probe_receiver("bad.example:8073") is None
 
 
+def test_live_probe_retains_websocket_capable_redirect_host(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self):
+            return "http://21264.proxy2.kiwisdr.com:8073/status"
+
+        def read(self):
+            return (
+                b"gps=(49.25, -123.10)\nusers=0\nusers_max=8\n"
+                b"ext_api=4\noffline=no\n"
+            )
+
+    monkeypatch.setattr(
+        "aetv.kiwi.urllib.request.urlopen", lambda *_args, **_kwargs: Response()
+    )
+
+    receiver = probe_receiver("21264.proxy.kiwisdr.com:8073")
+
+    assert receiver is not None
+    assert receiver.host == "21264.proxy2.kiwisdr.com:8073"
+
+
+def test_capture_opens_snd_socket_on_resolved_proxy_host(monkeypatch):
+    receiver = KiwiReceiver(
+        "21264.proxy2.kiwisdr.com:8073",
+        lat=49.25,
+        lon=-123.1,
+        ext_api=4,
+        users_max=8,
+        free=8,
+        offline="no",
+    )
+    monkeypatch.setattr("aetv.kiwi.probe_receiver", lambda *_args: receiver)
+    capture = KiwiCapture(
+        "21264.proxy.kiwisdr.com:8073", 7.088, 1600, 8000, ring=None
+    )
+    opened = []
+
+    async def open_uri(_websockets, uri):
+        opened.append(uri)
+
+    capture._session_uri = open_uri
+
+    asyncio.run(capture._session())
+
+    assert opened[0].startswith("ws://21264.proxy2.kiwisdr.com:8073/")
+    assert capture.status.host == "21264.proxy2.kiwisdr.com:8073"
+
+
 def test_pasted_kiwi_urls_are_normalized_for_websocket_use():
     assert normalize_kiwi_host("http://207.102.144.154:8073/") == "207.102.144.154:8073"
     assert normalize_kiwi_host("https://ve7fsr.dyndns-home.com/") == "ve7fsr.dyndns-home.com:8073"
@@ -128,6 +182,9 @@ def test_kiwi_tune_finishes_with_keepalive_without_deprecated_override():
     capture = KiwiCapture("kiwi.example:8073", 7.2, 5000, 24000, ring=None)
     asyncio.run(capture._tune(socket, 11998.881265))
     assert not any("OVERRIDE inactivity_timeout" in message for message in socket.sent)
+    assert any(message.startswith("SET mod=iq ") for message in socket.sent)
+    assert any(message.startswith("SET agc=0 ") for message in socket.sent)
+    assert "SET compression=0" in socket.sent
     assert socket.sent[-1] == "SET keepalive"
 
 

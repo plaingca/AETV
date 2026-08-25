@@ -1,7 +1,8 @@
 """Persisted ham-station settings. JSON in the user config directory.
 
-Device pickers store names, not PortAudio indices: a USB interface
-that moved from index 3 to 5 must not silently key the wrong card.
+Device pickers store stable endpoint IDs on Windows and names elsewhere,
+never transient audio indices: moving a USB interface must not silently
+select the wrong card.
 """
 
 from __future__ import annotations
@@ -114,13 +115,14 @@ class StationSettings:
             problems.append(f"unknown CAT backend {self.cat_backend!r}")
         if self.rx_source not in {"soundcard", "flex", "kiwi"}:
             problems.append(f"unknown receive source {self.rx_source!r}")
-        if receive and self.rx_source == "kiwi" and not self.kiwi_host:
-            problems.append("KiwiSDR host is empty")
-        elif self.kiwi_host:
-            try:
-                self.kiwi_host = normalize_kiwi_host(self.kiwi_host)
-            except ValueError as error:
-                problems.append(str(error))
+        if receive and self.rx_source == "kiwi":
+            if not self.kiwi_host:
+                problems.append("KiwiSDR host is empty")
+            else:
+                try:
+                    self.kiwi_host = normalize_kiwi_host(self.kiwi_host)
+                except ValueError as error:
+                    problems.append(str(error))
         if self.prop_antenna_pattern not in {"unknown", "dipole", "directional"}:
             problems.append(f"unknown propagation antenna pattern {self.prop_antenna_pattern!r}")
         if radio_tx and self.cat_backend == "flex" and not self.flex_host:
@@ -141,6 +143,15 @@ def settings_path() -> Path:
     return config_dir() / "settings.json"
 
 
+def effective_rx_source(
+    rx_source: str, cat_backend: str, flex_native_audio: bool
+) -> str:
+    """Migrate only the historical soundcard default to native Flex audio."""
+    if cat_backend == "flex" and flex_native_audio and rx_source == "soundcard":
+        return "flex"
+    return rx_source
+
+
 def load_settings(path: Path | None = None) -> StationSettings:
     target = path or settings_path()
     if not target.is_file():
@@ -158,12 +169,9 @@ def load_settings(path: Path | None = None) -> StationSettings:
             settings.kiwi_host = normalize_kiwi_host(settings.kiwi_host)
         except ValueError:
             pass
-    if (
-        settings.cat_backend == "flex"
-        and settings.flex_native_audio
-        and settings.rx_source == "soundcard"
-    ):
-        settings.rx_source = "flex"
+    settings.rx_source = effective_rx_source(
+        settings.rx_source, settings.cat_backend, settings.flex_native_audio
+    )
     if not settings.receive_dir:
         settings.receive_dir = str(default_receive_dir())
     return settings

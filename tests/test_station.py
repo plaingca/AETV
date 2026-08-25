@@ -26,6 +26,7 @@ from aetv.station import (
     TxPhase,
     WATCHDOG_MARGIN_S,
     _PcmWaveRecorder,
+    _RecordingSink,
     _PttWatchdog,
 )
 
@@ -167,6 +168,26 @@ def test_native_flex_settings_do_not_silently_use_soundcard(tmp_path: Path):
     path = tmp_path / "settings.json"
     save_settings(settings, path)
     assert load_settings(path).rx_source == "flex"
+
+
+def test_native_flex_settings_preserve_explicit_kiwi_receiver(tmp_path: Path):
+    settings = StationSettings(
+        cat_backend="flex",
+        flex_host="192.0.2.1",
+        flex_native_audio=True,
+        rx_source="kiwi",
+        kiwi_host="kiwi.example:8073",
+    )
+    path = tmp_path / "settings.json"
+    save_settings(settings, path)
+
+    assert load_settings(path).rx_source == "kiwi"
+
+
+def test_unused_invalid_kiwi_address_does_not_block_soundcard():
+    settings = StationSettings(rx_source="soundcard", kiwi_host="ftp://bad.example")
+
+    assert not any("KiwiSDR address" in item for item in settings.validate())
 
 
 def test_normalize_callsign():
@@ -444,6 +465,22 @@ def test_debug_wave_recorder_streams_pcm_to_disk(tmp_path):
     with wave.open(str(path), "rb") as saved:
         assert saved.getframerate() == 24000
         assert saved.getnchannels() == 1
+        assert saved.getnframes() == 3
+
+
+def test_soundcard_debug_sink_records_exact_ring_audio(tmp_path):
+    path = tmp_path / "rx.audio.wav"
+    recorder = _PcmWaveRecorder(path, 8000)
+    ring = RingBuffer(seconds=1, fs=8000)
+    sink = _RecordingSink(ring, recorder)
+    samples = np.array([-0.5, 0.25, 0.75], dtype=np.float32)
+
+    sink.write(samples)
+    recorder.close()
+
+    assert np.array_equal(ring.tail(3), samples)
+    with wave.open(str(path), "rb") as saved:
+        assert saved.getframerate() == 8000
         assert saved.getnframes() == 3
 
 

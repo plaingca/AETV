@@ -22,12 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from aetv.audio_io import AudioUnavailable, list_audio_devices
+from aetv.audio_io import AudioUnavailable, DeviceInfo, list_audio_devices
 from aetv.cat import CatConfig, list_hamlib_models, list_serial_ports, open_ptt
 from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.flex import FlexRadioInfo, discover_radios, with_probed_path_mtu
 from aetv.kiwi import normalize_kiwi_host
-from aetv.settings import StationSettings, normalize_callsign
+from aetv.settings import StationSettings, effective_rx_source, normalize_callsign
 from aetv.source import list_cameras
 
 
@@ -128,6 +128,26 @@ class _DeviceInventoryTask(QRunnable):
             pass
 
 
+def _populate_audio_combo(
+    combo: QComboBox, devices: list[DeviceInfo], current: str | int | None
+) -> None:
+    """Populate an audio selector while preserving IDs and legacy names."""
+    combo.clear()
+    combo.addItem("System default", "")
+    for item in devices:
+        combo.addItem(item.label(), item.selection_value())
+
+    index = combo.findData(current)
+    if index < 0 and current not in {None, ""}:
+        # Older settings stored PortAudio's friendly name.  Migrate it to the
+        # stable WASAPI endpoint ID when the same device is still available.
+        for item_index, item in enumerate(devices, start=1):
+            if item.name == str(current):
+                index = item_index
+                break
+    combo.setCurrentIndex(max(0, index))
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: StationSettings, parent=None):
         super().__init__(parent)
@@ -178,10 +198,11 @@ class SettingsDialog(QDialog):
         settings.flex_host = self.flex_radio.currentData() or self.flex_radio.currentText().strip()
         settings.flex_power = int(self.flex_power.value())
         settings.flex_native_audio = self.flex_native_audio.isChecked()
-        if settings.cat_backend == "flex" and settings.flex_native_audio:
-            # A native Flex station should not silently keep listening to the
-            # system soundcard just because that was the old default.
-            settings.rx_source = "flex"
+        # A native Flex station should not silently keep listening to the old
+        # soundcard default, but an explicit Kiwi selection must be preserved.
+        settings.rx_source = effective_rx_source(
+            settings.rx_source, settings.cat_backend, settings.flex_native_audio
+        )
         settings.freq_mhz = self.freq_mhz.value() if self.freq_mhz.value() > 0 else None
         settings.require_mode = self.require_mode.text().strip() or "DIGU"
         settings.serial_port = self.serial_port.currentText().strip()
@@ -521,21 +542,20 @@ class SettingsDialog(QDialog):
 
     def _apply_device_inventory(self, inventory: dict) -> None:
         self._inventory_task = None
-        for combo, kind, current in (
-            (self.audio_input, "input", self._settings.audio_input),
-            (self.audio_output, "output", self._settings.audio_output),
+        for combo, kind in (
+            (self.audio_input, "input"),
+            (self.audio_output, "output"),
         ):
-            combo.clear()
-            combo.addItem("System default", "")
+            # The combo initially carries the saved setting in its Loading
+            # item. On a manual refresh it carries the user's unsaved choice.
+            current = combo.currentData()
             devices = inventory["audio"].get(kind, [])
             if isinstance(devices, Exception):
-                combo.addItem(str(devices), "")
+                combo.setToolTip(str(devices))
                 devices = []
-            for item in devices:
-                combo.addItem(item.label(), item.name)
-            index = combo.findData(current)
-            if index >= 0:
-                combo.setCurrentIndex(index)
+            else:
+                combo.setToolTip("")
+            _populate_audio_combo(combo, devices, current)
 
         self.camera.clear()
         cameras = inventory["cameras"]
