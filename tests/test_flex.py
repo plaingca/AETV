@@ -1,4 +1,5 @@
 import struct
+import threading
 
 import numpy as np
 import pytest
@@ -51,6 +52,55 @@ def test_flex_vita_float_stereo_is_converted_from_48k_to_24k():
     decoded = FlexVitaSession._decode_audio_packet(header + payload, 0x40000002)
     assert decoded is not None
     assert np.allclose(decoded, [0.1, 0.3])
+
+
+def _vita_int16_packet(packet_count: int, stream_id: int = 0x40000001) -> bytes:
+    samples = np.array([1000, -1000, 2000, -2000], dtype=np.int16)
+    payload = samples.astype(">i2").tobytes()
+    words = 7 + len(payload) // 4
+    header = struct.pack(
+        ">7I",
+        (1 << 28) | (1 << 27) | ((packet_count & 0xF) << 16) | words,
+        stream_id,
+        FlexVitaSession.FLEX_OUI,
+        (FlexVitaSession.FLEX_ICC << 16) | FlexVitaSession.AUDIO_INT16,
+        0,
+        0,
+        0,
+    )
+    return header + payload
+
+
+def test_flex_vita_rx_reports_packet_count_gap():
+    packets = [_vita_int16_packet(0), _vita_int16_packet(3)]
+
+    class Udp:
+        def recvfrom(self, _size):
+            if packets:
+                return packets.pop(0), ("192.0.2.1", 4992)
+            session._running.clear()
+            raise TimeoutError
+
+    session = object.__new__(FlexVitaSession)
+    session.rx_stream_id = 0x40000001
+    session.udp = Udp()
+    session._running = threading.Event()
+    received = []
+    gaps = []
+
+    session.start_rx(received.append, on_discontinuity=lambda: gaps.append(True))
+    session._rx_thread.join(timeout=2)
+
+    assert len(received) == 2
+    assert gaps == [True]
+
+
+def test_flex_vita_rejects_truncated_declared_packet():
+    packet = bytearray(_vita_int16_packet(0))
+    word0 = struct.unpack_from(">I", packet)[0]
+    struct.pack_into(">I", packet, 0, (word0 & 0xFFFF0000) | 100)
+
+    assert FlexVitaSession._decode_audio_packet(bytes(packet), 0x40000001) is None
 
 
 def test_flex_session_uses_documented_filter_command(monkeypatch):

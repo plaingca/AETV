@@ -854,7 +854,7 @@ class RxEngine:
         self.last_video: np.ndarray | None = None
         self._shown_gops = 0
         self._stream_decoder: StreamingDemodulator | None = None
-        self._kiwi_discontinuity = threading.Event()
+        self._source_discontinuity = threading.Event()
         self._read_cursor = 0
         self._last_result = None
         self._debug_log: _JsonlRecorder | None = None
@@ -893,7 +893,7 @@ class RxEngine:
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
         self._stream_decoder = self._new_demodulator(codec.mode)
-        self._kiwi_discontinuity.clear()
+        self._source_discontinuity.clear()
         self._read_cursor = 0
         self._on_ring(self.ring)
         self.state = RxState(listening=True, source=settings.rx_source, message="starting")
@@ -927,13 +927,18 @@ class RxEngine:
             else:
                 resample_flex = StreamResampler(*resample_ratio(24000, codec.mode.geometry.fs))
                 write_flex = lambda chunk: self.ring.write(resample_flex(chunk))
-            self._flex.start_rx(write_flex)
+            self._flex.start_rx(
+                write_flex,
+                on_discontinuity=self._on_flex_discontinuity,
+                on_error=self._on_error,
+            )
         else:
             self._stream, _rate = open_input_stream(
                 settings.audio_input or None,
                 self.ring,
                 codec.mode.geometry.fs,
                 on_error=self._on_error,
+                on_discontinuity=self._on_soundcard_discontinuity,
             )
         self._thread = threading.Thread(target=self._loop, name="aetv-rx", daemon=True)
         self._thread.start()
@@ -982,7 +987,13 @@ class RxEngine:
     def _on_kiwi_discontinuity(self) -> None:
         if self._iq_recorder is not None:
             self._iq_recorder.discontinuity("Kiwi sequence gap or reconnect")
-        self._kiwi_discontinuity.set()
+        self._source_discontinuity.set()
+
+    def _on_flex_discontinuity(self) -> None:
+        self._source_discontinuity.set()
+
+    def _on_soundcard_discontinuity(self) -> None:
+        self._source_discontinuity.set()
 
     def _record_modem_debug(self, event: dict) -> None:
         if self._debug_log is not None:
@@ -1007,14 +1018,17 @@ class RxEngine:
             ring = self.ring
             if ring is None:
                 break
-            if self._kiwi_discontinuity.is_set():
-                self._kiwi_discontinuity.clear()
+            if self._source_discontinuity.is_set():
+                self._source_discontinuity.clear()
                 self._stream_decoder = self._new_demodulator(codec.mode)
                 # Drop every sample written before the reset. The interrupted
                 # GOP cannot be repaired live; the next independently framed
                 # GOP will provide a fresh preamble and mode header.
                 _discarded, self._read_cursor, _overrun = ring.read_since(2**63 - 1)
-                self.state.message = "Kiwi stream gap; reacquiring next GOP"
+                self.state.message = (
+                    f"{self.state.source.capitalize()} stream gap; "
+                    "reacquiring next GOP"
+                )
                 self._on_state(self.state)
                 continue
             audio, self._read_cursor, overrun = ring.read_since(self._read_cursor)

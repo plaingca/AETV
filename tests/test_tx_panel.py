@@ -40,3 +40,24 @@ def test_webcam_radio_transmit_still_suppresses_gop_preview():
     TransmitPanel._show_preview(panel, frames)
 
     assert panel.preview.shown == []
+
+
+def test_mode_selection_requests_reload_before_transmit():
+    requested = []
+    button = SimpleNamespace(setEnabled=lambda enabled: setattr(button, "enabled", enabled))
+    status = SimpleNamespace(setText=lambda text: setattr(status, "text", text))
+    panel = SimpleNamespace(
+        station=SimpleNamespace(settings=SimpleNamespace(mode="V8")),
+        mode=SimpleNamespace(currentData=lambda: "V7"),
+        send_button=button,
+        status=status,
+        modeRequested=SimpleNamespace(emit=requested.append),
+        _restart_preview=lambda _index: None,
+    )
+
+    TransmitPanel._on_mode_changed(panel, 1)
+
+    assert panel.station.settings.mode == "V8"
+    assert requested == ["V7"]
+    assert not button.enabled
+    assert status.text == "loading V7 model…"

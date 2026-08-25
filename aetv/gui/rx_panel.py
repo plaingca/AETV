@@ -544,10 +544,10 @@ class ReceivePanel(QWidget):
         settings = self.station.settings
         settings.rx_source = self.source.currentData()
         settings.audio_input = self.input_device.currentData() or ""
-        settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
-        self.kiwi_host.setText(settings.kiwi_host)
         settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
         if settings.rx_source == "kiwi":
+            settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
+            self.kiwi_host.setText(settings.kiwi_host)
             settings.freq_mhz = settings.kiwi_dial_mhz
         settings.kiwi_auto_select = self.auto_kiwi.isChecked()
 
@@ -925,6 +925,17 @@ class ReceivePanel(QWidget):
         self.start_button.setEnabled(not on)
         self.stop_button.setEnabled(on)
         self.find_button.setEnabled(not on)
+        for control in (
+            self.source,
+            self.input_device,
+            self.refresh_audio,
+            self.kiwi_host,
+            self.kiwi_list,
+            self.kiwi_dial,
+            self.auto_kiwi,
+            self.path_planner_button,
+        ):
+            control.setEnabled(not on)
         self.listeningChanged.emit(on)
 
     def _apply_state(self, state: RxState) -> None:

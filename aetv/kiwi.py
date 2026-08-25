@@ -207,6 +207,7 @@ def probe_receiver(host: str, timeout: float = 8.0) -> KiwiReceiver | None:
     try:
         request = urllib.request.Request(f"http://{host}/status", headers={"User-Agent": BROWSER_UA})
         with urllib.request.urlopen(request, timeout=timeout) as response:
+            resolved_url = getattr(response, "geturl", lambda: f"http://{host}/status")()
             text = response.read().decode("utf-8", "replace")
     except Exception:
         return None
@@ -228,7 +229,10 @@ def probe_receiver(host: str, timeout: float = 8.0) -> KiwiReceiver | None:
     except ValueError:
         return None
     return KiwiReceiver(
-        host=host,
+        # Public proxy front doors redirect /status to the generation-specific
+        # host that actually supports WebSocket upgrades. WebSocket clients do
+        # not reliably follow that HTTP redirect, so retain the resolved host.
+        host=normalize_kiwi_host(resolved_url),
         name=fields.get("name", "")[:60],
         loc=fields.get("loc", "")[:40],
         lat=lat,
@@ -520,14 +524,16 @@ class KiwiCapture:
                 "external API is disabled (browser slots do not permit AETV IQ); "
                 "choose an API-enabled Kiwi or enter an operator password"
             )
+        connection_host = receiver.host if receiver is not None else self.host
+        self.status.host = connection_host
 
         # Current Kiwi builds use /<token>/SND. Some receivers used in AETV's
         # original OTA trials only accepted /ws/kiwi/<timestamp>/SND, so fall
         # back when the first socket closes before it reports a sample rate.
         token = int(time.time() + os.getpid()) & 0xFFFFFFFF
         paths = [
-            f"ws://{self.host}/{token}/SND",
-            f"ws://{self.host}/ws/kiwi/{int(time.time() * 1000)}/SND",
+            f"ws://{connection_host}/{token}/SND",
+            f"ws://{connection_host}/ws/kiwi/{int(time.time() * 1000)}/SND",
         ]
         first_error = None
         for uri in paths:
@@ -653,7 +659,10 @@ class KiwiCapture:
         await ws.send(
             f"SET mod=iq low_cut=-5500 high_cut=5500 freq={center:.3f}"
         )
-        await ws.send("SET agc=1 hang=0 thresh=-100 slope=6 decay=1000 manGain=50")
+        # Modem IQ must retain its amplitude envelope. Kiwi's AGC runs ahead
+        # of the IQ websocket output, so use a fixed manual gain and keep both
+        # AGC and ADPCM compression out of the receive path.
+        await ws.send("SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=50")
         await ws.send("SET compression=0")
         await ws.send(f"SET ident_user={self.user}")
         await ws.send("SET keepalive")

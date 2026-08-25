@@ -32,6 +32,7 @@ from aetv.gui.widgets import ElidingLabel, VideoView
 class TransmitPanel(QWidget):
     transmitStarted = Signal()
     transmitFinished = Signal()
+    modeRequested = Signal(str)
     logMessage = Signal(str)
     pttChanged = Signal(bool)
     _stateArrived = Signal(object)
@@ -90,7 +91,9 @@ class TransmitPanel(QWidget):
 
     def sync_from_config(self) -> None:
         settings = self.station.settings
+        previous = self.mode.blockSignals(True)
         self.mode.setCurrentIndex(max(0, self.mode.findData(settings.mode)))
+        self.mode.blockSignals(previous)
         self.gops.setValue(settings.gops)
         level = max(0.05, min(1.0, settings.tx_level))
         self.level_db.setValue(20.0 * math.log10(level))
@@ -113,8 +116,11 @@ class TransmitPanel(QWidget):
         )
         if self.file_radio.isChecked() and not self._file_path:
             problems.append("choose a video file to send")
-        if self.station.codec is None:
+        codec = self.station.codec
+        if codec is None:
             problems.append("checkpoint is still loading")
+        elif codec.mode.name != self.station.settings.mode:
+            problems.append(f"{self.station.settings.mode} checkpoint is still loading")
         if problems:
             self.status.setText(problems[0])
             return
@@ -132,6 +138,7 @@ class TransmitPanel(QWidget):
                 return
             self._camera_preview_queued.clear()
         self.send_button.setEnabled(False)
+        self.mode.setEnabled(False)
         self.cancel_button.setEnabled(True)
         for button in self.channel_buttons.buttons():
             button.setEnabled(False)
@@ -264,7 +271,7 @@ class TransmitPanel(QWidget):
         layout.addWidget(self._strip, 0)
         self.sync_from_config()
         self.camera.currentIndexChanged.connect(self._restart_preview)
-        self.mode.currentIndexChanged.connect(self._restart_preview)
+        self.mode.currentIndexChanged.connect(self._on_mode_changed)
         self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
@@ -325,6 +332,14 @@ class TransmitPanel(QWidget):
             return
         self._preview_restart_pending = False
         self._start_preview()
+
+    def _on_mode_changed(self, index: int) -> None:
+        self._restart_preview(index)
+        mode = self.mode.currentData()
+        if mode and mode != self.station.settings.mode:
+            self.send_button.setEnabled(False)
+            self.status.setText(f"loading {mode} model…")
+            self.modeRequested.emit(str(mode))
 
     def _stop_preview(self) -> None:
         self._preview_stop.set()
@@ -413,7 +428,6 @@ class TransmitPanel(QWidget):
 
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings
-        settings.mode = self.mode.currentData()
         settings.gops = int(self.gops.value())
         settings.tx_level = float(10 ** (self.level_db.value() / 20.0))
         settings.camera_index = int(self.camera.currentData() or 0)
@@ -440,7 +454,11 @@ class TransmitPanel(QWidget):
         keyed = state.phase in {TxPhase.KEYING, TxPhase.SENDING, TxPhase.UNKEYING}
         self.pttChanged.emit(keyed)
         if state.phase in {TxPhase.DONE, TxPhase.CANCELLED, TxPhase.FAILED, TxPhase.IDLE}:
-            self.send_button.setEnabled(self.station.codec is not None)
+            codec = self.station.codec
+            self.send_button.setEnabled(
+                codec is not None and codec.mode.name == self.station.settings.mode
+            )
+            self.mode.setEnabled(True)
             self.cancel_button.setEnabled(False)
             for button in self.channel_buttons.buttons():
                 button.setEnabled(True)

@@ -27,7 +27,7 @@ from aetv.cat import CatConfig, list_hamlib_models, list_serial_ports, open_ptt
 from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.flex import FlexRadioInfo, discover_radios, with_probed_path_mtu
 from aetv.kiwi import normalize_kiwi_host
-from aetv.settings import StationSettings, normalize_callsign
+from aetv.settings import StationSettings, effective_rx_source, normalize_callsign
 from aetv.source import list_cameras
 
 
@@ -178,10 +178,11 @@ class SettingsDialog(QDialog):
         settings.flex_host = self.flex_radio.currentData() or self.flex_radio.currentText().strip()
         settings.flex_power = int(self.flex_power.value())
         settings.flex_native_audio = self.flex_native_audio.isChecked()
-        if settings.cat_backend == "flex" and settings.flex_native_audio:
-            # A native Flex station should not silently keep listening to the
-            # system soundcard just because that was the old default.
-            settings.rx_source = "flex"
+        # A native Flex station should not silently keep listening to the old
+        # soundcard default, but an explicit Kiwi selection must be preserved.
+        settings.rx_source = effective_rx_source(
+            settings.rx_source, settings.cat_backend, settings.flex_native_audio
+        )
         settings.freq_mhz = self.freq_mhz.value() if self.freq_mhz.value() > 0 else None
         settings.require_mode = self.require_mode.text().strip() or "DIGU"
         settings.serial_port = self.serial_port.currentText().strip()

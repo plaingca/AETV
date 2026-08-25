@@ -169,6 +169,26 @@ def test_native_flex_settings_do_not_silently_use_soundcard(tmp_path: Path):
     assert load_settings(path).rx_source == "flex"
 
 
+def test_native_flex_settings_preserve_explicit_kiwi_receiver(tmp_path: Path):
+    settings = StationSettings(
+        cat_backend="flex",
+        flex_host="192.0.2.1",
+        flex_native_audio=True,
+        rx_source="kiwi",
+        kiwi_host="kiwi.example:8073",
+    )
+    path = tmp_path / "settings.json"
+    save_settings(settings, path)
+
+    assert load_settings(path).rx_source == "kiwi"
+
+
+def test_unused_invalid_kiwi_address_does_not_block_soundcard():
+    settings = StationSettings(rx_source="soundcard", kiwi_host="ftp://bad.example")
+
+    assert not any("KiwiSDR address" in item for item in settings.validate())
+
+
 def test_normalize_callsign():
     assert normalize_callsign("va7eet") == "VA7EET"
     assert normalize_callsign("w1aw/7 extra") == "W1AW/7"

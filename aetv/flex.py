@@ -352,44 +352,74 @@ class FlexVitaSession:
         except (ValueError, IndexError) as error:
             raise RuntimeError(f"Flex returned no stream id for {body!r}: {payload!r}") from error
 
-    def start_rx(self, callback) -> None:
+    def start_rx(self, callback, on_discontinuity=None, on_error=None) -> None:
         if self.rx_stream_id is None:
             self.rx_stream_id = self._create_stream("stream create type=dax_rx dax_channel=1")
         self._running.set()
+        report_gap = on_discontinuity or (lambda: None)
+        report_error = on_error or (lambda _message: None)
 
         def receive() -> None:
+            last_count = None
             while self._running.is_set():
                 try:
                     packet, _source = self.udp.recvfrom(65536)
                 except TimeoutError:
                     continue
-                audio = self._decode_audio_packet(packet, self.rx_stream_id)
-                if audio is not None and audio.size:
+                except OSError as error:
+                    if self._running.is_set():
+                        report_error(f"Flex VITA receive stopped: {error}")
+                    break
+                try:
+                    audio, packet_count = self._decode_audio_packet_with_count(
+                        packet, self.rx_stream_id
+                    )
+                    if audio is None or packet_count is None or not audio.size:
+                        continue
+                    if last_count is not None and packet_count != ((last_count + 1) & 0xF):
+                        report_gap()
+                    last_count = packet_count
                     callback(audio)
+                except Exception as error:
+                    report_error(f"Flex VITA receive packet failed: {error}")
 
         self._rx_thread = threading.Thread(target=receive, name="flex-vita-rx", daemon=True)
         self._rx_thread.start()
 
     @classmethod
     def _decode_audio_packet(cls, packet: bytes, stream_id: int | None) -> np.ndarray | None:
+        audio, _packet_count = cls._decode_audio_packet_with_count(packet, stream_id)
+        return audio
+
+    @classmethod
+    def _decode_audio_packet_with_count(
+        cls, packet: bytes, stream_id: int | None
+    ) -> tuple[np.ndarray | None, int | None]:
         if len(packet) < 28:
-            return None
+            return None, None
         words = struct.unpack_from(">7I", packet)
         if stream_id is not None and words[1] != stream_id:
-            return None
+            return None, None
+        packet_words = words[0] & 0xFFFF
+        if packet_words < 7 or packet_words * 4 > len(packet):
+            return None, None
+        packet_count = (words[0] >> 16) & 0xF
         pcc = words[3] & 0xFFFF
-        payload = packet[28 : (words[0] & 0xFFFF) * 4]
+        payload = packet[28 : packet_words * 4]
         if pcc == cls.AUDIO_INT16:
-            return np.frombuffer(payload, dtype=">i2").astype(np.float32) / 32768.0
+            return (
+                np.frombuffer(payload, dtype=">i2").astype(np.float32) / 32768.0,
+                packet_count,
+            )
         if pcc == cls.AUDIO_FLOAT32:
             stereo = np.frombuffer(payload, dtype=">f4").astype(np.float32)
             if stereo.size % 2:
-                return None
+                return None, None
             # Full-band DAX is 48 kHz stereo. AETV's V7 modem consumes 24 kHz
             # mono, so use the left channel and decimate once. Averaging L/R
             # can cancel radios that provide opposite-polarity channels.
-            return stereo[0::2][::2].copy()
-        return None
+            return stereo[0::2][::2].copy(), packet_count
+        return None, None
 
     def set_ptt(self, on: bool) -> None:
         self.control.command(f"xmit {1 if on else 0}")
@@ -538,6 +568,13 @@ class FlexVitaSession:
     def close(self) -> None:
         self._running.clear()
         try:
+            self.udp.close()
+        except OSError:
+            pass
+        rx_thread = getattr(self, "_rx_thread", None)
+        if rx_thread is not None and rx_thread is not threading.current_thread():
+            rx_thread.join(timeout=1.0)
+        try:
             self.control.command("xmit 0")
         except Exception:
             pass
@@ -558,10 +595,6 @@ class FlexVitaSession:
                 self.control.command(f"slice remove {self.slice_index}")
             except Exception:
                 pass
-        try:
-            self.udp.close()
-        except OSError:
-            pass
         try:
             self.control.close()
         except OSError:
