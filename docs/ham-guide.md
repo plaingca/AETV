@@ -63,6 +63,11 @@ The report separates the modem's normal latent distortion from error added by
 the cable, and records first-result latency, callback burst size, receive
 backlog, timing drift, realignments, lock loss, and audio discontinuities.
 
+For late joins, the receiver now defers weak preamble/header coincidences from
+background audio and preserves the buffered signal for blind acquisition. V8
+blind acquisition uses its dedicated beacon carrier and can take about 12
+seconds while it gathers enough self-identifying evidence.
+
 **CAT / PTT**
 
 | Method | Use |

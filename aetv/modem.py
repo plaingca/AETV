@@ -86,6 +86,42 @@ class BlindPayloadAcquisition:
     beacon: AETVBeaconResult
 
 
+def _payload_presence_rejection(
+    result: AETVDemodResult, payload_confidence: float
+) -> str | None:
+    """Reject energy that lacks joint OFDM structure and usable payload."""
+    if result.pilot_coherence < 0.09:
+        return "payload pilot structure below 0.09 presence floor"
+    if payload_confidence < 0.20:
+        return "payload confidence below 0.20 presence floor"
+    if result.pilot_occupancy < 0.40:
+        return "pilot bandwidth occupancy below 0.40 presence floor"
+    if result.pilot_coherence * payload_confidence < 0.05:
+        return "joint pilot/payload evidence below 0.05 presence floor"
+    return None
+
+
+def _continuous_candidate_rejection(
+    acquisition: Acquisition, result: AETVDemodResult
+) -> str | None:
+    """Return why a one-GOP startup candidate cannot establish live lock.
+
+    Continuous payload has enough OFDM structure to produce occasional weak
+    preamble peaks, especially when mixed with speech or music. A low preamble
+    metric and low repeated-header score together are ambiguous even if an
+    incorrectly phased pilot window looks somewhat coherent. Defer that case
+    to the longer CP/pilot/beacon blind acquisition instead of pinning tracking
+    to it. Either strong framing observation remains sufficient for immediate
+    weak-signal startup.
+    """
+    if acquisition.metric < 0.35 and result.header_score < 0.20:
+        return "preamble and mode-header evidence are jointly ambiguous"
+    payload_confidence = float(
+        np.mean(result.gops_weights[0]) if result.gops_weights else 0.0
+    )
+    return _payload_presence_rejection(result, payload_confidence)
+
+
 def to_baseband(x: np.ndarray, fcenter_hz: int, fs: int = FS) -> np.ndarray:
     """Heterodyne real passband signal to complex baseband centered at fcenter_hz."""
     g = gcd(fcenter_hz, fs)
@@ -1099,21 +1135,11 @@ class StreamingDemodulator:
                     if result.gops_weights
                     else 0.0
                 )
-                if (
-                    result.pilot_coherence < 0.09
-                    or payload_confidence < 0.20
-                    or result.pilot_occupancy < 0.40
-                ):
+                rejection = _payload_presence_rejection(
+                    result, payload_confidence
+                )
+                if rejection is not None:
                     self._tracking_bad_gops += 1
-                    reason = (
-                        "payload confidence below 0.20 presence floor"
-                        if payload_confidence < 0.20
-                        else (
-                            "pilot bandwidth occupancy below 0.40 presence floor"
-                            if result.pilot_occupancy < 0.40
-                            else "payload pilot structure below 0.09 presence floor"
-                        )
-                    )
                     self._debug(
                         "tracking_weak",
                         stream_sample=int(stream_sample),
@@ -1121,7 +1147,7 @@ class StreamingDemodulator:
                         pilot_coherence=float(result.pilot_coherence),
                         pilot_occupancy=float(result.pilot_occupancy),
                         payload_confidence=payload_confidence,
-                        reason=reason,
+                        reason=rejection,
                     )
                     if self._tracking_bad_gops >= 3:
                         self._debug(
@@ -1184,6 +1210,7 @@ class StreamingDemodulator:
                         recent_acq = None
                         expected_header_matched = False
                         candidate_incomplete = False
+                        candidate_deferred = False
                         try:
                             recent_acq = acquire(
                                 to_baseband(recent, geom.fcenter_hz, fs),
@@ -1215,12 +1242,37 @@ class StreamingDemodulator:
                                     f"expected {self.expected_mode.name}, got "
                                     f"{recent_result.mode.name}"
                                 )
+                            rejection = _continuous_candidate_rejection(
+                                recent_acq, recent_result
+                            )
+                            if rejection is not None:
+                                candidate_deferred = True
+                                self._debug(
+                                    "candidate_rejected",
+                                    offset=int(recent_acq.preamble_start),
+                                    stream_sample=int(
+                                        self.samples_consumed
+                                        + recent_start
+                                        + recent_acq.preamble_start
+                                    ),
+                                    metric=float(recent_acq.metric),
+                                    header_score=float(recent_result.header_score),
+                                    pilot_coherence=float(
+                                        recent_result.pilot_coherence
+                                    ),
+                                    pilot_occupancy=float(
+                                        recent_result.pilot_occupancy
+                                    ),
+                                    reason=rejection,
+                                )
+                                raise SyncError(rejection)
                             expected_header_matched = True
                         except SyncError:
                             recent_acq = None
                             fallback_candidates = (
                                 _header_aided_acquisitions(recent, self.band)
                                 if not candidate_incomplete
+                                and not candidate_deferred
                                 and (
                                     self._header_aided_allowed
                                     or expected_header_matched
@@ -1380,10 +1432,12 @@ class StreamingDemodulator:
                 self.buffer = self.buffer[discarded:]
                 self.samples_consumed += discarded
                 continue
-            if self.continuous and (
-                result.pilot_coherence < 0.09
-                or result.pilot_occupancy < 0.40
-            ):
+            rejection = (
+                _continuous_candidate_rejection(acq, result)
+                if self.continuous
+                else None
+            )
+            if rejection is not None:
                 # A repeated low-SNR header can occasionally win the large
                 # acquisition search by chance. Do not hand its noise latents
                 # to the video decoder: require independent payload-pilot
@@ -1396,18 +1450,16 @@ class StreamingDemodulator:
                     header_score=float(result.header_score),
                     pilot_coherence=float(result.pilot_coherence),
                     pilot_occupancy=float(result.pilot_occupancy),
-                    reason=(
-                        "pilot bandwidth occupancy below 0.40 confirmation floor"
-                        if result.pilot_occupancy < 0.40
-                        else "payload pilot structure below 0.09 confirmation floor"
-                    ),
+                    reason=rejection,
                 )
-                self.buffer = self.buffer[needed:]
-                self.samples_consumed += needed
+                # Retain the candidate and following payload for the stronger
+                # 12-second CP/pilot/beacon observation. The overlapping
+                # startup scanner advances past this peak without handing its
+                # latents to the decoder.
                 self._awaiting_blind = True
                 self._awaiting_search_offset = 0
                 self._header_aided_allowed = False
-                continue
+                break
             self.buffer = self.buffer[needed:]
             self.samples_consumed += needed
             missing_gops = self._accumulate_beacon(
@@ -1569,7 +1621,9 @@ def blind_acquire_continuous_payload(
     correlation = signal.fftconvolve(product, kernel, mode="valid")
     e1 = signal.fftconvolve(np.abs(z[:-m]) ** 2, kernel, mode="valid")
     e2 = signal.fftconvolve(np.abs(z[m:]) ** 2, kernel, mode="valid")
-    cp_metric = np.abs(correlation) / np.maximum(np.sqrt(e1 * e2), 1e-12)
+    cp_metric = np.abs(correlation) / np.maximum(
+        np.sqrt(np.maximum(e1, 0.0) * np.maximum(e2, 0.0)), 1e-12
+    )
     phase_scores = np.array(
         [np.mean(cp_metric[offset::nsym]) for offset in range(nsym)]
     )
@@ -1603,15 +1657,20 @@ def blind_acquire_continuous_payload(
         frame_starts.append(starts[index])
         for data_index in range(1, 1 + DATA_SYMS_PER_FRAME):
             equalized = symbols[index + data_index] * np.conj(h_pilot) / denominator
-            logical_chips.append(
-                0.25
-                * (
-                    np.real(equalized[mode.geometry.latent_carriers])
-                    + np.imag(equalized[mode.geometry.latent_carriers])
-                    + np.real(equalized[mode.geometry.beacon_carrier])
-                    + np.imag(equalized[mode.geometry.beacon_carrier])
+            if mode.band == "U":
+                logical_chips.append(
+                    0.25
+                    * (
+                        np.real(equalized[mode.geometry.latent_carriers])
+                        + np.imag(equalized[mode.geometry.latent_carriers])
+                        + np.real(equalized[mode.geometry.beacon_carrier])
+                        + np.imag(equalized[mode.geometry.beacon_carrier])
+                    )
                 )
-            )
+            else:
+                logical_chips.append(
+                    np.real(equalized[mode.geometry.beacon_carrier])
+                )
     found = find_beacon_superframe(np.asarray(logical_chips), threshold=0.4)
     if found is None or found.mode_index != mode.index:
         raise SyncError("blind acquisition has not decoded a matching beacon yet")

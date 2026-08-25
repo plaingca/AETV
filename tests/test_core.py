@@ -576,6 +576,59 @@ def test_continuous_v7_receiver_can_join_after_initial_header():
     )
 
 
+def test_continuous_v8_receiver_defers_false_preamble_and_blind_joins_with_audio():
+    """A late V8 join must not let background audio pin a weak payload peak."""
+    mode = AETV_MODES["V8"]
+    rng = np.random.default_rng(20260827)
+    gops = [
+        rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+        for _ in range(16)
+    ]
+    transmission = np.concatenate(
+        list(
+            modulate_continuous_chunks(
+                gops, "V8", "N0CALL", total_gops=len(gops)
+            )
+        )
+    )
+    # Enter well after the only preamble/header and mix in quiet, speech-like
+    # non-bin-aligned tones. Continuous OFDM payload plus this audio produces
+    # weak accidental preamble/header scores before the blind window matures.
+    mixed = transmission[25000:].copy()
+    samples = np.arange(len(mixed))
+    background = 0.05 * (
+        0.55 * np.sin(2 * np.pi * 733 * samples / mode.geometry.fs)
+        + 0.30 * np.sin(2 * np.pi * 1191 * samples / mode.geometry.fs)
+        + 0.15 * np.sin(2 * np.pi * 2017 * samples / mode.geometry.fs)
+    )
+    mixed += background.astype(np.float32)
+
+    events = []
+    receiver = StreamingDemodulator(
+        "W",
+        continuous=True,
+        mode_name="V8",
+        timing_tracking=True,
+        on_debug=events.append,
+    )
+    decoded = []
+    for start in range(0, len(mixed), mode.geometry.fs // 10):
+        decoded.extend(
+            receiver.feed(mixed[start : start + mode.geometry.fs // 10])
+        )
+
+    assert decoded
+    assert decoded[-1].callsign == "N0CALL"
+    assert any(event["event"] == "blind_acquired" for event in events)
+    assert any(
+        event["event"] == "candidate_rejected"
+        and "jointly ambiguous" in event.get("reason", "")
+        for event in events
+    )
+    assert all(result.pilot_coherence > 0.90 for result in decoded)
+    assert all(np.mean(result.gops_weights[0]) > 0.90 for result in decoded)
+
+
 def test_continuous_v7_receiver_keeps_looking_when_started_before_tx():
     mode = AETV_MODES["V7"]
     gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
