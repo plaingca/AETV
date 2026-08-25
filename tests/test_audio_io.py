@@ -43,6 +43,17 @@ def test_wasapi_device_accepts_prefixed_endpoint_id(monkeypatch):
     assert calls == [("mic-guid", False)]
 
 
+def test_wasapi_stereo_capture_is_downmixed_after_transport():
+    captured = np.array(
+        [[0.25, 0.75], [-0.5, 0.5], [1.0, 0.0]], dtype=np.float32
+    )
+
+    mono = audio_io._downmix_wasapi_capture(captured)
+
+    assert mono.dtype == np.float32
+    assert np.allclose(mono, [0.5, 0.0, 0.5])
+
+
 def test_default_output_uses_native_device_rate(monkeypatch):
     opened = {}
 

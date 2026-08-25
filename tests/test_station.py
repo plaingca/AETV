@@ -26,6 +26,7 @@ from aetv.station import (
     TxPhase,
     WATCHDOG_MARGIN_S,
     _PcmWaveRecorder,
+    _RecordingSink,
     _PttWatchdog,
 )
 
@@ -464,6 +465,22 @@ def test_debug_wave_recorder_streams_pcm_to_disk(tmp_path):
     with wave.open(str(path), "rb") as saved:
         assert saved.getframerate() == 24000
         assert saved.getnchannels() == 1
+        assert saved.getnframes() == 3
+
+
+def test_soundcard_debug_sink_records_exact_ring_audio(tmp_path):
+    path = tmp_path / "rx.audio.wav"
+    recorder = _PcmWaveRecorder(path, 8000)
+    ring = RingBuffer(seconds=1, fs=8000)
+    sink = _RecordingSink(ring, recorder)
+    samples = np.array([-0.5, 0.25, 0.75], dtype=np.float32)
+
+    sink.write(samples)
+    recorder.close()
+
+    assert np.array_equal(ring.tail(3), samples)
+    with wave.open(str(path), "rb") as saved:
+        assert saved.getframerate() == 8000
         assert saved.getnframes() == 3
 
 

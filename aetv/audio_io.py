@@ -841,7 +841,10 @@ def _wasapi_play_worker(rate: int, device) -> int:
     source = sys.stdin.buffer
     target = sys.stdout.buffer
     blocksize = max(256, int(rate) // 20)
-    with speaker.player(samplerate=rate, channels=1, blocksize=blocksize) as player:
+    # SoundCard's WASAPI backend has a long-standing single-channel capture
+    # bug. Keep both sides of the Windows path stereo so virtual cables and
+    # hardware endpoints negotiate an ordinary interleaved stream.
+    with speaker.player(samplerate=rate, channels=2, blocksize=blocksize) as player:
         target.write(b"R")
         target.flush()
         while True:
@@ -858,6 +861,8 @@ def _wasapi_play_worker(rate: int, device) -> int:
                 raise AudioUnavailable("truncated audio output samples")
             samples = np.frombuffer(payload, dtype="<f4")
             if samples.size:
+                # SoundCard duplicates a one-column array to the requested
+                # stereo channel map.
                 player.play(samples.reshape(-1, 1))
             target.write(b"A")
             target.flush()
@@ -869,19 +874,31 @@ def _wasapi_capture_worker(rate: int, device) -> int:
     target = sys.stdout.buffer
     blocksize = max(256, int(rate) // 20)
     with microphone.recorder(
-        samplerate=rate, channels=1, blocksize=blocksize
+        samplerate=rate, channels=2, blocksize=blocksize
     ) as recorder:
         try:
             target.write(b"R" + struct.pack("<I", rate))
             target.flush()
             while True:
                 samples = recorder.record(numframes=blocksize)
-                payload = np.asarray(samples, dtype="<f4").reshape(-1).tobytes()
+                payload = _downmix_wasapi_capture(samples).astype(
+                    "<f4", copy=False
+                ).tobytes()
                 target.write(struct.pack("<I", len(payload)))
                 target.write(payload)
                 target.flush()
         except (BrokenPipeError, OSError):
             return 0
+
+
+def _downmix_wasapi_capture(samples: np.ndarray) -> np.ndarray:
+    """Convert the stereo WASAPI transport to the modem's mono stream."""
+    array = np.asarray(samples, dtype=np.float32)
+    if array.ndim == 1:
+        return array
+    if array.shape[1] == 1:
+        return array[:, 0]
+    return np.mean(array, axis=1, dtype=np.float32)
 
 
 def _audio_worker_main(args: list[str]) -> int:

@@ -84,6 +84,18 @@ class _PcmWaveRecorder:
         self._wave.close()
 
 
+class _RecordingSink:
+    """Tee live mono samples into the receiver ring and a debug WAV."""
+
+    def __init__(self, ring: RingBuffer, recorder: _PcmWaveRecorder):
+        self.ring = ring
+        self.recorder = recorder
+
+    def write(self, values: np.ndarray) -> None:
+        self.recorder.write(values)
+        self.ring.write(values)
+
+
 class _JsonlRecorder:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -859,6 +871,7 @@ class RxEngine:
         self._last_result = None
         self._debug_log: _JsonlRecorder | None = None
         self._iq_recorder: _KiwiIqRecorder | None = None
+        self._soundcard_recorder: _PcmWaveRecorder | None = None
 
     @property
     def listening(self) -> bool:
@@ -892,6 +905,13 @@ class RxEngine:
                     },
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
+            elif settings.rx_source == "soundcard":
+                self._soundcard_recorder = _PcmWaveRecorder(
+                    prefix.with_suffix(".audio.wav"), codec.mode.geometry.fs
+                )
+                self.station.log(
+                    f"RX soundcard debug: {self._soundcard_recorder.path}"
+                )
         self._stream_decoder = self._new_demodulator(codec.mode)
         self._source_discontinuity.clear()
         self._read_cursor = 0
@@ -933,9 +953,14 @@ class RxEngine:
                 on_error=self._on_error,
             )
         else:
+            audio_sink = (
+                _RecordingSink(self.ring, self._soundcard_recorder)
+                if self._soundcard_recorder is not None
+                else self.ring
+            )
             self._stream, _rate = open_input_stream(
                 settings.audio_input or None,
-                self.ring,
+                audio_sink,
                 codec.mode.geometry.fs,
                 on_error=self._on_error,
                 on_discontinuity=self._on_soundcard_discontinuity,
@@ -971,6 +996,9 @@ class RxEngine:
         if self._debug_log is not None:
             self._debug_log.close()
             self._debug_log = None
+        if self._soundcard_recorder is not None:
+            self._soundcard_recorder.close()
+            self._soundcard_recorder = None
         self._on_ring(None)
         self.state = RxState(listening=False, message="stopped")
         self._on_state(self.state)
