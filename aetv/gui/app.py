@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -20,9 +21,11 @@ from PySide6.QtWidgets import (
 )
 
 from aetv.settings import StationSettings, load_settings, save_settings
+from aetv.config import RELEASE_MODES
 from aetv.hfchannel import CHANNEL_PROFILES
 from aetv.station import Station
 from aetv.gui.rx_panel import ReceivePanel
+from aetv.gui.model_manager import ModelInventoryThread, ModelManagerDialog
 from aetv.gui.settings_dialog import SettingsDialog
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.gui.waterfall import Waterfall
@@ -42,7 +45,10 @@ class _CodecThread(QThread):
 
     def run(self) -> None:
         try:
-            codec = self._station.load_codec()
+            # GUI downloads are an explicit Model Manager action. Keeping
+            # network access out of codec construction makes download timing
+            # visible to the operator.
+            codec = self._station.load_codec(allow_download=False)
             device = str(codec.device)
             self.loaded.emit(f"{codec.mode.name} on {device} ({codec.backend})")
         except Exception as error:
@@ -66,8 +72,9 @@ class MainWindow(QMainWindow):
         self._emulation_active = False
         self._path_planner = None
         self._ft8_calibration = None
+        self._model_inventory_thread: ModelInventoryThread | None = None
         self._build()
-        self._load_codec()
+        QTimer.singleShot(0, self._begin_startup_model_check)
 
     def _build(self) -> None:
         self.rx = ReceivePanel(self.station)
@@ -102,7 +109,7 @@ class MainWindow(QMainWindow):
         self.ptt_lamp = PttLamp()
         self.station_label = QLabel()
         self.rig_label = QLabel("CAT off")
-        self.model_label = QLabel("Loading/downloading model…")
+        self.model_label = QLabel("Checking installed models…")
         self.rx_status = QLabel()
         bar = QStatusBar()
         bar.addWidget(self.ptt_lamp)
@@ -145,10 +152,13 @@ class MainWindow(QMainWindow):
         settings_action = QAction("&Settings…", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
         settings_action.triggered.connect(self.open_settings)
+        models_action = QAction("&Model Manager…", self)
+        models_action.triggered.connect(self.open_model_manager)
         quit_action = QAction("&Quit", self)
         quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(settings_action)
+        file_menu.addAction(models_action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
 
@@ -183,7 +193,7 @@ class MainWindow(QMainWindow):
         help_menu.addAction(about)
 
     def _load_codec(self) -> None:
-        self.model_label.setText("Loading/downloading model…")
+        self.model_label.setText(f"Loading {self.settings.mode} model…")
         self.tx.send_button.setEnabled(False)
         self.rx.start_button.setEnabled(False)
         self._codec_thread = _CodecThread(self.station, self)
@@ -199,6 +209,10 @@ class MainWindow(QMainWindow):
             self._load_codec()
             return
         self.model_label.setText(text)
+        self.model_label.setToolTip(
+            f"Model: {self.station.codec.checkpoint_path}\n"
+            "Install or inspect release models with File > Model Manager."
+        )
         self.tx.send_button.setEnabled(True)
         self.rx.start_button.setEnabled(True)
         self.waterfall.set_mode(self.settings.mode)
@@ -210,15 +224,98 @@ class MainWindow(QMainWindow):
 
     def _on_model_failed(self, message: str) -> None:
         self._resume_rx_after_codec_reload = False
-        self.model_label.setText("No model")
+        self.model_label.setText("No model — open Model Manager")
         self._log(message)
-        QMessageBox.warning(
-            self,
-            "AETV model",
-            message + "\n\nDefault checkpoints download automatically from "
-            "Hugging Face Hub. Check the network connection, or choose a local "
-            "runtime model in Settings.",
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("AETV model")
+        box.setText(message)
+        box.setInformativeText(
+            "Use Model Manager to install a checksum-verified release model, "
+            "or choose a local runtime model in Settings."
         )
+        manage = box.addButton("Open Model Manager…", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is manage:
+            self.open_model_manager()
+
+    def _begin_startup_model_check(self) -> None:
+        explicit_model = self.settings.checkpoint or os.environ.get(
+            "AETV_RUNTIME_MODEL"
+        ) or os.environ.get("AETV_CHECKPOINT")
+        if explicit_model:
+            # An explicit local selection is validated by the codec loader and
+            # must never be replaced by a network download behind the scenes.
+            self._load_codec()
+            return
+        self.model_label.setText("Checking installed models…")
+        self.tx.send_button.setEnabled(False)
+        self.rx.start_button.setEnabled(False)
+        self._model_inventory_thread = ModelInventoryThread(self)
+        self._model_inventory_thread.complete.connect(self._startup_model_check_complete)
+        self._model_inventory_thread.start()
+
+    def _startup_model_check_complete(self, statuses: dict, error_message: str) -> None:
+        self._model_inventory_thread = None
+        if error_message:
+            self._log(f"model inventory failed: {error_message}")
+        if any(status.installed for status in statuses.values()):
+            self._activate_available_model(statuses)
+            return
+        self._show_first_run_model_manager(statuses)
+
+    def _show_first_run_model_manager(self, statuses: dict) -> None:
+        self.model_label.setText("No model installed")
+        dialog = ModelManagerDialog(
+            self.settings.mode,
+            self,
+            statuses=statuses,
+            first_run=True,
+        )
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self._activate_available_model(dialog.statuses)
+        else:
+            self.model_label.setText("No model — File > Model Manager…")
+            self._log("model setup skipped; Send and Receive remain disabled")
+
+    def open_model_manager(self) -> None:
+        dialog = ModelManagerDialog(self.settings.mode, self)
+        dialog.exec()
+        self._activate_available_model(dialog.statuses)
+
+    def _activate_available_model(self, statuses: dict) -> None:
+        available = [
+            mode
+            for mode in RELEASE_MODES
+            if statuses.get(mode) is not None and statuses[mode].installed
+        ]
+        if not available:
+            if self.station.codec is None:
+                self.model_label.setText("No model — File > Model Manager…")
+            return
+        previous_mode = self.settings.mode
+        if self.settings.mode not in available:
+            self.settings.mode = available[0]
+            self._log(
+                f"{previous_mode} has no installed model; using {self.settings.mode}"
+            )
+        codec_matches = (
+            self.station.codec is not None
+            and self.station.codec.mode.name == self.settings.mode
+        )
+        if not codec_matches or previous_mode != self.settings.mode:
+            # A failed explicit selection must not mask a newly installed
+            # release model, and checkpoints cannot be reused across modes.
+            self.settings.checkpoint = ""
+        save_settings(self.settings)
+        self.station.settings = self.settings
+        self.rx.sync_from_config()
+        self.tx.sync_from_config()
+        self.waterfall.set_mode(self.settings.mode)
+        self._refresh_station_label()
+        if not codec_matches:
+            self._load_codec()
 
     def open_settings(self) -> None:
         previous_codec_config = (
@@ -428,8 +525,14 @@ def main(argv: list[str] | None = None) -> int:
             app.exit(code)
 
         def check_codec() -> None:
+            # Startup now inventories checksum-valid models before constructing
+            # a codec. Do not mistake that intentional first phase for failure.
+            if window._model_inventory_thread is not None:
+                return
             thread = window._codec_thread
-            if thread is not None and thread.isRunning():
+            if thread is None:
+                return
+            if thread.isRunning():
                 return
             finish(0 if window.station.codec is not None else 1)
 

@@ -198,12 +198,13 @@ class Station:
             mode=self.settings.mode,
         )
 
-    def load_codec(self) -> AETVCodec:
+    def load_codec(self, *, allow_download: bool = True) -> AETVCodec:
         device = self.settings.torch_device or None
         codec = AETVCodec(
             checkpoint=self.settings.checkpoint or None,
             device=device,
             mode=self.settings.mode,
+            allow_download=allow_download,
         )
         with self.codec_lock:
             self.codec = codec

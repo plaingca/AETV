@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import threading
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import numpy as np
@@ -72,6 +73,20 @@ _DOWNLOAD_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
+class ReleaseModelStatus:
+    """Result of checking one checksum-pinned release model on disk."""
+
+    mode: str
+    installed: bool
+    path: Path | None = None
+    backend: str = ""
+    problem: str = ""
+
+
+DownloadProgress = Callable[[int, int, str], None]
+
+
+@dataclass(frozen=True)
 class RuntimeDevice:
     """Small backend-neutral replacement for ``torch.device`` in the GUI."""
 
@@ -91,6 +106,103 @@ def model_cache_dir() -> Path:
         return root / "AETV" / "models"
     root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
     return root / "aetv" / "models"
+
+
+def runtime_bundle_bytes(mode: str) -> int:
+    """Return the total download size of a mode's ONNX runtime bundle."""
+    return sum(int(item["bytes"]) for item in RELEASE_RUNTIME_FILES[mode].values())
+
+
+def _model_roots() -> list[Path]:
+    """Model search order shared by inventory and normal codec resolution."""
+    candidates = [
+        model_cache_dir(),
+        Path("models"),
+        Path(__file__).resolve().parent.parent / "models",
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        key = os.path.normcase(str(expanded.absolute()))
+        if key not in seen:
+            seen.add(key)
+            roots.append(expanded)
+    return roots
+
+
+def _valid_release_runtime(mode: str) -> tuple[Path | None, bool]:
+    """Return a verified manifest and whether any corrupt/incomplete files exist."""
+    files = RELEASE_RUNTIME_FILES[mode]
+    manifest_name = next(name for name in files if name.endswith(".runtime.json"))
+    found_invalid = False
+    for root in _model_roots():
+        if not any((root / name).exists() for name in files):
+            continue
+        valid = True
+        for filename, expected in files.items():
+            path = root / filename
+            if (
+                not path.is_file()
+                or path.stat().st_size != expected["bytes"]
+                or sha256_file(path) != expected["sha256"]
+            ):
+                valid = False
+                found_invalid = True
+                break
+        if valid:
+            return (root / manifest_name).resolve(), found_invalid
+    return None, found_invalid
+
+
+def _valid_release_checkpoint(mode: str) -> tuple[Path | None, bool]:
+    """Return a verified native checkpoint when this installation can use Torch."""
+    if importlib.util.find_spec("torch") is None:
+        return None, False
+    release = RELEASE_CHECKPOINTS[mode]
+    found_invalid = False
+    for root in _model_roots():
+        path = root / release["filename"]
+        if not path.exists():
+            continue
+        if (
+            path.is_file()
+            and path.stat().st_size == release["bytes"]
+            and sha256_file(path) == release["sha256"]
+        ):
+            return path.resolve(), found_invalid
+        found_invalid = True
+    return None, found_invalid
+
+
+def inspect_release_model(mode: str) -> ReleaseModelStatus:
+    """Check whether a mode has a complete, usable release model installed.
+
+    ONNX is preferred because it is the backend shipped in portable builds.
+    Source installations may also use a checksum-valid native checkpoint when
+    PyTorch is available.
+    """
+    if mode not in RELEASE_RUNTIME_FILES or mode not in RELEASE_CHECKPOINTS:
+        return ReleaseModelStatus(mode, False, problem="no release model is published")
+    runtime, invalid_runtime = _valid_release_runtime(mode)
+    if runtime is not None:
+        return ReleaseModelStatus(mode, True, runtime, "ONNX Runtime")
+    checkpoint, invalid_checkpoint = _valid_release_checkpoint(mode)
+    if checkpoint is not None:
+        return ReleaseModelStatus(mode, True, checkpoint, "PyTorch")
+    problem = (
+        "incomplete or failed checksum"
+        if invalid_runtime or invalid_checkpoint
+        else "not installed"
+    )
+    return ReleaseModelStatus(mode, False, problem=problem)
+
+
+def inspect_release_models(
+    modes: tuple[str, ...] | list[str],
+) -> dict[str, ReleaseModelStatus]:
+    """Inventory several release modes without making a network request."""
+    return {mode: inspect_release_model(mode) for mode in modes}
 
 
 def download_default_checkpoint(
@@ -153,6 +265,7 @@ def download_runtime_bundle(
     mode: str,
     *,
     destination: Path | None = None,
+    progress: DownloadProgress | None = None,
 ) -> Path:
     """Download and verify one mode's ONNX manifest and graph pair."""
     try:
@@ -161,9 +274,13 @@ def download_runtime_bundle(
         raise FileNotFoundError(f"no downloadable runtime model is published for {mode}") from exc
     target_dir = Path(destination or model_cache_dir()).expanduser()
     manifest_name = next(name for name in files if name.endswith(".runtime.json"))
+    total_bytes = runtime_bundle_bytes(mode)
 
     with _DOWNLOAD_LOCK:
         target_dir.mkdir(parents=True, exist_ok=True)
+        completed_bytes = 0
+        if progress is not None:
+            progress(completed_bytes, total_bytes, "Preparing download")
         for filename, expected in files.items():
             target = target_dir / filename
             if (
@@ -171,6 +288,9 @@ def download_runtime_bundle(
                 and target.stat().st_size == expected["bytes"]
                 and sha256_file(target) == expected["sha256"]
             ):
+                completed_bytes += int(expected["bytes"])
+                if progress is not None:
+                    progress(completed_bytes, total_bytes, f"Verified {filename}")
                 continue
             temporary = target.with_name(
                 f".{target.name}.{os.getpid()}.{threading.get_ident()}.download"
@@ -190,6 +310,12 @@ def download_runtime_bundle(
                         output.write(chunk)
                         digest.update(chunk)
                         downloaded += len(chunk)
+                        if progress is not None:
+                            progress(
+                                completed_bytes + downloaded,
+                                total_bytes,
+                                f"Downloading {filename}",
+                            )
                 if downloaded != expected["bytes"]:
                     raise RuntimeError(
                         f"downloaded {downloaded} bytes for {filename}; "
@@ -202,6 +328,9 @@ def download_runtime_bundle(
                         f"expected {expected['sha256']}"
                     )
                 os.replace(temporary, target)
+                completed_bytes += downloaded
+                if progress is not None:
+                    progress(completed_bytes, total_bytes, f"Verified {filename}")
             except (OSError, urllib.error.URLError) as exc:
                 raise RuntimeError(
                     f"could not download the {mode} runtime model from {HF_MODEL_REPO}: {exc}"
@@ -214,12 +343,14 @@ def download_runtime_bundle(
 def resolve_checkpoint(
     path: str | Path | None = None,
     mode: str | None = None,
+    *,
+    allow_download: bool | None = None,
 ) -> Path:
     """Return the checkpoint path, or raise with install instructions."""
     requested_mode = mode or DEFAULT_MODE
     if path:
         candidates = [Path(path).expanduser()]
-        allow_download = False
+        may_download = False
     else:
         candidates = []
         if configured := os.environ.get("AETV_CHECKPOINT"):
@@ -232,11 +363,15 @@ def resolve_checkpoint(
                 model_cache_dir() / preferred.name,
             )
         )
-        allow_download = not bool(os.environ.get("AETV_OFFLINE"))
+        may_download = (
+            not bool(os.environ.get("AETV_OFFLINE"))
+            if allow_download is None
+            else allow_download and not bool(os.environ.get("AETV_OFFLINE"))
+        )
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
-    if allow_download:
+    if may_download:
         return download_default_checkpoint(requested_mode)
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(
@@ -249,11 +384,11 @@ def resolve_checkpoint(
 def resolve_runtime_bundle(
     path: str | Path | None = None,
     mode: str | None = None,
+    *,
+    allow_download: bool = True,
 ) -> Path | None:
     """Find an exported ONNX runtime manifest without importing PyTorch."""
     requested_mode = mode or DEFAULT_MODE
-    preferred = MODE_DEFAULT_CHECKPOINTS.get(requested_mode, DEFAULT_CHECKPOINT)
-    stem = preferred.stem
     candidates: list[Path] = []
     if path:
         selected = Path(path).expanduser()
@@ -267,17 +402,17 @@ def resolve_runtime_bundle(
     else:
         if configured := os.environ.get("AETV_RUNTIME_MODEL"):
             candidates.append(Path(configured).expanduser())
-        roots = [Path("models"), Path(__file__).resolve().parent.parent / "models"]
-        if configured_dir := os.environ.get("AETV_MODEL_DIR"):
-            roots.insert(0, Path(configured_dir).expanduser())
-        candidates.extend(root / f"{stem}.runtime.json" for root in roots)
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
     if path:
         searched = ", ".join(str(candidate) for candidate in candidates)
         raise FileNotFoundError(f"AETV ONNX runtime manifest not found (searched: {searched})")
-    if not os.environ.get("AETV_OFFLINE"):
+    if requested_mode in RELEASE_RUNTIME_FILES:
+        verified, _found_invalid = _valid_release_runtime(requested_mode)
+        if verified is not None:
+            return verified
+    if allow_download and not os.environ.get("AETV_OFFLINE"):
         return download_runtime_bundle(requested_mode)
     return None
 
@@ -302,12 +437,18 @@ class AETVCodec:
         checkpoint: str | Path | None = None,
         device: str | Any | None = None,
         mode: str | None = None,
+        *,
+        allow_download: bool = True,
     ):
-        runtime_manifest = resolve_runtime_bundle(checkpoint, mode=mode)
+        runtime_manifest = resolve_runtime_bundle(
+            checkpoint, mode=mode, allow_download=allow_download
+        )
         if runtime_manifest is not None:
             self._init_onnx(runtime_manifest, device=device, requested_mode=mode)
             return
-        self._init_torch(checkpoint, device=device, mode=mode)
+        self._init_torch(
+            checkpoint, device=device, mode=mode, allow_download=allow_download
+        )
 
     def _init_onnx(
         self,
@@ -373,6 +514,7 @@ class AETVCodec:
         *,
         device: str | Any | None,
         mode: str | None,
+        allow_download: bool,
     ) -> None:
         try:
             import torch
@@ -396,7 +538,9 @@ class AETVCodec:
             if logical_threads > 0 and torch.get_num_threads() != logical_threads:
                 torch.set_num_threads(logical_threads)
             self.cpu_threads = torch.get_num_threads()
-        self.checkpoint_path = resolve_checkpoint(checkpoint, mode=mode)
+        self.checkpoint_path = resolve_checkpoint(
+            checkpoint, mode=mode, allow_download=allow_download
+        )
         payload = torch.load(self.checkpoint_path, map_location="cpu", weights_only=False)
         args = payload.get("args", {}) or {}
         mode_name = mode or payload.get("mode") or args.get("mode") or DEFAULT_MODE

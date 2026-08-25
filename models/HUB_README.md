@@ -13,8 +13,8 @@ tags:
 
 Training checkpoints and ONNX runtime graphs for [AETV](https://github.com/plaingca/AETV), a learned
 video codec and OFDM modem for challenging amateur-radio HF/VHF channels.
-The application downloads the selected mode's default runtime bundle from this
-repository automatically and verifies its byte count and SHA-256 before use.
+The application's Model Manager downloads operator-selected runtime bundles
+from this repository and verifies each byte count and SHA-256 before use.
 
 ## Defaults
 

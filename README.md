@@ -32,13 +32,28 @@ must select the same mode.
 
 ## See it over the channel
 
-These are held-out evaluation clips from the validated Wide 8 kHz receiver
-model. Each grid shows the source, clean loopback, 18/12/6/0 dB paths, and two
-multipath fading profiles. Click a frame to play the one-second clip.
+These one-second, held-out evaluation grids come from the checksum-pinned
+release checkpoints. They loop automatically on GitHub; click one to play the
+higher-quality MP4.
+
+### Standard channel
+
+The `v8-hf3k-face-gan` grids show the source, clean loopback, 18/12/6/0 dB
+paths, good and poor multipath, and a measured 40 m-like path at 192×108 and
+6 fps.
+
+| Interview motion | Presenter tracking | Canopy detail |
+|---|---|---|
+| [![Standard-channel interview evaluation](docs/demos/standard-interview-motion.gif)](docs/demos/standard-interview-motion.mp4) | [![Standard-channel presenter evaluation](docs/demos/standard-presenter-motion.gif)](docs/demos/standard-presenter-motion.mp4) | [![Standard-channel canopy evaluation](docs/demos/standard-canopy-motion.gif)](docs/demos/standard-canopy-motion.mp4) |
+
+### Wide 8 kHz
+
+The `v8-flex8k-ota-rxfix` grids show the source, clean loopback, 18/12/6/0 dB
+paths, and two multipath fading profiles at 256×144 and 12 fps.
 
 | Moving water | Forest tracking | Fine detail |
 |---|---|---|
-| [![Ocean evaluation](docs/demos/ocean-motion.png)](docs/demos/ocean-motion.mp4) | [![Forest evaluation](docs/demos/forest-motion.png)](docs/demos/forest-motion.mp4) | [![Flower evaluation](docs/demos/flower-motion.png)](docs/demos/flower-motion.mp4) |
+| [![Wide-channel ocean evaluation](docs/demos/ocean-motion.gif)](docs/demos/ocean-motion.mp4) | [![Wide-channel forest evaluation](docs/demos/forest-motion.gif)](docs/demos/forest-motion.mp4) | [![Wide-channel flower evaluation](docs/demos/flower-motion.gif)](docs/demos/flower-motion.mp4) |
 
 The Wide 8 kHz model was also exercised over a 40 m FlexRadio path. A 71-GOP
 off-air receiver-validation sweep and the full measurement notes are in
@@ -52,10 +67,14 @@ off-air receiver-validation sweep and the full measurement notes are in
 3. Run `AETV.exe`.
 
 The portable builds include Python and the app libraries, but no model weights
-or PyTorch. On first use of a mode, AETV downloads that mode's checksum-pinned
-ONNX graphs from [AETV/AETV on Hugging Face](https://huggingface.co/AETV/AETV)
-and caches them per user. Each mode is about 206 MiB. Windows may show a
-SmartScreen prompt until release binaries are code-signed.
+or PyTorch. When neither release mode has a valid model, the first launch opens
+**Model Manager** and asks which checksum-pinned ONNX bundles to download from
+[AETV/AETV on Hugging Face](https://huggingface.co/AETV/AETV). Each selected mode
+is about 206 MiB and shows download progress. Open **File > Model Manager** later
+to install or verify the other mode. Models are cached in
+`%LOCALAPPDATA%\AETV\models` on Windows and `$XDG_CACHE_HOME/aetv/models` (or
+`~/.cache/aetv/models`) on Linux. `AETV_MODEL_DIR` overrides that location.
+Windows may show a SmartScreen prompt until release binaries are code-signed.
 
 FlexRadio control, serial PTT, VOX/manual PTT, soundcards, and Hamlib direct rig
 control are self-contained. Windows packages include the official dynamically
@@ -131,9 +150,11 @@ uv run aetv-gui
 ```
 
 Source development keeps PyTorch available for native checkpoints and training.
-The GUI prefers the same ONNX runtime downloads as the portable packages and
-verifies every component's size and SHA-256. Set `AETV_OFFLINE=1` to forbid
-network model downloads or `AETV_MODEL_DIR` to choose the cache location.
+The GUI prefers the same ONNX runtime bundles as the portable packages and
+verifies every component's size and SHA-256 before treating a mode as installed.
+Set `AETV_OFFLINE=1` to disable Model Manager downloads or `AETV_MODEL_DIR` to
+choose the cache location. Command-line tools retain automatic default-model
+download behavior unless offline mode is enabled.
 
 The release builders use two isolated environments: a temporary CPU-only Torch
 environment exports each checkpoint to fixed-shape ONNX encoder/decoder graphs,

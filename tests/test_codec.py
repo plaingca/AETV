@@ -16,6 +16,7 @@ from aetv.codec import (
     RELEASE_CHECKPOINTS,
     download_default_checkpoint,
     download_runtime_bundle,
+    inspect_release_model,
     resolve_checkpoint,
     resolve_runtime_bundle,
 )
@@ -89,12 +90,76 @@ def test_runtime_bundle_downloads_every_component_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(codec_module.urllib.request, "urlopen", fake_urlopen)
     target = tmp_path / "runtime"
-    manifest = download_runtime_bundle("TEST", destination=target)
+    progress = []
+    manifest = download_runtime_bundle(
+        "TEST", destination=target, progress=lambda done, total, detail: progress.append(
+            (done, total, detail)
+        )
+    )
     assert manifest == (target / "test.runtime.json").resolve()
     assert {path.name: path.read_bytes() for path in target.iterdir()} == payloads
     assert len(calls) == 3
+    assert progress[-1][0] == progress[-1][1] == sum(map(len, payloads.values()))
     assert download_runtime_bundle("TEST", destination=target) == manifest
     assert len(calls) == 3
+
+
+def test_release_model_inventory_requires_every_checksum(tmp_path, monkeypatch):
+    payloads = {
+        "test.runtime.json": b'{"format":"aetv-onnx-v1"}',
+        "test.encoder.onnx": b"encoder",
+        "test.decoder.onnx": b"decoder",
+    }
+    monkeypatch.setitem(
+        codec_module.RELEASE_RUNTIME_FILES,
+        "TEST",
+        {
+            name: {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in payloads.items()
+        },
+    )
+    monkeypatch.setitem(
+        codec_module.RELEASE_CHECKPOINTS,
+        "TEST",
+        {"filename": "test.pt", "bytes": 1, "sha256": "unused"},
+    )
+    monkeypatch.setattr(codec_module, "model_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(codec_module.importlib.util, "find_spec", lambda _name: None)
+    for name, data in payloads.items():
+        (tmp_path / name).write_bytes(data)
+
+    status = inspect_release_model("TEST")
+    assert status.installed
+    assert status.backend == "ONNX Runtime"
+    assert status.path == (tmp_path / "test.runtime.json").resolve()
+
+    (tmp_path / "test.decoder.onnx").write_bytes(b"corrupt")
+    status = inspect_release_model("TEST")
+    assert not status.installed
+    assert "checksum" in status.problem
+
+
+def test_runtime_resolution_searches_the_default_user_cache(tmp_path, monkeypatch):
+    payloads = {
+        "v8-hf3k-face-gan.runtime.json": b"{}",
+        "v8-hf3k-face-gan.encoder.onnx": b"encoder",
+        "v8-hf3k-face-gan.decoder.onnx": b"decoder",
+    }
+    monkeypatch.setitem(
+        codec_module.RELEASE_RUNTIME_FILES,
+        "V8",
+        {
+            name: {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in payloads.items()
+        },
+    )
+    monkeypatch.setattr(codec_module, "model_cache_dir", lambda: tmp_path)
+    for name, data in payloads.items():
+        (tmp_path / name).write_bytes(data)
+
+    assert resolve_runtime_bundle(mode="V8", allow_download=False) == (
+        tmp_path / "v8-hf3k-face-gan.runtime.json"
+    ).resolve()
 
 
 def test_explicit_missing_checkpoint_is_never_downloaded(tmp_path, monkeypatch):

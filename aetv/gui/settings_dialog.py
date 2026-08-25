@@ -221,7 +221,9 @@ class SettingsDialog(QDialog):
             self.mode.addItem(RELEASE_MODE_LABELS[name], name)
         self.mode.setCurrentIndex(max(0, self.mode.findData(self._settings.mode)))
         self.checkpoint = QLineEdit(self._settings.checkpoint)
-        self.checkpoint.setPlaceholderText("selected mode's default checkpoint")
+        self.checkpoint.setPlaceholderText(
+            "optional local model (release models: File > Model Manager)"
+        )
         browse = QPushButton("File…")
         browse.clicked.connect(self._browse_checkpoint)
         ck = QWidget()
