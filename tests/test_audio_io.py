@@ -152,7 +152,6 @@ def test_packaged_audio_operations_use_console_helper(monkeypatch, tmp_path):
     helper.touch()
     monkeypatch.setattr(audio_io.sys, "frozen", True, raising=False)
     monkeypatch.setattr(audio_io.sys, "executable", str(app))
-    monkeypatch.setattr(audio_io.os, "name", "nt")
 
     assert audio_io._audio_worker_args("capture", 8000, "wasapi:mic") == [
         str(helper),

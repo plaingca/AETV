@@ -372,7 +372,7 @@ def _play_chunk_stream_direct(
 def _audio_helper_command() -> list[str]:
     """Return the source or packaged executable for isolated Windows audio."""
     if getattr(sys, "frozen", False):
-        suffix = ".exe" if os.name == "nt" else ""
+        suffix = ".exe" if str(sys.executable).lower().endswith(".exe") else ""
         helper = Path(sys.executable).resolve().parent / "audio-helper" / f"AETV-Audio{suffix}"
         if not helper.is_file():
             raise AudioUnavailable(f"packaged audio helper is missing: {helper}")

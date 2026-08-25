@@ -1,12 +1,16 @@
 param(
     [ValidateSet("cpu", "gpu", "cuda")]
     [string]$Runtime = "cpu",
+    [switch]$TestDirectML,
     [switch]$NoZip
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $PackageRuntime = if ($Runtime -eq "cuda") { "gpu" } else { $Runtime }
+if ($TestDirectML -and $PackageRuntime -ne "gpu") {
+    throw "-TestDirectML requires -Runtime gpu"
+}
 $BuildRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot ".build\windows-$PackageRuntime"))
 $DistRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "dist\windows-$PackageRuntime"))
 if (-not $BuildRoot.StartsWith($RepoRoot) -or -not $DistRoot.StartsWith($RepoRoot)) {
@@ -87,9 +91,14 @@ try {
     $env:LOCALAPPDATA = Join-Path $BuildRoot "smoke-cache"
     Push-Location $AppDir
     try {
-        $Smoke = & ".\AETV-Benchmark.exe" --mode V8 --device cpu --warmup 0 --repeats 1
+        $BenchmarkDevice = if ($TestDirectML) { "dml" } else { "cpu" }
+        $Smoke = & ".\AETV-Benchmark.exe" --mode V8 --device $BenchmarkDevice --warmup 0 --repeats 1
         if ($LASTEXITCODE -ne 0) {
             throw "Packaged benchmark smoke test failed"
+        }
+        $SmokeResult = ($Smoke -join "`n") | ConvertFrom-Json
+        if ($TestDirectML -and $SmokeResult.device -ne "DirectML") {
+            throw "Packaged GPU benchmark did not select DirectML"
         }
         $GuiSmoke = Start-Process -FilePath ".\AETV.exe" -ArgumentList "--smoke-test" `
             -PassThru -WindowStyle Hidden
