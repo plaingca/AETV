@@ -79,6 +79,7 @@ cp "$repo_root/README.md" "$repo_root/LICENSE" "$repo_root/NOTICE" "$app_dir/"
   cd "$app_dir"
   AETV_OFFLINE=1 ./AETV-Benchmark \
     --mode V8 --device cpu --warmup 0 --repeats 1 --json build-smoke.json
+  QT_QPA_PLATFORM=offscreen AETV_OFFLINE=1 ./AETV --smoke-test
 )
 
 packaged_models="$app_dir/_internal/models"

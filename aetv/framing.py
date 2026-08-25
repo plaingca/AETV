@@ -7,7 +7,11 @@ Variant N (1,472 latents/GOP) and Variant W (2,816 latents/GOP).
 from __future__ import annotations
 
 import numpy as np
-import torch
+
+try:
+    import torch
+except ModuleNotFoundError:  # Portable operator builds intentionally omit PyTorch.
+    torch = None
 
 from .config import (
     BANDS,
@@ -55,7 +59,7 @@ def pack_gop_symbols(
     
     Returns array of shape (32, NC) complex64.
     """
-    is_torch = isinstance(latents, torch.Tensor)
+    is_torch = torch is not None and isinstance(latents, torch.Tensor)
     if is_torch:
         latents = latents.detach().cpu().numpy()
         beacon_chips = beacon_chips.detach().cpu().numpy()

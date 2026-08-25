@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -404,14 +404,37 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
+    smoke_test = "--smoke-test" in args
+    if smoke_test:
+        args.remove("--smoke-test")
     app = QApplication(args)
     app.setApplicationName("AETV")
     app.setApplicationDisplayName("AETV")
     app.setOrganizationName("AETV")
     if APP_ICON.is_file():
         app.setWindowIcon(QIcon(str(APP_ICON)))
-    window = MainWindow()
+    window = MainWindow(StationSettings() if smoke_test else None)
     window.show()
+    if smoke_test:
+        result = {"code": 2}
+
+        def finish(code: int) -> None:
+            result["code"] = code
+            window.hide()
+            app.exit(code)
+
+        def check_codec() -> None:
+            thread = window._codec_thread
+            if thread is not None and thread.isRunning():
+                return
+            finish(0 if window.station.codec is not None else 1)
+
+        poll = QTimer(window)
+        poll.timeout.connect(check_codec)
+        poll.start(100)
+        QTimer.singleShot(120_000, lambda: finish(2))
+        app.exec()
+        return result["code"]
     return app.exec()
 
 

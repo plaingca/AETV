@@ -69,7 +69,7 @@ CUDA/cuDNN training stack, and it still has a CPU fallback.
 
 Linux, Windows CPU, and Windows GPU packages are built and smoke-tested on
 GitHub Actions workers. Run the **Release packages** workflow manually for
-short-lived downloadable artifacts; version tags such as `v0.1.0` publish the
+short-lived downloadable artifacts; version tags such as `v0.1.1` publish the
 files to GitHub Releases.
 
 ## What hardware works?

@@ -122,6 +122,29 @@ def test_runtime_bundle_can_be_selected_without_pytorch(tmp_path, monkeypatch):
     assert result.returncode == 0, result.stderr
 
 
+def test_station_runtime_imports_without_pytorch():
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def import_without_torch(name, *args, **kwargs):
+    if name == "torch" or name.startswith("torch."):
+        raise ModuleNotFoundError("No module named 'torch'")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_torch
+import aetv.station
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.skipif(
     not WIDE_CHECKPOINT.is_file(), reason="models/v8-flex8k-ota-rxfix.pt not installed"
 )
