@@ -8,12 +8,10 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Test-Path ".\.venv")) {
-    Write-Host "Creating the station environment (PyTorch, Qt, sounddevice)..."
+    Write-Host "Creating the station environment (Qt, ONNX Runtime, sounddevice)..."
     uv sync --extra gui
 }
 
-if (-not (Test-Path ".\models\v7-flex8k.pt")) {
-    Write-Host "Missing models\v7-flex8k.pt -- the GUI will start but Send/Receive stay disabled until the checkpoint is copied. See models\README.md."
-}
+Write-Host "Release models and their per-user cache are shown under File > Model Manager."
 
 uv run aetv gui
