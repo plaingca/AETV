@@ -65,8 +65,12 @@ Wide 8 kHz or for extra processing headroom; it still falls back to CPU when a
 compatible NVIDIA GPU is unavailable.
 
 Linux, Windows CPU, and Windows CUDA packages are built and smoke-tested on
-GitHub Actions workers. Pushes to `main` retain downloadable workflow artifacts;
-version tags such as `v0.1.0` publish the same files to GitHub Releases.
+GitHub Actions workers. Run the **Release packages** workflow manually for
+short-lived downloadable artifacts; version tags such as `v0.1.0` publish the
+files to GitHub Releases. Because GitHub limits each Release asset to 2 GiB, the
+larger CUDA zip is published in numbered parts with PowerShell reassembly
+instructions, checksums for the downloaded parts, and a checksum for the
+reconstructed zip.
 
 ## What hardware works?
 
