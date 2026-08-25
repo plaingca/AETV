@@ -15,17 +15,6 @@ case "$dist_root" in
 esac
 
 mkdir -p "$build_root"
-uv venv "$build_root/export-venv" --python 3.12 --clear
-export_python="$build_root/export-venv/bin/python"
-uv pip install --python "$export_python" torch --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python "$export_python" onnx
-"$export_python" "$repo_root/scripts/fetch_release_models.py" --output "$repo_root/models"
-runtime_models="$build_root/models"
-"$export_python" "$repo_root/scripts/export_onnx_runtime.py" \
-  "$repo_root/models/v8-hf3k-face-gan.pt" \
-  "$repo_root/models/v8-flex8k-ota-rxfix.pt" \
-  --output "$runtime_models"
-
 hamlib_dir="$build_root/hamlib"
 mkdir -p "$hamlib_dir"
 cp "$(command -v rigctl)" "$hamlib_dir/rigctl"
@@ -42,6 +31,8 @@ cp /usr/share/doc/libhamlib4t64/copyright "$hamlib_dir/HAMLIB-COPYRIGHT.txt"
 uv venv "$build_root/runtime-venv" --python 3.12 --clear
 python_bin="$build_root/runtime-venv/bin/python"
 uv pip install --python "$python_bin" "$repo_root[gui]" pyinstaller
+runtime_models="$build_root/models"
+"$python_bin" "$repo_root/scripts/fetch_release_runtime.py" --output "$runtime_models"
 
 rm -rf "$dist_root"
 mkdir -p "$dist_root"
@@ -77,9 +68,11 @@ cp "$repo_root/README.md" "$repo_root/LICENSE" "$repo_root/NOTICE" "$app_dir/"
 
 (
   cd "$app_dir"
-  AETV_OFFLINE=1 ./AETV-Benchmark \
+  XDG_CACHE_HOME="$build_root/smoke-cache" \
+    AETV_OFFLINE=1 ./AETV-Benchmark \
     --mode V8 --device cpu --warmup 0 --repeats 1 --json build-smoke.json
-  XDG_CONFIG_HOME="$build_root/smoke-config" \
+  XDG_CACHE_HOME="$build_root/smoke-cache" \
+    XDG_CONFIG_HOME="$build_root/smoke-config" \
     QT_QPA_PLATFORM=offscreen AETV_OFFLINE=1 ./AETV --smoke-test
 )
 

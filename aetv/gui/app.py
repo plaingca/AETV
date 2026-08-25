@@ -88,6 +88,17 @@ def _rx_runtime_config(settings: StationSettings) -> tuple:
     )
 
 
+def _smoke_codec_result(window) -> int | None:
+    """Return only after Qt has delivered a definitive codec outcome."""
+    if window._model_inventory_thread is not None:
+        return None
+    if window.station.codec is not None:
+        return 0
+    if window._last_codec_error:
+        return 1
+    return None
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: StationSettings | None = None, parent=None):
         super().__init__(parent)
@@ -107,6 +118,8 @@ class MainWindow(QMainWindow):
         self._path_planner = None
         self._ft8_calibration = None
         self._model_inventory_thread: ModelInventoryThread | None = None
+        self._last_codec_error = ""
+        self._smoke_test = False
         self._build()
         QTimer.singleShot(0, self._begin_startup_model_check)
 
@@ -230,6 +243,7 @@ class MainWindow(QMainWindow):
 
     def _load_codec(self) -> None:
         config = _codec_config(self.settings)
+        self._last_codec_error = ""
         self.model_label.setText(f"Loading {config[0]} model…")
         self.tx.send_button.setEnabled(False)
         self.rx.start_button.setEnabled(False)
@@ -257,6 +271,7 @@ class MainWindow(QMainWindow):
                 f"discarding stale codec load ({text}); loading {self.settings.mode}"
             )
             return
+        self._last_codec_error = ""
         with self.station.codec_lock:
             self.station.codec = codec
         self.model_label.setText(text)
@@ -281,10 +296,13 @@ class MainWindow(QMainWindow):
         if thread.config != _codec_config(self.settings):
             self._log(f"discarding stale codec error: {message}")
             return
+        self._last_codec_error = message
         self._resume_rx_after_codec_reload = False
         self.model_label.setText("No model — open Model Manager")
         self.tx.mode.setEnabled(True)
         self._log(message)
+        if self._smoke_test:
+            return
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("AETV model")
@@ -599,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     if APP_ICON.is_file():
         app.setWindowIcon(QIcon(str(APP_ICON)))
     window = MainWindow(StationSettings() if smoke_test else None)
+    window._smoke_test = smoke_test
     window.show()
     if smoke_test:
         result = {"code": 2, "finished": False}
@@ -615,14 +634,9 @@ def main(argv: list[str] | None = None) -> int:
         def check_codec() -> None:
             # Startup now inventories checksum-valid models before constructing
             # a codec. Do not mistake that intentional first phase for failure.
-            if window._model_inventory_thread is not None:
-                return
-            thread = window._codec_thread
-            if thread is None:
-                return
-            if thread.isRunning():
-                return
-            finish(0 if window.station.codec is not None else 1)
+            result_code = _smoke_codec_result(window)
+            if result_code is not None:
+                finish(result_code)
 
         poll = QTimer(window)
         poll.timeout.connect(check_codec)

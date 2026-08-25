@@ -9,7 +9,7 @@ import queue
 import struct
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from math import gcd
 from pathlib import Path
 
@@ -160,19 +160,17 @@ def list_audio_devices(kind: str) -> list[DeviceInfo]:
     """
     if os.name != "nt":
         return _list_audio_devices_direct(kind)
-    probe = "_list_wasapi_devices_direct"
     if os.environ.get("AETV_AUDIO_PROBE_CHILD") == "1":
         return _list_wasapi_devices_direct(kind)
-    code = (
-        "import json; from dataclasses import asdict; "
-        f"from aetv.audio_io import {probe}; "
-        f"print(json.dumps([asdict(x) for x in {probe}({kind!r})]))"
-    )
     env = os.environ.copy()
     env["AETV_AUDIO_PROBE_CHILD"] = "1"
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", code], capture_output=True, text=True, timeout=12, env=env
+            [*_audio_helper_command(), "--audio-probe", kind],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            env=env,
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             return []
@@ -371,11 +369,20 @@ def _play_chunk_stream_direct(
     return not (should_stop is not None and should_stop())
 
 
+def _audio_helper_command() -> list[str]:
+    """Return the source or packaged executable for isolated Windows audio."""
+    if getattr(sys, "frozen", False):
+        suffix = ".exe" if os.name == "nt" else ""
+        helper = Path(sys.executable).resolve().parent / "audio-helper" / f"AETV-Audio{suffix}"
+        if not helper.is_file():
+            raise AudioUnavailable(f"packaged audio helper is missing: {helper}")
+        return [str(helper)]
+    return [sys.executable, "-m", "aetv.audio_io"]
+
+
 def _audio_worker_args(operation: str, rate: int, device) -> list[str]:
     return [
-        sys.executable,
-        "-m",
-        "aetv.audio_io",
+        *_audio_helper_command(),
         "--audio-worker",
         operation,
         str(int(rate)),
@@ -902,6 +909,14 @@ def _downmix_wasapi_capture(samples: np.ndarray) -> np.ndarray:
 
 
 def _audio_worker_main(args: list[str]) -> int:
+    if len(args) == 2 and args[0] == "--audio-probe":
+        try:
+            devices = _list_wasapi_devices_direct(args[1])
+            print(json.dumps([asdict(device) for device in devices]), flush=True)
+            return 0
+        except Exception as error:
+            print(f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)
+            return 1
     if len(args) != 4 or args[0] != "--audio-worker":
         return 2
     operation, rate_text, device_text = args[1:]

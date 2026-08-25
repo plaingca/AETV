@@ -13,29 +13,7 @@ if (-not $BuildRoot.StartsWith($RepoRoot) -or -not $DistRoot.StartsWith($RepoRoo
     throw "Refusing to build outside the repository"
 }
 
-$TrainingModels = @(
-    (Join-Path $RepoRoot "models\v8-hf3k-face-gan.pt"),
-    (Join-Path $RepoRoot "models\v8-flex8k-ota-rxfix.pt")
-)
-
 New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
-uv venv (Join-Path $BuildRoot "export-venv") --python 3.12 --clear
-$ExportPython = Join-Path $BuildRoot "export-venv\Scripts\python.exe"
-uv pip install --python $ExportPython torch --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python $ExportPython onnx
-& $ExportPython (Join-Path $RepoRoot "scripts\fetch_release_models.py") `
-    --output (Join-Path $RepoRoot "models")
-if ($LASTEXITCODE -ne 0) { throw "Release model download failed" }
-foreach ($Model in $TrainingModels) {
-    if (-not (Test-Path -LiteralPath $Model -PathType Leaf)) {
-        throw "Missing release model after verified download: $Model"
-    }
-}
-$RuntimeModelDir = Join-Path $BuildRoot "models"
-& $ExportPython (Join-Path $RepoRoot "scripts\export_onnx_runtime.py") `
-    @TrainingModels --output $RuntimeModelDir
-if ($LASTEXITCODE -ne 0) { throw "ONNX runtime model export failed" }
-$RuntimeModels = Get-ChildItem -LiteralPath $RuntimeModelDir -File
 $HamlibDir = Join-Path $BuildRoot "hamlib"
 & (Join-Path $RepoRoot "scripts\fetch_hamlib_windows.ps1") -Output $HamlibDir
 
@@ -46,6 +24,11 @@ if ($PackageRuntime -eq "gpu") {
     uv pip uninstall --python $Python onnxruntime
     uv pip install --python $Python onnxruntime-directml
 }
+$RuntimeModelDir = Join-Path $BuildRoot "models"
+& $Python (Join-Path $RepoRoot "scripts\fetch_release_runtime.py") `
+    --output $RuntimeModelDir
+if ($LASTEXITCODE -ne 0) { throw "Release runtime model download failed" }
+$RuntimeModels = Get-ChildItem -LiteralPath $RuntimeModelDir -File
 
 if (Test-Path -LiteralPath $DistRoot) {
     Remove-Item -LiteralPath $DistRoot -Recurse -Force
@@ -79,8 +62,16 @@ foreach ($Model in $RuntimeModels) {
 & $Python -m PyInstaller @Common --console --name AETV-Benchmark `
     (Join-Path $RepoRoot "scripts\benchmark_inference.py")
 
+& $Python -m PyInstaller --noconfirm --clean --onefile --console `
+    --workpath $WorkPath --specpath $SpecPath --distpath $DistRoot `
+    --hidden-import soundcard --name AETV-Audio `
+    (Join-Path $RepoRoot "scripts\audio_helper.py")
+
 $AppDir = Join-Path $DistRoot "AETV"
 Copy-Item -LiteralPath (Join-Path $DistRoot "AETV-Benchmark\AETV-Benchmark.exe") -Destination $AppDir
+$AudioHelperDir = Join-Path $AppDir "audio-helper"
+New-Item -ItemType Directory -Force -Path $AudioHelperDir | Out-Null
+Copy-Item -LiteralPath (Join-Path $DistRoot "AETV-Audio.exe") -Destination $AudioHelperDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "NOTICE") -Destination $AppDir
@@ -88,10 +79,12 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "NOTICE") -Destination $AppDir
 $PreviousOffline = $env:AETV_OFFLINE
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM
 $PreviousAppData = $env:APPDATA
+$PreviousLocalAppData = $env:LOCALAPPDATA
 try {
     $env:AETV_OFFLINE = "1"
     $env:QT_QPA_PLATFORM = "offscreen"
     $env:APPDATA = Join-Path $BuildRoot "smoke-config"
+    $env:LOCALAPPDATA = Join-Path $BuildRoot "smoke-cache"
     Push-Location $AppDir
     try {
         $Smoke = & ".\AETV-Benchmark.exe" --mode V8 --device cpu --warmup 0 --repeats 1
@@ -114,6 +107,7 @@ try {
     $env:AETV_OFFLINE = $PreviousOffline
     $env:QT_QPA_PLATFORM = $PreviousQtPlatform
     $env:APPDATA = $PreviousAppData
+    $env:LOCALAPPDATA = $PreviousLocalAppData
 }
 $Smoke | Set-Content -LiteralPath (Join-Path $AppDir "build-smoke.json") -Encoding utf8
 $PackagedModels = [System.IO.Path]::GetFullPath((Join-Path $AppDir "_internal\models"))
