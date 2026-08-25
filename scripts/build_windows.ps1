@@ -87,9 +87,11 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "NOTICE") -Destination $AppDir
 
 $PreviousOffline = $env:AETV_OFFLINE
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM
+$PreviousAppData = $env:APPDATA
 try {
     $env:AETV_OFFLINE = "1"
     $env:QT_QPA_PLATFORM = "offscreen"
+    $env:APPDATA = Join-Path $BuildRoot "smoke-config"
     Push-Location $AppDir
     try {
         $Smoke = & ".\AETV-Benchmark.exe" --mode V8 --device cpu --warmup 0 --repeats 1
@@ -97,7 +99,11 @@ try {
             throw "Packaged benchmark smoke test failed"
         }
         $GuiSmoke = Start-Process -FilePath ".\AETV.exe" -ArgumentList "--smoke-test" `
-            -Wait -PassThru -WindowStyle Hidden
+            -PassThru -WindowStyle Hidden
+        if (-not $GuiSmoke.WaitForExit(180000)) {
+            Stop-Process -Id $GuiSmoke.Id -Force -ErrorAction SilentlyContinue
+            throw "Packaged GUI smoke test timed out"
+        }
         if ($GuiSmoke.ExitCode -ne 0) {
             throw "Packaged GUI smoke test failed with exit code $($GuiSmoke.ExitCode)"
         }
@@ -107,6 +113,7 @@ try {
 } finally {
     $env:AETV_OFFLINE = $PreviousOffline
     $env:QT_QPA_PLATFORM = $PreviousQtPlatform
+    $env:APPDATA = $PreviousAppData
 }
 $Smoke | Set-Content -LiteralPath (Join-Path $AppDir "build-smoke.json") -Encoding utf8
 $PackagedModels = [System.IO.Path]::GetFullPath((Join-Path $AppDir "_internal\models"))

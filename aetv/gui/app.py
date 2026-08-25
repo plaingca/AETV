@@ -416,11 +416,15 @@ def main(argv: list[str] | None = None) -> int:
     window = MainWindow(StationSettings() if smoke_test else None)
     window.show()
     if smoke_test:
-        result = {"code": 2}
+        result = {"code": 2, "finished": False}
 
         def finish(code: int) -> None:
+            if result["finished"]:
+                return
+            result["finished"] = True
             result["code"] = code
-            window.hide()
+            poll.stop()
+            window.close()
             app.exit(code)
 
         def check_codec() -> None:
