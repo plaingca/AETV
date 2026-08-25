@@ -119,6 +119,21 @@ def test_stale_background_model_load_cannot_replace_requested_mode():
     assert "discarding stale codec load" in window.message
 
 
+def test_smoke_waits_for_queued_codec_result_after_worker_stops():
+    window = SimpleNamespace(
+        _model_inventory_thread=None,
+        station=SimpleNamespace(codec=None),
+        _last_codec_error="",
+    )
+
+    assert app_module._smoke_codec_result(window) is None
+    window.station.codec = object()
+    assert app_module._smoke_codec_result(window) == 0
+    window.station.codec = None
+    window._last_codec_error = "model failed"
+    assert app_module._smoke_codec_result(window) == 1
+
+
 def test_active_receive_restarts_when_source_settings_change(monkeypatch):
     settings = StationSettings(mode="V8", rx_source="soundcard")
     stopped = []

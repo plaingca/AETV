@@ -1,6 +1,7 @@
 """Soundcard rate selection and Windows process-isolation behavior."""
 
 from io import BytesIO
+import json
 import struct
 from types import SimpleNamespace
 
@@ -142,6 +143,41 @@ def test_windows_chunk_playback_dispatches_to_isolated_worker(monkeypatch):
 
     assert audio_io.play_chunk_stream([np.zeros(4)], 8000)
     assert len(called) == 1
+
+
+def test_packaged_audio_operations_use_console_helper(monkeypatch, tmp_path):
+    app = tmp_path / "AETV.exe"
+    helper = tmp_path / "audio-helper" / "AETV-Audio.exe"
+    helper.parent.mkdir()
+    helper.touch()
+    monkeypatch.setattr(audio_io.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(audio_io.sys, "executable", str(app))
+
+    assert audio_io._audio_worker_args("capture", 8000, "wasapi:mic") == [
+        str(helper),
+        "--audio-worker",
+        "capture",
+        "8000",
+        '"wasapi:mic"',
+    ]
+
+
+def test_audio_probe_protocol_returns_json(monkeypatch, capsys):
+    devices = [audio_io.DeviceInfo(1, "Cable", 2, 0.0, True, "endpoint")]
+    monkeypatch.setattr(audio_io, "_list_wasapi_devices_direct", lambda kind: devices)
+
+    assert audio_io._audio_worker_main(["--audio-probe", "input"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == [
+        {
+            "index": 1,
+            "name": "Cable",
+            "channels": 2,
+            "default_samplerate": 0.0,
+            "is_default": True,
+            "identifier": "endpoint",
+        }
+    ]
 
 
 def test_isolated_output_protocol_waits_for_each_played_chunk(monkeypatch):
