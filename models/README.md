@@ -1,10 +1,12 @@
 # AETV checkpoints
 
 Release weights are hosted at
-[AETV/AETV](https://huggingface.co/AETV/AETV). The app
-downloads the selected mode's default into its per-user cache and verifies the
-published SHA-256 automatically. Set `AETV_MODEL_DIR` to choose another cache
-directory or `AETV_OFFLINE=1` to disable network access.
+[AETV/AETV](https://huggingface.co/AETV/AETV). The GUI's **File > Model
+Manager** downloads selected runtime bundles into the per-user cache and
+verifies every published SHA-256. When neither GUI mode is installed, that
+chooser opens automatically at startup. Set `AETV_MODEL_DIR` to choose another
+cache directory or `AETV_OFFLINE=1` to disable network access. Command-line
+tools continue to download a missing default automatically.
 
 The two GUI modes use these defaults:
 
