@@ -71,6 +71,7 @@ class AETVDemodResult:
     beacon_repeated_chips: np.ndarray | None = None
     header_score: float = 0.0
     pilot_coherence: float = 0.0
+    pilot_occupancy: float = 0.0
     # Pilot diagnostics are deliberately separate from SNR.  A soundcard
     # bridge can move its sampling instant without adding RF-like noise.
     pilot_evm_pct: float = float("nan")
@@ -515,6 +516,35 @@ def _ofdm_timing_metric(audio: np.ndarray, band: str) -> float:
     return float(max(np.mean(metric[offset::nsym]) for offset in range(nsym)))
 
 
+def _cp_timing_phase(audio: np.ndarray, band: str) -> tuple[int, float]:
+    """Return the strongest OFDM symbol-start phase and its CP coherence.
+
+    Continuous soundcard paths occasionally insert a complete endpoint buffer
+    while reconciling independent audio clocks. The payload pilots identify
+    the frame phase, but first reduce recovery to the one symbol phase
+    supported by the cyclic prefixes. Clamping the convolution energies also
+    keeps quiet block boundaries from producing NaN through FFT round-off.
+    """
+    values = np.asarray(audio, dtype=np.float64).reshape(-1)
+    geom, fs, m, ncp, nsym, *_rest = _band_params(band)
+    if len(values) < m + ncp:
+        return 0, 0.0
+    z = to_baseband(values, geom.fcenter_hz, fs)
+    product = z[m:] * np.conj(z[:-m])
+    kernel = np.ones(ncp)
+    correlation = signal.fftconvolve(product, kernel, mode="valid")
+    e1 = signal.fftconvolve(np.abs(z[:-m]) ** 2, kernel, mode="valid")
+    e2 = signal.fftconvolve(np.abs(z[m:]) ** 2, kernel, mode="valid")
+    metric = np.abs(correlation) / np.maximum(
+        np.sqrt(np.maximum(e1, 0.0) * np.maximum(e2, 0.0)), 1e-12
+    )
+    scores = np.array(
+        [np.mean(metric[offset::nsym]) for offset in range(nsym)]
+    )
+    offset = int(np.argmax(scores))
+    return offset, float(scores[offset])
+
+
 def modulate_gop_stream(
     gops: list[np.ndarray],
     mode_name: str = "V1",
@@ -670,6 +700,7 @@ def modulate_continuous_chunks(
     callsign: str = "N0CALL",
     start_frame: int = 0,
     interleave: bool = True,
+    total_gops: int | None = None,
 ):
     """Yield one acquisition followed by back-to-back one-second GOPs.
 
@@ -683,20 +714,8 @@ def modulate_continuous_chunks(
     acquisition = _acquisition_wave(mode)
     conditioner = _ContinuousTxConditioner(mode)
     iterator = iter(gops)
-    try:
-        current = next(iterator)
-    except StopIteration:
-        return
 
-    index = 0
-    while True:
-        try:
-            following = next(iterator)
-            final = False
-        except StopIteration:
-            following = None
-            final = True
-
+    def render(index: int, current: np.ndarray, final: bool) -> np.ndarray:
         chip_start = index * FRAMES_PER_GOP * DATA_SYMS_PER_FRAME
         chips = generate_beacon_chips(
             n_frames=(index + 1) * FRAMES_PER_GOP,
@@ -711,10 +730,38 @@ def modulate_continuous_chunks(
         pieces.append(payload)
         if final:
             pieces.append(lead)
-        yield conditioner.process(
+        return conditioner.process(
             np.concatenate(pieces),
             reference_power=float(np.mean(payload.astype(np.float64) ** 2)),
         )
+
+    if total_gops is not None:
+        count = max(0, int(total_gops))
+        for index in range(count):
+            try:
+                current = next(iterator)
+            except StopIteration as error:
+                raise ValueError(
+                    f"expected {count} GOPs, source ended after {index}"
+                ) from error
+            yield render(index, current, final=index + 1 == count)
+        return
+
+    try:
+        current = next(iterator)
+    except StopIteration:
+        return
+
+    index = 0
+    while True:
+        try:
+            following = next(iterator)
+            final = False
+        except StopIteration:
+            following = None
+            final = True
+
+        yield render(index, current, final)
 
         if final:
             return
@@ -749,6 +796,8 @@ class StreamingDemodulator:
         self._tracking_freq_offset = 0.0
         self._tracking_bad_gops = 0
         self._tracking_pending: list[tuple[AETVDemodResult, int]] = []
+        self._tracking_expected_offset = 0
+        self._tracking_rate_adjustment = 0.0
         default_mode = {"N": "V0", "W": "V1", "U": "V7"}[band]
         self.expected_mode = AETV_MODES[mode_name or default_mode]
         if self.expected_mode.band != band:
@@ -760,6 +809,95 @@ class StreamingDemodulator:
         self._pending_acquisition: Acquisition | None = None
         self._header_aided_allowed = False
         self._awaiting_search_offset = 0
+
+    def _start_tracking(
+        self, mode: AETVModeSpec, freq_offset: float
+    ) -> None:
+        self._tracking_mode = mode
+        self._tracking_freq_offset = float(freq_offset)
+        self._tracking_bad_gops = 0
+        self._tracking_pending.clear()
+        self._tracking_expected_offset = 0
+        self._tracking_rate_adjustment = 0.0
+
+    def _tracked_candidate(
+        self,
+        mode: AETVModeSpec,
+        expected_offset: int,
+    ) -> tuple[AETVDemodResult, int, float] | None:
+        """Recover a shifted soundcard GOP boundary without losing lock.
+
+        The normal path tries exactly one expected segment and has no added
+        search latency. This fallback runs only after that segment loses its
+        independent pilot structure. A two-symbol forward window covers the
+        50 ms endpoint-buffer insertions observed from WASAPI/Voicemeeter; a
+        one-CP look-behind is retained after every accepted GOP for ordinary
+        negative sample-clock error.
+        """
+        fs = mode.geometry.fs
+        _geom, _fs, _m, ncp, nsym, *_rest = _band_params(mode.band)
+        max_offset = ncp + 2 * nsym
+        if len(self.buffer) < fs + max_offset:
+            return None
+        phase, cp_metric = _cp_timing_phase(
+            self.buffer[: fs + max_offset], mode.band
+        )
+        offsets = {int(expected_offset)}
+        offsets.update(range(phase, max_offset + 1, nsym))
+        candidates: list[tuple[float, int, AETVDemodResult]] = []
+        for offset in sorted(offsets):
+            if offset < 0 or offset + fs > len(self.buffer):
+                continue
+            try:
+                result = demodulate_tracked_gop(
+                    self.buffer[offset : offset + fs],
+                    mode,
+                    self._tracking_freq_offset,
+                    interleave=self.interleave,
+                    timing_tracking=self.timing_tracking,
+                )
+            except SyncError:
+                continue
+            candidates.append((float(result.pilot_coherence), offset, result))
+        if not candidates:
+            return None
+        _coherence, offset, result = max(candidates, key=lambda item: item[0])
+        return result, int(offset), cp_metric
+
+    def _consume_tracked(
+        self,
+        result: AETVDemodResult | None,
+        payload_offset: int,
+        payload_samples: int,
+    ) -> int:
+        """Advance to one CP before the next predicted payload boundary."""
+        if not self.timing_tracking:
+            consumed = payload_offset + payload_samples
+            self._tracking_expected_offset = 0
+        else:
+            _geom, _fs, _m, ncp, _nsym, *_rest = _band_params(self.band)
+            adjustment = 0.0
+            if (
+                result is not None
+                and result.pilot_coherence >= 0.20
+                and np.isfinite(result.pilot_timing_ppm)
+            ):
+                # The diagnostic reports receiver-window motion relative to
+                # the waveform, so the observed GOP sample count has the
+                # opposite sign. Retain the fractional remainder to avoid a
+                # one-sample limit cycle at small clock offsets.
+                ppm = float(np.clip(result.pilot_timing_ppm, -2500.0, 2500.0))
+                adjustment = -ppm * payload_samples / 1e6
+            self._tracking_rate_adjustment += adjustment
+            whole_adjustment = int(np.trunc(self._tracking_rate_adjustment))
+            self._tracking_rate_adjustment -= whole_adjustment
+            whole_adjustment = int(np.clip(whole_adjustment, -ncp, ncp))
+            consumed = payload_offset + payload_samples + whole_adjustment - ncp
+            self._tracking_expected_offset = ncp
+        consumed = max(1, min(int(consumed), len(self.buffer)))
+        self.buffer = self.buffer[consumed:]
+        self.samples_consumed += consumed
+        return consumed
 
     def _debug(self, event: str, **fields) -> None:
         try:
@@ -835,10 +973,7 @@ class StreamingDemodulator:
         discard = window_start + blind.payload_start
         self.buffer = self.buffer[discard:]
         self.samples_consumed += discard
-        self._tracking_mode = self.expected_mode
-        self._tracking_freq_offset = blind.freq_offset
-        self._tracking_bad_gops = 0
-        self._tracking_pending.clear()
+        self._start_tracking(self.expected_mode, blind.freq_offset)
         self.last_beacon = blind.beacon
         self._last_accepted_preamble = None
         self._awaiting_blind = False
@@ -860,54 +995,133 @@ class StreamingDemodulator:
         results: list[AETVDemodResult] = []
         while True:
             if self.continuous and self._tracking_mode is not None:
-                payload_samples = self._tracking_mode.geometry.fs
-                if len(self.buffer) < payload_samples:
+                tracking_mode = self._tracking_mode
+                payload_samples = tracking_mode.geometry.fs
+                expected_offset = self._tracking_expected_offset
+                if len(self.buffer) < expected_offset + payload_samples:
                     break
-                stream_sample = self.samples_consumed
-                payload = self.buffer[:payload_samples]
+                payload_offset = expected_offset
+                stream_sample = self.samples_consumed + payload_offset
+                payload = self.buffer[
+                    payload_offset : payload_offset + payload_samples
+                ]
+                result = None
+                failure_reason = "tracked payload pilot structure is weak"
                 try:
                     result = demodulate_tracked_gop(
                         payload,
-                        self._tracking_mode,
+                        tracking_mode,
                         self._tracking_freq_offset,
                         interleave=self.interleave,
                         timing_tracking=self.timing_tracking,
                     )
                 except SyncError as error:
-                    self.buffer = self.buffer[payload_samples:]
-                    self.samples_consumed += payload_samples
+                    failure_reason = str(error)
+
+                realigned = False
+                if (
+                    self.timing_tracking
+                    and (result is None or result.pilot_coherence < 0.09)
+                ):
+                    search_required = payload_samples + _ncp + 2 * _nsym
+                    if len(self.buffer) < search_required:
+                        break
+                    recovered = self._tracked_candidate(
+                        tracking_mode, expected_offset
+                    )
+                    if recovered is not None:
+                        candidate, candidate_offset, cp_metric = recovered
+                        candidate_is_better = (
+                            result is None
+                            or candidate.pilot_coherence > result.pilot_coherence
+                        )
+                        timing_only = (
+                            candidate.pilot_coherence < 0.09
+                            and result is not None
+                            and cp_metric >= 0.50
+                            and candidate_is_better
+                        )
+                        candidate_supported = (
+                            candidate.pilot_coherence >= 0.09 or timing_only
+                        )
+                    else:
+                        candidate_supported = False
+                        timing_only = False
+                    if candidate_supported:
+                        result = candidate
+                        payload_offset = candidate_offset
+                        stream_sample = self.samples_consumed + payload_offset
+                        realigned = payload_offset != expected_offset
+                        if realigned:
+                            self._debug(
+                                "tracking_realign",
+                                stream_sample=int(stream_sample),
+                                shift_samples=int(payload_offset - expected_offset),
+                                cp_metric=float(cp_metric),
+                                pilot_coherence=float(result.pilot_coherence),
+                                timing_only=bool(timing_only),
+                            )
+
+                if result is None:
+                    self._consume_tracked(
+                        None, expected_offset, payload_samples
+                    )
                     self._tracking_bad_gops += 1
                     self._debug(
                         "tracking_weak",
                         stream_sample=int(stream_sample),
                         consecutive=int(self._tracking_bad_gops),
-                        reason=str(error),
+                        reason=failure_reason,
                     )
                     if self._tracking_bad_gops >= 3:
                         self._debug(
                             "tracking_lost",
                             stream_sample=int(stream_sample),
-                            reason=f"three weak GOP intervals; last: {error}",
+                            reason=(
+                                "three weak GOP intervals; last: "
+                                f"{failure_reason}"
+                            ),
                         )
                         self._tracking_mode = None
                         self._header_aided_allowed = False
                         self._tracking_pending.clear()
+                        self._tracking_expected_offset = 0
+                        self._tracking_rate_adjustment = 0.0
                     continue
-                self.buffer = self.buffer[payload_samples:]
-                self.samples_consumed += payload_samples
-                self._tracking_freq_offset = result.freq_offset
+
+                self._consume_tracked(result, payload_offset, payload_samples)
                 # Below this independent carrier-structure floor, decoded
                 # latents are indistinguishable from noise. Keep tracking for
                 # two intervals so a short fade does not end reception, but do
                 # not display those GOPs if carrier evidence later returns.
-                if result.pilot_coherence < 0.09:
+                payload_confidence = float(
+                    np.mean(result.gops_weights[0])
+                    if result.gops_weights
+                    else 0.0
+                )
+                if (
+                    result.pilot_coherence < 0.09
+                    or payload_confidence < 0.20
+                    or result.pilot_occupancy < 0.40
+                ):
                     self._tracking_bad_gops += 1
+                    reason = (
+                        "payload confidence below 0.20 presence floor"
+                        if payload_confidence < 0.20
+                        else (
+                            "pilot bandwidth occupancy below 0.40 presence floor"
+                            if result.pilot_occupancy < 0.40
+                            else "payload pilot structure below 0.09 presence floor"
+                        )
+                    )
                     self._debug(
                         "tracking_weak",
                         stream_sample=int(stream_sample),
                         consecutive=int(self._tracking_bad_gops),
                         pilot_coherence=float(result.pilot_coherence),
-                        reason="payload pilot structure below 0.09 presence floor",
+                        pilot_occupancy=float(result.pilot_occupancy),
+                        payload_confidence=payload_confidence,
+                        reason=reason,
                     )
                     if self._tracking_bad_gops >= 3:
                         self._debug(
@@ -918,7 +1132,10 @@ class StreamingDemodulator:
                         self._tracking_mode = None
                         self._header_aided_allowed = False
                         self._tracking_pending.clear()
+                        self._tracking_expected_offset = 0
+                        self._tracking_rate_adjustment = 0.0
                     continue
+                self._tracking_freq_offset = result.freq_offset
                 self._tracking_bad_gops = 0
                 self._tracking_pending.clear()
                 missing_gops = self._accumulate_beacon(
@@ -927,12 +1144,14 @@ class StreamingDemodulator:
                 self._debug(
                     "gop_accepted",
                     tracked=True,
-                    recovered_weak=False,
+                    recovered_weak=bool(realigned),
                     stream_sample=int(stream_sample),
                     metric=float(result.sync_metric),
                     freq_offset_hz=float(result.freq_offset),
                     header_score=float(result.header_score),
                     pilot_coherence=float(result.pilot_coherence),
+                    pilot_occupancy=float(result.pilot_occupancy),
+                    payload_confidence=payload_confidence,
                     snr_db=float(result.snr_db),
                     pilot_evm_pct=float(result.pilot_evm_pct),
                     pilot_timing_ppm=float(result.pilot_timing_ppm),
@@ -964,6 +1183,7 @@ class StreamingDemodulator:
                         ]
                         recent_acq = None
                         expected_header_matched = False
+                        candidate_incomplete = False
                         try:
                             recent_acq = acquire(
                                 to_baseband(recent, geom.fcenter_hz, fs),
@@ -971,6 +1191,13 @@ class StreamingDemodulator:
                             )
                             recent_needed = recent_acq.preamble_start + minimum
                             if len(recent) < recent_needed:
+                                candidate_incomplete = True
+                                self._debug(
+                                    "preamble_pending",
+                                    offset=int(recent_acq.preamble_start),
+                                    available_samples=int(len(recent)),
+                                    needed_samples=int(recent_needed),
+                                )
                                 raise SyncError(
                                     "candidate falls beyond this overlapping window"
                                 )
@@ -993,8 +1220,11 @@ class StreamingDemodulator:
                             recent_acq = None
                             fallback_candidates = (
                                 _header_aided_acquisitions(recent, self.band)
-                                if self._header_aided_allowed
-                                or expected_header_matched
+                                if not candidate_incomplete
+                                and (
+                                    self._header_aided_allowed
+                                    or expected_header_matched
+                                )
                                 else []
                             )
                             for candidate in fallback_candidates:
@@ -1150,7 +1380,10 @@ class StreamingDemodulator:
                 self.buffer = self.buffer[discarded:]
                 self.samples_consumed += discarded
                 continue
-            if self.continuous and result.pilot_coherence < 0.09:
+            if self.continuous and (
+                result.pilot_coherence < 0.09
+                or result.pilot_occupancy < 0.40
+            ):
                 # A repeated low-SNR header can occasionally win the large
                 # acquisition search by chance. Do not hand its noise latents
                 # to the video decoder: require independent payload-pilot
@@ -1162,7 +1395,12 @@ class StreamingDemodulator:
                     metric=float(acq.metric),
                     header_score=float(result.header_score),
                     pilot_coherence=float(result.pilot_coherence),
-                    reason="payload pilot structure below 0.09 confirmation floor",
+                    pilot_occupancy=float(result.pilot_occupancy),
+                    reason=(
+                        "pilot bandwidth occupancy below 0.40 confirmation floor"
+                        if result.pilot_occupancy < 0.40
+                        else "payload pilot structure below 0.09 confirmation floor"
+                    ),
                 )
                 self.buffer = self.buffer[needed:]
                 self.samples_consumed += needed
@@ -1176,10 +1414,7 @@ class StreamingDemodulator:
                 result, candidate_sample, minimum + 2 * int(0.1 * fs)
             )
             if self.continuous:
-                self._tracking_mode = result.mode
-                self._tracking_freq_offset = result.freq_offset
-                self._tracking_bad_gops = 0
-                self._tracking_pending.clear()
+                self._start_tracking(result.mode, result.freq_offset)
                 self._awaiting_blind = False
             self._debug(
                 "gop_accepted",
@@ -1187,6 +1422,12 @@ class StreamingDemodulator:
                 freq_offset_hz=float(result.freq_offset),
                 header_score=float(result.header_score),
                 pilot_coherence=float(result.pilot_coherence),
+                pilot_occupancy=float(result.pilot_occupancy),
+                payload_confidence=float(
+                    np.mean(result.gops_weights[0])
+                    if result.gops_weights
+                    else 0.0
+                ),
                 snr_db=float(result.snr_db),
                 pilot_evm_pct=float(result.pilot_evm_pct),
                 pilot_timing_ppm=float(result.pilot_timing_ppm),
@@ -1278,6 +1519,29 @@ def _pilot_coherence(h_pilot: np.ndarray) -> float:
     adjacent = np.mean(values[:, 1:] * np.conj(values[:, :-1]))
     total = float(np.mean(np.abs(values) ** 2))
     return float(np.abs(adjacent) / max(total, 1e-12))
+
+
+def _pilot_occupancy(h_pilot: np.ndarray, latent_carriers: int) -> float:
+    """Return normalized effective bandwidth of the pilot channel estimate.
+
+    A narrow hum or idle endpoint can be perfectly stable and therefore look
+    deceptively coherent. A real OFDM pilot occupies the latent carrier bank;
+    the inverse power participation ratio is near one for a broad channel and
+    near 1/N for a single interfering tone.
+    """
+    values = np.asarray(h_pilot)
+    if values.ndim != 2 or values.shape[0] < 1:
+        return 0.0
+    power = np.mean(
+        np.abs(values[:, : int(latent_carriers)]) ** 2, axis=0
+    )
+    if not power.size:
+        return 0.0
+    total = float(np.sum(power))
+    return float(
+        total**2
+        / max(float(len(power)) * float(np.sum(power**2)), 1e-18)
+    )
 
 
 def blind_acquire_continuous_payload(
@@ -1645,6 +1909,9 @@ def demodulate_gop_stream(
         beacon_repeated_chips=soft_repeated_beacon,
         header_score=header_score,
         pilot_coherence=pilot_coherence,
+        pilot_occupancy=_pilot_occupancy(
+            h_pilot_arr, geom.latent_carriers
+        ),
         pilot_evm_pct=pilot_evm_pct,
         pilot_timing_ppm=pilot_timing_ppm,
     )
@@ -1793,6 +2060,9 @@ def demodulate_tracked_gop(
         beacon_repeated_chips=repeated_chips,
         header_score=1.0,
         pilot_coherence=_pilot_coherence(pilot_array),
+        pilot_occupancy=_pilot_occupancy(
+            pilot_array, geom.latent_carriers
+        ),
         pilot_evm_pct=pilot_evm_pct,
         pilot_timing_ppm=pilot_timing_ppm,
     )

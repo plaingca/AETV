@@ -9,17 +9,18 @@ import queue
 import struct
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from math import gcd
 from pathlib import Path
 
 import numpy as np
-from scipy.io import wavfile
-from scipy.signal import resample_poly
 
 
 def read_wav(path: str | Path) -> tuple[int, np.ndarray]:
     """Read a WAV as float32 mono in about ±1."""
+    from scipy.io import wavfile
+
     rate, audio = wavfile.read(path)
     if np.issubdtype(audio.dtype, np.integer):
         audio = audio.astype(np.float32) / abs(float(np.iinfo(audio.dtype).min))
@@ -32,6 +33,8 @@ def read_wav(path: str | Path) -> tuple[int, np.ndarray]:
 
 def write_wav(path: str | Path, rate: int, audio: np.ndarray, peak: float = 0.7) -> Path:
     """Write mono float32 audio, peak-scaled so DAX/soundcards stay out of clip."""
+    from scipy.io import wavfile
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     samples = np.asarray(audio, dtype=np.float32)
@@ -43,6 +46,8 @@ def write_wav(path: str | Path, rate: int, audio: np.ndarray, peak: float = 0.7)
 
 
 def resample_audio(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    from scipy.signal import resample_poly
+
     if src_rate == dst_rate:
         return audio.astype(np.float32, copy=False)
     return resample_poly(audio, dst_rate, src_rate).astype(np.float32)
@@ -205,6 +210,17 @@ def resample_ratio(src_rate: int, dst_rate: int) -> tuple[int, int]:
     return int(dst_rate) // g, int(src_rate) // g
 
 
+def wasapi_blocksize(rate: int) -> int:
+    """Use a conservative 20 ms endpoint block for Windows live audio.
+
+    The former 50 ms block was visible end to end and made a virtual-cable
+    clock correction much larger than the OFDM cyclic prefix. Twenty
+    milliseconds stays above common 10 ms shared-mode device periods while
+    cutting both latency and the size of any endpoint-buffer correction.
+    """
+    return max(128, int(round(int(rate) * 0.020)))
+
+
 class StreamResampler:
     """`resample_poly` for a stream that arrives in chunks.
 
@@ -222,6 +238,8 @@ class StreamResampler:
         self._buf = np.zeros(self.pad, dtype=np.float64)
 
     def __call__(self, chunk: np.ndarray) -> np.ndarray:
+        from scipy.signal import resample_poly
+
         self._buf = np.concatenate([self._buf, np.asarray(chunk, dtype=np.float64).reshape(-1)])
         usable = len(self._buf) - 2 * self.pad
         n = (usable // self.down) * self.down if usable > 0 else 0
@@ -847,7 +865,7 @@ def _wasapi_play_worker(rate: int, device) -> int:
     speaker = _wasapi_device(device, "output")
     source = sys.stdin.buffer
     target = sys.stdout.buffer
-    blocksize = max(256, int(rate) // 20)
+    blocksize = wasapi_blocksize(rate)
     # SoundCard's WASAPI backend has a long-standing single-channel capture
     # bug. Keep both sides of the Windows path stereo so virtual cables and
     # hardware endpoints negotiate an ordinary interleaved stream.
@@ -868,18 +886,49 @@ def _wasapi_play_worker(rate: int, device) -> int:
                 raise AudioUnavailable("truncated audio output samples")
             samples = np.frombuffer(payload, dtype="<f4")
             if samples.size:
-                # SoundCard duplicates a one-column array to the requested
-                # stereo channel map.
-                player.play(samples.reshape(-1, 1))
+                _play_wasapi_exact(player, samples)
             target.write(b"A")
             target.flush()
     return 0
 
 
+def _play_wasapi_exact(player, samples: np.ndarray, memmove=None) -> None:
+    """Submit exactly the initialized frames to SoundCard's WASAPI client.
+
+    SoundCard 0.4.x requests every currently available render frame inside
+    ``Player.play``. When the final piece is shorter than that availability it
+    copies only the short piece but releases the entire region, exposing stale
+    endpoint memory. Continuous GOP chunks deliberately have unequal first and
+    steady-state lengths, so the resulting boundary-dependent samples can move
+    the OFDM window while still looking coherent enough to remain locked.
+
+    Keep SoundCard's endpoint setup but release only the frames copied. The
+    optional memmove is a narrow test seam; production uses SoundCard's CFFI.
+    """
+    if memmove is None:
+        from soundcard import mediafoundation
+
+        memmove = mediafoundation._ffi.memmove
+    mono = np.asarray(samples, dtype=np.float32).reshape(-1)
+    stereo = np.repeat(mono[:, None], 2, axis=1)
+    cursor = 0
+    while cursor < len(stereo):
+        available = int(player._render_available_frames())
+        if available <= 0:
+            time.sleep(0.001)
+            continue
+        count = min(available, len(stereo) - cursor)
+        payload = stereo[cursor : cursor + count].ravel().tobytes()
+        buffer = player._render_buffer(count)
+        memmove(buffer[0], payload, len(payload))
+        player._render_release(count)
+        cursor += count
+
+
 def _wasapi_capture_worker(rate: int, device) -> int:
     microphone = _wasapi_device(device, "input")
     target = sys.stdout.buffer
-    blocksize = max(256, int(rate) // 20)
+    blocksize = wasapi_blocksize(rate)
     with microphone.recorder(
         samplerate=rate, channels=2, blocksize=blocksize
     ) as recorder:

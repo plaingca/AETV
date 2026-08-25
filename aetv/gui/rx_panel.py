@@ -957,8 +957,9 @@ class ReceivePanel(QWidget):
         self.preview.enqueue_rgb(
             video,
             fps=mode.fps,
-            prebuffer_frames=2 * mode.gop_frames,
+            prebuffer_frames=mode.gop_frames,
             boundary_blend_frames=4,
+            max_queue_frames=2 * mode.gop_frames,
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
@@ -1036,6 +1037,7 @@ class ReceivePanel(QWidget):
             fps=mode.fps,
             prebuffer_frames=mode.gop_frames,
             boundary_blend_frames=4,
+            max_queue_frames=2 * mode.gop_frames,
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)

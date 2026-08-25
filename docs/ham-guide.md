@@ -51,6 +51,18 @@ the received-video folder's `debug` directory. Compare a TX/RX pair offline:
 uv run python scripts/analyze_ota_debug.py --tx path\trial.tx.wav --iq path\trial.iq.wav
 ```
 
+For a repeatable Voicemeeter or virtual-cable soak using the station's saved
+audio endpoints, run the following with radio PTT disabled:
+
+```powershell
+uv run python scripts/cable_loopback_soak.py --mode V8 --gops 100 `
+  --output runs/cable-loopback.json
+```
+
+The report separates the modem's normal latent distortion from error added by
+the cable, and records first-result latency, callback burst size, receive
+backlog, timing drift, realignments, lock loss, and audio discontinuities.
+
 **CAT / PTT**
 
 | Method | Use |

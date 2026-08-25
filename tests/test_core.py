@@ -57,6 +57,7 @@ from aetv.modem import (
     _header_candidates,
     _header_carriers,
     _pilot_coherence,
+    _pilot_occupancy,
     decode_header,
     demodulate_tracked_gop,
     encode_header,
@@ -279,6 +280,73 @@ def test_continuous_v7_stream_has_exact_one_second_steady_state_gops():
     assert decoded[-1].callsign == "VE7TEST"
 
 
+def test_known_continuous_count_yields_first_gop_without_source_lookahead():
+    mode = AETV_MODES["V8"]
+    requested = []
+
+    def source():
+        for index in range(2):
+            requested.append(index)
+            yield np.zeros(mode.latents_per_gop, dtype=np.float32)
+
+    chunks = modulate_continuous_chunks(
+        source(), mode_name="V8", total_gops=2
+    )
+    first = next(chunks)
+    assert requested == [0]
+    assert len(first) == int(1.55 * mode.geometry.fs)
+
+    second = next(chunks)
+    assert requested == [0, 1]
+    assert len(second) == int(1.10 * mode.geometry.fs)
+    with pytest.raises(StopIteration):
+        next(chunks)
+
+
+def test_soundcard_tracking_realigns_after_endpoint_buffer_insertion():
+    """A virtual-cable clock correction must not force 12-second reacquisition."""
+    mode = AETV_MODES["V8"]
+    rng = np.random.default_rng(20260825)
+    originals = [
+        rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+        for _ in range(7)
+    ]
+    chunks = list(
+        modulate_continuous_chunks(originals, mode_name="V8", callsign="N0CALL")
+    )
+    # The measured Voicemeeter/VAC path inserted about one 50 ms WASAPI block
+    # at a time. Reproduce its non-symbol-aligned 375-sample correction at a
+    # clean GOP boundary.
+    audio = np.concatenate(
+        [*chunks[:3], np.zeros(375, dtype=np.float32), *chunks[3:]]
+    )
+    events = []
+    receiver = StreamingDemodulator(
+        "W",
+        continuous=True,
+        mode_name="V8",
+        timing_tracking=True,
+        on_debug=events.append,
+    )
+    recovered = []
+    for start in range(0, len(audio), mode.geometry.fs // 10):
+        for result in receiver.feed(
+            audio[start : start + mode.geometry.fs // 10]
+        ):
+            recovered.extend(result.gops_latents)
+
+    assert len(recovered) == len(originals)
+    assert all(
+        np.corrcoef(original, decoded)[0, 1] > 0.90
+        for original, decoded in zip(originals, recovered)
+    )
+    realignments = [
+        event for event in events if event["event"] == "tracking_realign"
+    ]
+    assert any(event["shift_samples"] == 375 for event in realignments)
+    assert not any(event["event"] == "tracking_lost" for event in events)
+
+
 def test_continuous_tx_clipping_matches_checkpoint_batch_contract():
     """The stateful FIR may add delay, but must not add extra clipping."""
     rng = np.random.default_rng(20260824)
@@ -336,6 +404,51 @@ def test_pilot_structure_rejects_unstructured_noise():
     smooth = np.ones((8, 160), dtype=np.complex128)
     assert _pilot_coherence(noise) < 0.09
     assert _pilot_coherence(smooth) > 0.99
+
+
+def test_pilot_occupancy_rejects_narrow_stable_interference():
+    broad = np.ones((8, 24), dtype=np.complex128)
+    narrow = np.zeros((8, 24), dtype=np.complex128)
+    narrow[:, 7] = 1.0
+
+    assert _pilot_occupancy(broad, 23) > 0.99
+    assert _pilot_occupancy(narrow, 23) < 0.05
+
+
+def test_continuous_soundcard_tail_does_not_emit_idle_hum_gops():
+    mode = AETV_MODES["V8"]
+    originals = [
+        np.ones(mode.latents_per_gop, dtype=np.float32) for _ in range(3)
+    ]
+    transmission = np.concatenate(
+        list(modulate_continuous_chunks(originals, "V8", "N0CALL"))
+    )
+    samples = np.arange(3 * mode.geometry.fs)
+    idle_hum = (
+        1e-4
+        * np.sin(2.0 * np.pi * 60.0 * samples / mode.geometry.fs)
+    ).astype(np.float32)
+    events = []
+    receiver = StreamingDemodulator(
+        "W",
+        continuous=True,
+        mode_name="V8",
+        timing_tracking=True,
+        on_debug=events.append,
+    )
+    decoded = []
+    audio = np.concatenate([transmission, idle_hum])
+    for start in range(0, len(audio), mode.geometry.fs // 10):
+        decoded.extend(
+            receiver.feed(audio[start : start + mode.geometry.fs // 10])
+        )
+
+    assert len(decoded) == len(originals)
+    assert any(
+        event["event"] == "tracking_weak"
+        and "occupancy" in event.get("reason", "")
+        for event in events
+    )
 
 
 def test_pilot_snr_estimator_subtracts_noise_from_total_power():

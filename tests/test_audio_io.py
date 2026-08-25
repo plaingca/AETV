@@ -55,6 +55,49 @@ def test_wasapi_stereo_capture_is_downmixed_after_transport():
     assert np.allclose(mono, [0.5, 0.0, 0.5])
 
 
+def test_wasapi_live_blocks_are_twenty_milliseconds_or_longer():
+    assert audio_io.wasapi_blocksize(8000) == 160
+    assert audio_io.wasapi_blocksize(24000) == 480
+    assert audio_io.wasapi_blocksize(4000) == 128
+
+
+def test_wasapi_output_releases_only_initialized_frames():
+    class Player:
+        def __init__(self):
+            self.available = iter([5, 10])
+            self.buffers = []
+            self.released = []
+
+        def _render_available_frames(self):
+            return next(self.available)
+
+        def _render_buffer(self, count):
+            buffer = bytearray()
+            self.buffers.append((count, buffer))
+            return [buffer]
+
+        def _render_release(self, count):
+            self.released.append(count)
+
+    player = Player()
+
+    def copy(buffer, payload, size):
+        buffer.extend(payload[:size])
+
+    audio_io._play_wasapi_exact(
+        player, np.arange(7, dtype=np.float32), memmove=copy
+    )
+
+    assert player.released == [5, 2]
+    assert [count for count, _buffer in player.buffers] == [5, 2]
+    rendered = np.frombuffer(
+        b"".join(bytes(buffer) for _count, buffer in player.buffers),
+        dtype=np.float32,
+    ).reshape(-1, 2)
+    assert np.allclose(rendered[:, 0], np.arange(7))
+    assert np.allclose(rendered[:, 1], np.arange(7))
+
+
 def test_default_output_uses_native_device_rate(monkeypatch):
     opened = {}
 

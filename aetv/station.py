@@ -344,7 +344,10 @@ class TxEngine:
                 encoded_gops = encoded_gops()
 
             chunks = modulate_continuous_chunks(
-                encoded_gops, mode_name=codec.mode.name, callsign=settings.callsign
+                encoded_gops,
+                mode_name=codec.mode.name,
+                callsign=settings.callsign,
+                total_gops=n_gops,
             )
             channel_profile = settings.tx_channel_profile
 

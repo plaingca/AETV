@@ -54,6 +54,37 @@ contract tests.
 The complete captured result is retained at
 `runs/gui-loopback-validation-20260824/validation.json` in the research tree.
 
+### Windows virtual-cable latency and stability
+
+A 100-GOP V8 soak through the configured Windows output, Voicemeeter virtual
+cable, and configured input recovered 100/100 GOPs in order over 100.9 seconds.
+There were no duplicates, source discontinuities, tracking realignments, lock
+losses, or multi-GOP decoder callbacks. Receive backlog stayed at or below 60
+ms and the slowest incremental demodulator call was 52 ms. The first modem GOP
+was available 2.13 seconds after the playback call; that figure isolates audio
+transport and modem acquisition and does not include camera capture or neural
+decode.
+
+The raw transmitted-to-recovered latent correlation was 0.971 median and 0.937
+worst case. Raw NMSE was 0.092 median and 0.145 worst case; this includes the
+modem's intentional waveform clipping and equalization contract. After making
+WASAPI release exactly the number of initialized endpoint frames, two
+consecutive 30-GOP cable runs passed the quality gate. The repeat measured
+cable-added correlation of 0.999999 median and 0.999998 worst case, with
+0.0000021 median and 0.0000043 worst-case transport NMSE.
+
+Reproduce the endpoint test without keying a radio:
+
+```powershell
+uv run python scripts/cable_loopback_soak.py --mode V8 --gops 100 `
+  --output runs/cable-loopback.json
+```
+
+The command uses the input, output, level, and callsign already saved by the
+station. It exits nonzero on a missing, duplicate, or reordered GOP; lock loss;
+an audio discontinuity; worst cable-added correlation below 0.95; or worst
+cable-added NMSE above 0.10.
+
 ## Wide 8 kHz channel validation
 
 The release checkpoint is `v8-flex8k-ota-rxfix.pt` (SHA-256

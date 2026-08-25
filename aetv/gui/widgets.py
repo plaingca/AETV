@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
+import math
+import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
@@ -81,7 +83,10 @@ class VideoView(QWidget):
         self._frames = deque(maxlen=120)
         self._last_enqueued_frame: np.ndarray | None = None
         self._fps = 12.0
+        self._playout_deadline: float | None = None
         self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._advance_frame)
         self.setMinimumSize(240, 135)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -93,6 +98,7 @@ class VideoView(QWidget):
 
     def clear(self) -> None:
         self._timer.stop()
+        self._playout_deadline = None
         self._frames.clear()
         self._last_enqueued_frame = None
         self._pixmap = QPixmap()
@@ -110,11 +116,11 @@ class VideoView(QWidget):
             self._frames.clear()
             self._frames.extend(np.ascontiguousarray(frame).copy() for frame in frames)
             if not self._timer.isActive():
-                self._advance_frame()
-                self._timer.start(max(1, round(1000.0 / self._fps)))
+                self._start_playout()
             return
         # A live single-frame preview always supersedes queued GOP playback.
         self._timer.stop()
+        self._playout_deadline = None
         self._frames.clear()
         self._show_frame(frames)
 
@@ -125,6 +131,7 @@ class VideoView(QWidget):
         fps: float,
         prebuffer_frames: int = 24,
         boundary_blend_frames: int = 0,
+        max_queue_frames: int | None = None,
     ) -> None:
         """Queue decoded frames for clocked, jitter-buffered receive playout.
 
@@ -143,9 +150,13 @@ class VideoView(QWidget):
             transition_frames=boundary_blend_frames,
         )
         self._last_enqueued_frame = np.ascontiguousarray(values[-1]).copy()
-        self._frames.extend(
-            np.ascontiguousarray(frame).copy() for frame in values
-        )
+        incoming = [np.ascontiguousarray(frame).copy() for frame in values]
+        if max_queue_frames is not None:
+            queue_limit = max(len(incoming), int(max_queue_frames))
+            stale = max(0, len(self._frames) + len(incoming) - queue_limit)
+            for _ in range(min(stale, len(self._frames))):
+                self._frames.popleft()
+        self._frames.extend(incoming)
         if self._timer.isActive():
             return
         # After startup or an underrun, hold the last picture until enough
@@ -153,14 +164,33 @@ class VideoView(QWidget):
         # delivery. Playback itself remains locked to the advertised frame rate.
         if len(self._frames) < max(1, int(prebuffer_frames)):
             return
+        self._start_playout()
+
+    def _start_playout(self) -> None:
+        self._playout_deadline = time.monotonic()
         self._advance_frame()
-        self._timer.start(max(1, round(1000.0 / self._fps)))
 
     def _advance_frame(self) -> None:
         if not self._frames:
             self._timer.stop()
+            self._playout_deadline = None
             return
         self._show_frame(self._frames.popleft())
+        now = time.monotonic()
+        period = 1.0 / max(self._fps, 1e-6)
+        deadline = (
+            self._playout_deadline + period
+            if self._playout_deadline is not None
+            else now + period
+        )
+        # Never burst frames to catch up after a delayed GUI paint. The next
+        # enqueue trims stale backlog, while this clock keeps visible cadence
+        # smooth and alternates integer timer delays to represent 6/12 fps
+        # without long-term rounding drift.
+        if deadline <= now:
+            deadline = now + period
+        self._playout_deadline = deadline
+        self._timer.start(max(1, math.ceil(1000.0 * (deadline - now))))
 
     def _show_frame(self, frame: np.ndarray) -> None:
         if frame.ndim != 3 or frame.shape[2] != 3:
