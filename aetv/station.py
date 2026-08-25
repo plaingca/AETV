@@ -185,6 +185,8 @@ class RxState:
     freq_offset: float = 0.0
     sync_metric: float = 0.0
     snr_db: float = float("nan")
+    pilot_evm_pct: float = float("nan")
+    pilot_timing_ppm: float = float("nan")
     callsign: str = ""
     message: str = ""
 
@@ -1033,6 +1035,10 @@ class RxEngine:
             on_debug=self._record_modem_debug,
             continuous=True,
             mode_name=mode.name,
+            # Virtual audio cables may servo their independent endpoint clocks.
+            # Let the modem separate that harmless timing slope from EVM/SNR;
+            # Kiwi already has an exact-rate I/Q resampler upstream.
+            timing_tracking=self.station.settings.rx_source == "soundcard",
         )
 
     def _loop(self) -> None:
@@ -1114,6 +1120,12 @@ class RxEngine:
 
     def _update_from_result(self, result, decoded) -> None:
         identity = f"de {result.callsign}" if result.callsign else "beacon acquiring"
+        diagnostics = ""
+        if self.station.settings.rx_source == "soundcard":
+            diagnostics = (
+                f"  EVM {result.pilot_evm_pct:.1f}%"
+                f"  timing {result.pilot_timing_ppm:+.0f} ppm"
+            )
         self.state = RxState(
             listening=True,
             source=self.station.settings.rx_source,
@@ -1122,8 +1134,13 @@ class RxEngine:
             freq_offset=result.freq_offset,
             sync_metric=result.sync_metric,
             snr_db=result.snr_db,
+            pilot_evm_pct=result.pilot_evm_pct,
+            pilot_timing_ppm=result.pilot_timing_ppm,
             callsign=result.callsign,
-            message=f"{identity}  {self._shown_gops} GOP  SNR {result.snr_db:.1f} dB",
+            message=(
+                f"{identity}  {self._shown_gops} GOP  SNR {result.snr_db:.1f} dB"
+                f"{diagnostics}"
+            ),
         )
         self._on_state(self.state)
         if decoded is not None:

@@ -50,8 +50,10 @@ from aetv.modem import (
 from aetv.modem import (
     _interpolate_channel_phase_aware,
     _payload_wave,
+    _payload_noise_variances,
     _equalize_payload_symbol,
     _estimate_snr_db,
+    _pilot_temporal_diagnostics,
     _header_candidates,
     _header_carriers,
     _pilot_coherence,
@@ -361,6 +363,44 @@ def test_pilot_snr_ignores_common_phase_rotation():
     assert _estimate_snr_db(rotating, band="W") == pytest.approx(
         _estimate_snr_db(stationary, band="W"), abs=0.05
     )
+
+
+def test_soundcard_pilot_diagnostics_separate_timing_from_evm():
+    """A fractional FFT timing walk is an equalizable channel slope, not noise."""
+    geom = BAND_W
+    frames = 32
+    timing_ppm = 500.0
+    samples_per_frame = geom.fs / 8.0
+    sample_step = timing_ppm * 1e-6 * samples_per_frame
+    frequencies = geom.carrier0_hz + RS * np.arange(geom.latent_carriers)
+    frame_index = np.arange(frames)[:, None]
+    pilots = np.exp(
+        2j
+        * np.pi
+        * frame_index
+        * frequencies[None, :]
+        * sample_step
+        / geom.fs
+    )
+    raw_snr = _estimate_snr_db(pilots, band="W")
+    corrected_snr, evm_pct, measured_ppm = _pilot_temporal_diagnostics(
+        pilots, band="W", remove_timing=True
+    )
+    assert raw_snr < 20.0
+    assert corrected_snr > 100.0
+    assert evm_pct < 1e-4
+    assert measured_ppm == pytest.approx(timing_ppm, abs=0.01)
+    untracked_noise = _payload_noise_variances(
+        pilots, geom.latent_carriers
+    )[0]
+    tracked_noise = _payload_noise_variances(
+        pilots,
+        geom.latent_carriers,
+        band="W",
+        remove_timing=True,
+    )[0]
+    assert untracked_noise > 1e-3
+    assert tracked_noise <= 1e-9
 
 
 def test_phase_aware_channel_interpolation_preserves_rotating_gain():

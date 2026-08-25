@@ -71,6 +71,10 @@ class AETVDemodResult:
     beacon_repeated_chips: np.ndarray | None = None
     header_score: float = 0.0
     pilot_coherence: float = 0.0
+    # Pilot diagnostics are deliberately separate from SNR.  A soundcard
+    # bridge can move its sampling instant without adding RF-like noise.
+    pilot_evm_pct: float = float("nan")
+    pilot_timing_ppm: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -264,6 +268,9 @@ class _ContinuousTxConditioner:
 def _payload_noise_variances(
     h_pilots: np.ndarray,
     latent_carriers: int,
+    *,
+    band: str | None = None,
+    remove_timing: bool = False,
 ) -> np.ndarray:
     """Return pilot-observation noise power for each complete GOP.
 
@@ -289,6 +296,16 @@ def _payload_noise_variances(
         np.sum(following * np.conj(previous), axis=2)
     )
     aligned_following = following * np.exp(-1j * common_step[..., None])
+    if remove_timing:
+        if band is None:
+            raise ValueError("band is required when removing pilot timing")
+        geom = BANDS[band]
+        frequencies = geom.carrier0_hz + RS * np.arange(latent_carriers)
+        centered = frequencies - float(np.mean(frequencies))
+        denominator = float(np.sum(centered**2))
+        phase = np.unwrap(np.angle(following * np.conj(previous)), axis=2)
+        slopes = np.sum(phase * centered, axis=2) / max(denominator, 1e-18)
+        aligned_following *= np.exp(-1j * slopes[..., None] * centered)
     differences = aligned_following - previous
     noise = 0.5 * np.mean(np.abs(differences) ** 2, axis=(1, 2))
     total = np.mean(np.abs(grouped) ** 2, axis=(1, 2))
@@ -715,6 +732,7 @@ class StreamingDemodulator:
         on_debug=None,
         continuous: bool = False,
         mode_name: str | None = None,
+        timing_tracking: bool = False,
     ):
         self.band = band
         self.interleave = interleave
@@ -726,6 +744,7 @@ class StreamingDemodulator:
         self.samples_consumed = 0
         self._last_accepted_preamble: int | None = None
         self.continuous = bool(continuous)
+        self.timing_tracking = bool(timing_tracking)
         self._tracking_mode: AETVModeSpec | None = None
         self._tracking_freq_offset = 0.0
         self._tracking_bad_gops = 0
@@ -852,6 +871,7 @@ class StreamingDemodulator:
                         self._tracking_mode,
                         self._tracking_freq_offset,
                         interleave=self.interleave,
+                        timing_tracking=self.timing_tracking,
                     )
                 except SyncError as error:
                     self.buffer = self.buffer[payload_samples:]
@@ -914,6 +934,8 @@ class StreamingDemodulator:
                     header_score=float(result.header_score),
                     pilot_coherence=float(result.pilot_coherence),
                     snr_db=float(result.snr_db),
+                    pilot_evm_pct=float(result.pilot_evm_pct),
+                    pilot_timing_ppm=float(result.pilot_timing_ppm),
                     beacon_chips=int(len(self.beacon_chips)),
                     beacon_repeated_chips=int(len(self.beacon_repeated_chips)),
                     missing_gops=int(missing_gops),
@@ -959,6 +981,7 @@ class StreamingDemodulator:
                                 interleave=self.interleave,
                                 acquisition=recent_acq,
                                 expected_mode=self.expected_mode,
+                                timing_tracking=self.timing_tracking,
                             )
                             if recent_result.mode != self.expected_mode:
                                 raise SyncError(
@@ -986,6 +1009,7 @@ class StreamingDemodulator:
                                         interleave=self.interleave,
                                         acquisition=candidate,
                                         expected_mode=self.expected_mode,
+                                        timing_tracking=self.timing_tracking,
                                     )
                                     if candidate_result.mode != self.expected_mode:
                                         continue
@@ -1095,6 +1119,7 @@ class StreamingDemodulator:
                     interleave=self.interleave,
                     acquisition=acq,
                     expected_mode=self.expected_mode,
+                    timing_tracking=self.timing_tracking,
                 )
             except SyncError as error:
                 self._debug(
@@ -1163,6 +1188,8 @@ class StreamingDemodulator:
                 header_score=float(result.header_score),
                 pilot_coherence=float(result.pilot_coherence),
                 snr_db=float(result.snr_db),
+                pilot_evm_pct=float(result.pilot_evm_pct),
+                pilot_timing_ppm=float(result.pilot_timing_ppm),
                 beacon_chips=int(len(self.beacon_chips)),
                 beacon_repeated_chips=int(len(self.beacon_repeated_chips)),
                 missing_gops=int(missing_gops),
@@ -1172,27 +1199,69 @@ class StreamingDemodulator:
         return results
 
 
-def _estimate_snr_db(h_pilot: np.ndarray, band: str = "W") -> float:
-    """Pilot-derived SNR in 2500 Hz reference bandwidth."""
+def _pilot_temporal_diagnostics(
+    h_pilot: np.ndarray,
+    band: str = "W",
+    *,
+    remove_timing: bool = False,
+) -> tuple[float, float, float]:
+    """Return pilot SNR, residual EVM %, and fractional timing rate in ppm.
+
+    Consecutive pilots are 125 ms apart.  Besides a common carrier phase
+    rotation, a soundcard bridge can move the FFT timing instant.  That has a
+    linear phase slope across OFDM carriers and is harmless inside the cyclic
+    prefix when the data equalizer interpolates the channel per carrier.  It
+    must not be presented to users as thermal noise.
+    """
     if len(h_pilot) < 2:
-        return float("nan")
+        return float("nan"), float("nan"), float("nan")
     geom = BANDS[band]
     useful = np.asarray(h_pilot)[:, : geom.latent_carriers]
     previous = useful[:-1]
     following = useful[1:]
-    common_step = np.angle(np.sum(following * np.conj(previous), axis=1))
+    cross = following * np.conj(previous)
+    common_step = np.angle(np.sum(cross, axis=1))
     aligned_following = following * np.exp(-1j * common_step[:, None])
+    timing_ppm = float("nan")
+    if remove_timing:
+        frequencies = geom.carrier0_hz + RS * np.arange(geom.latent_carriers)
+        centered = frequencies - float(np.mean(frequencies))
+        denom = float(np.sum(centered**2))
+        phase = np.unwrap(np.angle(cross), axis=1)
+        slopes = phase @ centered / max(denom, 1e-18)  # radians / Hz
+        # A phase slope of 2*pi*f*dt corresponds to an FFT timing movement
+        # dt.  Pilots are one 1,000-sample frame apart in every current band.
+        sample_steps = slopes * geom.fs / (2.0 * np.pi)
+        timing_ppm = float(
+            np.median(sample_steps / (geom.fs / 8.0) * 1e6)
+        )
+        timing_phase = slopes[:, None] * centered[None, :]
+        aligned_following *= np.exp(-1j * timing_phase)
     noise_var = 0.5 * float(
         np.mean(np.abs(aligned_following - previous) ** 2)
     )
     total_var = float(np.mean(np.abs(useful) ** 2))
     signal_var = max(0.0, total_var - noise_var)
     if noise_var <= 0 or total_var <= 0:
-        return float("nan")
+        return float("nan"), float("nan"), timing_ppm
     snr_50hz = signal_var / noise_var
     snr_ref = snr_50hz * (geom.carriers * RS / SNR_REF_BW_HZ)
     # A finite floor keeps GUI/log serialization useful for noise-only input.
-    return float(10.0 * np.log10(max(snr_ref, 1e-6)))
+    snr_db = float(10.0 * np.log10(max(snr_ref, 1e-6)))
+    evm_pct = float(100.0 * np.sqrt(noise_var / max(total_var, 1e-18)))
+    return snr_db, evm_pct, timing_ppm
+
+
+def _estimate_snr_db(
+    h_pilot: np.ndarray,
+    band: str = "W",
+    *,
+    remove_timing: bool = False,
+) -> float:
+    """Pilot-derived SNR in 2500 Hz reference bandwidth."""
+    return _pilot_temporal_diagnostics(
+        h_pilot, band=band, remove_timing=remove_timing
+    )[0]
 
 
 def _pilot_coherence(h_pilot: np.ndarray) -> float:
@@ -1312,6 +1381,7 @@ def demodulate_gop_stream(
     interleave: bool = True,
     acquisition: Acquisition | None = None,
     expected_mode: AETVModeSpec | None = None,
+    timing_tracking: bool = False,
 ) -> AETVDemodResult:
     """Demodulate an AETV passband transmission into reconstructed GOP latents and confidence weights.
 
@@ -1467,7 +1537,10 @@ def demodulate_gop_stream(
                 h_pilots.append(r_pilot / pilot_seq)
             h_pilot_arr = np.asarray(h_pilots)
     noise_variances = _payload_noise_variances(
-        h_pilot_arr, geom.latent_carriers
+        h_pilot_arr,
+        geom.latent_carriers,
+        band=band,
+        remove_timing=timing_tracking,
     )
 
     # Demodulate all data frames.
@@ -1528,7 +1601,9 @@ def demodulate_gop_stream(
             else:
                 all_beacon_chips.append(np.real(eq_sym[geom.beacon_carrier]))
 
-    snr_est = _estimate_snr_db(h_pilot_arr, band=band)
+    snr_est, pilot_evm_pct, pilot_timing_ppm = _pilot_temporal_diagnostics(
+        h_pilot_arr, band=band, remove_timing=timing_tracking
+    )
     pilot_coherence = _pilot_coherence(h_pilot_arr)
 
     # Beacon decode
@@ -1570,6 +1645,8 @@ def demodulate_gop_stream(
         beacon_repeated_chips=soft_repeated_beacon,
         header_score=header_score,
         pilot_coherence=pilot_coherence,
+        pilot_evm_pct=pilot_evm_pct,
+        pilot_timing_ppm=pilot_timing_ppm,
     )
 
 
@@ -1578,6 +1655,7 @@ def demodulate_tracked_gop(
     mode: AETVModeSpec,
     freq_offset: float = 0.0,
     interleave: bool = True,
+    timing_tracking: bool = False,
 ) -> AETVDemodResult:
     """Decode one boundary-aligned payload while already tracking a stream.
 
@@ -1641,7 +1719,10 @@ def demodulate_tracked_gop(
                 h_pilots.append(r_pilot / pilot_seq)
             pilot_array = np.asarray(h_pilots)
     noise_variance = _payload_noise_variances(
-        pilot_array, geom.latent_carriers
+        pilot_array,
+        geom.latent_carriers,
+        band=mode.band,
+        remove_timing=timing_tracking,
     )[0]
 
     for frame in range(FRAMES_PER_GOP):
@@ -1694,6 +1775,9 @@ def demodulate_tracked_gop(
     beacon_chips = np.asarray(all_beacon_chips)
     repeated_chips = np.asarray(all_beacon_repeated_chips)
     beacon_result = find_beacon_superframe(beacon_chips)
+    snr_db, pilot_evm_pct, pilot_timing_ppm = _pilot_temporal_diagnostics(
+        pilot_array, band=mode.band, remove_timing=timing_tracking
+    )
     return AETVDemodResult(
         gops_latents=[latents],
         gops_weights=[weights],
@@ -1704,9 +1788,11 @@ def demodulate_tracked_gop(
         beacon=beacon_result,
         callsign=beacon_result.callsign if beacon_result else "",
         preamble_start=0,
-        snr_db=_estimate_snr_db(pilot_array, band=mode.band),
+        snr_db=snr_db,
         beacon_chips=beacon_chips,
         beacon_repeated_chips=repeated_chips,
         header_score=1.0,
         pilot_coherence=_pilot_coherence(pilot_array),
+        pilot_evm_pct=pilot_evm_pct,
+        pilot_timing_ppm=pilot_timing_ppm,
     )
