@@ -33,21 +33,18 @@ See `docs/v8-ota-rxfix.md` for the receiver correction and OTA replay, and
 
 ## Original published checkpoint
 
-Place the inference-only V7 weights here as `v7-flex8k.pt`.
-
-For a tagged release, download the checkpoint asset that accompanies it:
+The original inference-only V7 weights remain available from the Hugging Face
+model repository as `v7-flex8k.pt`. They are no longer attached to GitHub
+application releases. To reproduce work against that baseline in a source
+checkout:
 
 ```powershell
-Invoke-WebRequest `
-  https://github.com/plaingca/AETV/releases/latest/download/v7-flex8k.pt `
-  -OutFile models\v7-flex8k.pt
+hf download AETV/AETV v7-flex8k.pt --local-dir models
 (Get-FileHash models\v7-flex8k.pt -Algorithm SHA256).Hash.ToLower()
 ```
 
 The result must match the SHA-256 value below before the checkpoint is used.
-The `latest` URL becomes available when the first GitHub release is published;
-when building an unreleased checkout, export the checkpoint from the research
-tree instead.
+The application does not select this historical baseline by default.
 
 The file is not stored in git. It is the stage-2 no-GAN Flex-8k run that was
 keyed on 40 m and used for the VVC comparison:
