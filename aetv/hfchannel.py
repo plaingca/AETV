@@ -59,6 +59,17 @@ def _analytic(x: np.ndarray) -> np.ndarray:
     return signal.hilbert(x)
 
 
+def _active_signal_power(x: np.ndarray) -> float:
+    """Estimate active real-signal power without counting leading silence."""
+    values = np.asarray(x, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        return 0.0
+    envelope = np.abs(_analytic(values))
+    rms = np.sqrt(np.mean(values**2))
+    active = envelope > 0.1 * rms
+    return float(np.mean(values[active] ** 2) if active.any() else np.mean(values**2))
+
+
 def wrap_cycles(cycles: np.ndarray) -> np.ndarray:
     return np.mod(cycles, 1.0)
 
@@ -100,12 +111,20 @@ def fading(
     return np.real((z * g1 + z2 * g2) / np.sqrt(2))
 
 
-def awgn(x: np.ndarray, snr_db: float, seed: int = 0, fs: int = FS) -> np.ndarray:
+def awgn(
+    x: np.ndarray,
+    snr_db: float,
+    seed: int = 0,
+    fs: int = FS,
+    reference_power: float | None = None,
+) -> np.ndarray:
     """Add white noise for the given SNR in a ``SNR_REF_BW_HZ`` bandwidth."""
     rng = np.random.default_rng(seed)
-    env = np.abs(_analytic(x))
-    active = env > 0.1 * np.sqrt(np.mean(x**2))
-    s_power = np.mean(x[active] ** 2) if active.any() else np.mean(x**2)
+    s_power = (
+        _active_signal_power(x)
+        if reference_power is None
+        else float(reference_power)
+    )
     sigma2 = (
         s_power * reference_noise_bandwidth_scale(fs) / 10 ** (snr_db / 10)
     )
@@ -126,10 +145,20 @@ def emulate(
     """
     selected = CHANNEL_PROFILES[profile] if isinstance(profile, str) else profile
     impaired = np.asarray(x, dtype=np.float64).reshape(-1).copy()
+    # AWGN belongs to the receiver noise floor. Reference it to transmitted
+    # signal power, not to the result of a fade: otherwise a deep fade also
+    # turns the noise down and makes the requested multipath condition milder.
+    reference_power = _active_signal_power(impaired)
     if selected.fading != "none":
         impaired = fading(impaired, preset=selected.fading, seed=seed, fs=fs)
     if selected.snr_db is not None:
-        impaired = awgn(impaired, snr_db=selected.snr_db, seed=seed, fs=fs)
+        rng = np.random.default_rng(seed)
+        variance = (
+            reference_power
+            * reference_noise_bandwidth_scale(fs)
+            / 10 ** (selected.snr_db / 10)
+        )
+        impaired = impaired + rng.normal(scale=np.sqrt(variance), size=len(impaired))
     return impaired.astype(np.float32)
 
 
@@ -152,6 +181,9 @@ class StreamingChannelEmulator:
         self._sample = 0
         self._noise_rng = np.random.default_rng(seed + 1)
         self._delay_line = np.zeros(0, dtype=np.complex128)
+        self._hilbert_state = np.zeros(0, dtype=np.float64)
+        self._real_delay = np.zeros(0, dtype=np.float64)
+        self._hilbert_taps = np.zeros(0, dtype=np.float64)
         self._doppler_freqs = np.zeros(0)
         self._phases1 = np.zeros(0)
         self._phases2 = np.zeros(0)
@@ -165,6 +197,35 @@ class StreamingChannelEmulator:
             self._phases2 = phase_rng.uniform(0.0, 2.0 * np.pi, oscillators)
             delay = int(round(preset.delay_ms * 1e-3 * self.fs))
             self._delay_line = np.zeros(delay, dtype=np.complex128)
+            # scipy.signal.hilbert is noncausal and therefore changes at every
+            # process() boundary. A linear-phase FIR Hilbert transformer plus
+            # a matching real delay gives a causal analytic signal whose
+            # output is invariant to GUI/audio callback chunking.
+            hilbert_length = 129
+            edge = max(50.0, 0.005 * self.fs)
+            self._hilbert_taps = signal.remez(
+                hilbert_length,
+                [edge, self.fs / 2.0 - edge],
+                [1.0],
+                type="hilbert",
+                fs=self.fs,
+            )
+            self._hilbert_state = np.zeros(hilbert_length - 1, dtype=np.float64)
+            self._real_delay = np.zeros((hilbert_length - 1) // 2, dtype=np.float64)
+
+    def _streaming_analytic(self, values: np.ndarray) -> np.ndarray:
+        quadrature, self._hilbert_state = signal.lfilter(
+            self._hilbert_taps,
+            [1.0],
+            values,
+            zi=self._hilbert_state,
+        )
+        delay = len(self._real_delay)
+        delayed_real = np.concatenate([self._real_delay, values])[: len(values)]
+        if delay:
+            self._real_delay = np.concatenate([self._real_delay, values])[-delay:]
+        # scipy's type='hilbert' convention produces -Hilbert{x}.
+        return delayed_real - 1j * quadrature
 
     def _tap(self, samples: np.ndarray, phases: np.ndarray) -> np.ndarray:
         tap = np.zeros(len(samples), dtype=np.complex128)
@@ -177,9 +238,10 @@ class StreamingChannelEmulator:
         values = np.asarray(x, dtype=np.float64).reshape(-1)
         if values.size == 0:
             return values.astype(np.float32)
+        reference_power = _active_signal_power(values)
         impaired = values.copy()
         if self.profile.fading != "none":
-            analytic = _analytic(values)
+            analytic = self._streaming_analytic(values)
             samples = self._sample + np.arange(len(values), dtype=np.float64)
             first = self._tap(samples, self._phases1)
             second = self._tap(samples, self._phases2)
@@ -191,12 +253,8 @@ class StreamingChannelEmulator:
                 delayed = analytic
             impaired = np.real((analytic * first + delayed * second) / np.sqrt(2.0))
         if self.profile.snr_db is not None:
-            envelope = np.abs(_analytic(impaired))
-            threshold = 0.1 * np.sqrt(np.mean(impaired**2))
-            active = envelope > threshold
-            power = np.mean(impaired[active] ** 2) if active.any() else np.mean(impaired**2)
             variance = (
-                power * reference_noise_bandwidth_scale(self.fs)
+                reference_power * reference_noise_bandwidth_scale(self.fs)
                 / 10 ** (self.profile.snr_db / 10)
             )
             impaired = impaired + self._noise_rng.normal(

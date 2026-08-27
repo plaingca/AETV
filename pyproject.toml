@@ -32,10 +32,14 @@ gui = [
     "pyserial>=3.5",
 ]
 train = [
+    "accelerate>=1.0",
+    "diffusers>=0.40",
     "torchvision>=0.17",
     "lpips>=0.1.4",
     "datasets>=2.18",
     "pylance>=10,<11",
+    "pystoi>=0.4.1",
+    "safetensors>=0.5",
     "tensorboard>=2.14",
 ]
 dev = [

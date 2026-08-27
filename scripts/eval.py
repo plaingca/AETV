@@ -68,14 +68,28 @@ def write_labeled_grid_mp4(panels: list[tuple[str, torch.Tensor]], path: Path, f
 
     raw_bytes = b"".join(img.tobytes() for img in labeled_frames)
     output_height, output_width = rows * height, columns * width
-    cmd = [
+    common = [
         "ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-        "-s", f"{output_width}x{output_height}", "-r", str(fps), "-i", "pipe:0",
-        "-an", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", str(path),
+        "-s", f"{output_width}x{output_height}", "-r", str(fps), "-i", "pipe:0", "-an",
     ]
-    proc = subprocess.run(cmd, input=raw_bytes, stderr=subprocess.PIPE, timeout=60)
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.decode("utf-8", errors="replace")[-500:])
+    # Some Linux distributions omit GPL libx264 while providing OpenH264.
+    # Keep the labeled evaluator usable there, with MPEG-4 Part 2 as a final
+    # broadly available fallback. These files are visual diagnostics only;
+    # metric evaluation always uses tensors before video encoding.
+    encoders = [
+        ["-c:v", "libx264", "-crf", "18"],
+        ["-c:v", "libopenh264", "-b:v", "2M"],
+        ["-c:v", "mpeg4", "-q:v", "3"],
+    ]
+    failures = []
+    for encoder in encoders:
+        cmd = [*common, *encoder, "-pix_fmt", "yuv420p", str(path)]
+        proc = subprocess.run(cmd, input=raw_bytes, stderr=subprocess.PIPE, timeout=60)
+        if proc.returncode == 0:
+            break
+        failures.append(proc.stderr.decode("utf-8", errors="replace")[-500:])
+    else:
+        raise RuntimeError("\n".join(failures))
 
 
 def compute_psnr(recon: torch.Tensor, orig: torch.Tensor) -> float:

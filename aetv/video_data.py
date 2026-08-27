@@ -124,6 +124,7 @@ class HFDatasetsVideoDataset(IterableDataset):
         epoch_size: int = 1000,
         seed: int = 0,
         shuffle_buffer: int = 8,
+        lance_batch_size: int = 1,
     ):
         super().__init__()
         try:
@@ -140,6 +141,7 @@ class HFDatasetsVideoDataset(IterableDataset):
         self.epoch_size = epoch_size
         self.seed = seed
         self.shuffle_buffer = shuffle_buffer
+        self.lance_batch_size = lance_batch_size
 
     def _load_stream(self):
         import lance
@@ -170,7 +172,7 @@ class HFDatasetsVideoDataset(IterableDataset):
                 # video columns are materialized for the whole builder batch,
                 # so that default can download hundreds of videos before the
                 # iterable yields its first example.
-                batch_size=1,
+                batch_size=self.lance_batch_size,
                 token=get_token(),
             )
         finally:
