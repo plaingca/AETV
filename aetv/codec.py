@@ -11,6 +11,7 @@ import torch
 
 from .config import AETV_MODES, AETVModeSpec
 from .models import AETVAutoencoder
+from .stateful_gop_corrector import load_stateful_gop_corrector
 
 DEFAULT_CHECKPOINT = Path("models") / "v8-flex8k-ota-rxfix.pt"
 MODE_DEFAULT_CHECKPOINTS = {
@@ -64,6 +65,7 @@ class AETVCodec:
         checkpoint: str | Path | None = None,
         device: str | torch.device | None = None,
         mode: str | None = None,
+        decoder_context_checkpoint: str | Path | None = None,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -89,6 +91,32 @@ class AETVCodec:
             raise KeyError(f"{self.checkpoint_path} has no model_state_dict")
         self.model.load_state_dict(state, strict=True)
         self.model.eval()
+        self.decoder_context = None
+        self.decoder_context_checkpoint = None
+        self._previous_decoded_gop = None
+        self._previous_context_confidence = None
+        if decoder_context_checkpoint is not None:
+            context_path = Path(decoder_context_checkpoint).expanduser().resolve()
+            corrector, metadata = load_stateful_gop_corrector(str(context_path), self.device)
+            if metadata.get("mode") not in (None, self.mode.name):
+                raise ValueError(f"decoder context mode {metadata['mode']!r} does not match {self.mode.name!r}")
+            expected = metadata.get("source_sha256")
+            if expected and expected != sha256_file(self.checkpoint_path):
+                raise ValueError("decoder context checkpoint is bound to a different base codec")
+            self.decoder_context = corrector
+            self.decoder_context_checkpoint = context_path
+
+    @property
+    def decoder_context_enabled(self) -> bool:
+        return self.decoder_context is not None
+
+    def reset_decoder_context(self) -> None:
+        """Drop receiver memory; the next GOP is an exact stock decode."""
+        self._previous_decoded_gop = None
+        self._previous_context_confidence = None
+
+    def _decode_tensor(self, z: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        return self.model.decoder(z, w, output_shape=(self.mode.gop_frames, self.mode.height, self.mode.width))
 
     def encode_gop(self, frames: np.ndarray) -> np.ndarray:
         """Encode (T, H, W, 3) uint8 or float frames to a GOP latent vector."""
@@ -111,11 +139,15 @@ class AETVCodec:
         else:
             w = torch.from_numpy(np.asarray(weights, dtype=np.float32))[None].to(self.device)
         with torch.inference_mode():
-            recon = self.model.decoder(
-                z,
-                w,
-                output_shape=(self.mode.gop_frames, self.mode.height, self.mode.width),
-            )
+            recon = self._decode_tensor(z, w)
+            if self.decoder_context is not None and self._previous_decoded_gop is not None:
+                confidence = torch.minimum(
+                    w.mean(dim=1),
+                    torch.as_tensor(self._previous_context_confidence, device=self.device),
+                )
+                recon = self.decoder_context(recon, self._previous_decoded_gop, confidence)
+            self._previous_decoded_gop = recon.detach()
+            self._previous_context_confidence = w.mean(dim=1).detach()
         return _to_uint8(recon.squeeze(0))
 
 

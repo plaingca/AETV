@@ -17,6 +17,47 @@ from .models import AETVAutoencoder
 from .overlap_models import join_video_gops, split_video_gops
 
 
+def warp_nchw(values: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
+    """Backward-warp NCHW features with pixel-unit flow (dx, dy)."""
+    if values.ndim != 4 or flow.shape[1] != 2 or flow.shape[0] != values.shape[0]:
+        raise ValueError("warp expects NCHW values and matching N,2,H,W flow")
+    batch, _, height, width = values.shape
+    if flow.shape[-2:] != (height, width):
+        scale = values.new_tensor(
+            (width / max(flow.shape[-1], 1), height / max(flow.shape[-2], 1))
+        ).view(1, 2, 1, 1)
+        flow = F.interpolate(flow, size=(height, width), mode="bilinear", align_corners=True)
+        flow = flow * scale
+    grid_y, grid_x = torch.meshgrid(
+        torch.linspace(-1, 1, height, device=values.device, dtype=values.dtype),
+        torch.linspace(-1, 1, width, device=values.device, dtype=values.dtype),
+        indexing="ij",
+    )
+    grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(0).expand(batch, -1, -1, -1)
+    scale_x = 2.0 / max(width - 1, 1)
+    scale_y = 2.0 / max(height - 1, 1)
+    grid = torch.stack(
+        (grid[..., 0] + flow[:, 0] * scale_x, grid[..., 1] + flow[:, 1] * scale_y),
+        dim=-1,
+    )
+    return F.grid_sample(
+        values, grid, mode="bilinear", padding_mode="border", align_corners=True
+    )
+
+
+def warp_bcthw(values: torch.Tensor, flow: torch.Tensor) -> torch.Tensor:
+    """Warp each time slice of a BCTHW tensor with B,2,T,H,W flow."""
+    if values.ndim != 5 or flow.shape[1] != 2:
+        raise ValueError("warp_bcthw expects BCTHW values and B,2,T,H,W flow")
+    batch, channels, frames, height, width = values.shape
+    if flow.shape[2] == 1 and frames > 1:
+        flow = flow.expand(-1, -1, frames, -1, -1)
+    flat = values.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, height, width)
+    flow_flat = flow.permute(0, 2, 1, 3, 4).reshape(batch * frames, 2, *flow.shape[-2:])
+    warped = warp_nchw(flat, flow_flat)
+    return warped.reshape(batch, frames, channels, height, width).permute(0, 2, 1, 3, 4)
+
+
 def _groups(channels: int) -> int:
     groups = min(32, channels)
     while channels % groups:
@@ -42,10 +83,10 @@ class CrossGOPBottleneckAdapter(nn.Module):
     """Fuse the previous GOP edge into the current decoder bottleneck.
 
     Current bottleneck positions attend to the previous GOP's final latent-time
-    plane.  A compact convolutional branch then combines the attended content,
-    aligned local differences, and receive confidence.  The final convolution
-    is zero initialized, making construction and reset exact stock-decoder
-    functions rather than approximate anchors.
+    plane after a DCVC-style learned warp.  A compact convolutional branch then
+    combines the aligned content, local differences, and receive confidence.
+    Flow and the final convolution are zero initialized, so construction and
+    reset remain exact stock-decoder functions.
     """
 
     def __init__(
@@ -57,6 +98,9 @@ class CrossGOPBottleneckAdapter(nn.Module):
         heads: int = 4,
         blocks: int = 3,
         temporal_taper: tuple[float, ...] = (1.0, 0.65, 0.30),
+        preserve_highpass: bool = False,
+        highpass_kernel: int = 5,
+        context_bias: float = 0.0,
     ):
         super().__init__()
         if attention_dim % heads:
@@ -67,6 +111,8 @@ class CrossGOPBottleneckAdapter(nn.Module):
         self.heads = heads
         self.blocks = blocks
         self.temporal_taper = tuple(temporal_taper)
+        self.preserve_highpass = bool(preserve_highpass)
+        self.highpass_kernel = int(highpass_kernel)
 
         groups = _groups(feature_channels)
         self.current_norm = nn.GroupNorm(groups, feature_channels)
@@ -82,6 +128,10 @@ class CrossGOPBottleneckAdapter(nn.Module):
         self.output = nn.Conv3d(width, feature_channels, 3, padding=1)
         nn.init.zeros_(self.output.weight)
         nn.init.zeros_(self.output.bias)
+        self.flow = nn.Conv3d(2 * feature_channels, 2, 3, padding=1)
+        nn.init.zeros_(self.flow.weight)
+        nn.init.zeros_(self.flow.bias)
+        self.max_flow = 4.0
 
         # Global cut gate: edge difference, RMS difference, cosine similarity,
         # feature energies, and receive confidence.  Synthetic discontinuities
@@ -91,6 +141,8 @@ class CrossGOPBottleneckAdapter(nn.Module):
             nn.SiLU(),
             nn.Linear(32, 1),
         )
+        if context_bias:
+            nn.init.constant_(self.scene_gate[-1].bias, float(context_bias))
 
     def config(self) -> dict:
         return {
@@ -100,6 +152,8 @@ class CrossGOPBottleneckAdapter(nn.Module):
             "heads": self.heads,
             "blocks": self.blocks,
             "temporal_taper": self.temporal_taper,
+            "preserve_highpass": self.preserve_highpass,
+            "highpass_kernel": self.highpass_kernel,
         }
 
     def _cross_attention(
@@ -168,6 +222,10 @@ class CrossGOPBottleneckAdapter(nn.Module):
         current_norm = self.current_norm(current)
         previous_norm = self.previous_norm(previous)
         previous_edge = previous_norm[:, :, -1:]
+        flow = self.max_flow * torch.tanh(
+            self.flow(torch.cat((current_norm[:, :, :1], previous_edge), dim=1))
+        )
+        previous_edge = warp_bcthw(previous_edge, flow)
         previous_local = previous_edge.expand(-1, -1, frames, -1, -1)
         query, attended, value = self._cross_attention(current_norm, previous_edge)
         local_value = value.expand(-1, -1, frames, -1, -1)
@@ -186,7 +244,12 @@ class CrossGOPBottleneckAdapter(nn.Module):
                 taper.view(1, 1, -1), size=frames, mode="linear", align_corners=False
             ).flatten()
         taper = taper.view(1, 1, frames, 1, 1)
-        corrected = current + torch.tanh(residual) * taper * gate_map
+        delta = torch.tanh(residual) * taper * gate_map
+        if self.preserve_highpass:
+            kernel = max(3, self.highpass_kernel | 1)
+            pad = kernel // 2
+            delta = F.avg_pool3d(delta, (1, kernel, kernel), stride=1, padding=(0, pad, pad))
+        corrected = current + delta
         return corrected, scene_gate
 
 
@@ -204,6 +267,9 @@ class V8DecoderContextAdapter(nn.Module):
         attention_heads: int = 4,
         adapter_blocks: int = 3,
         freeze_base: bool = True,
+        temporal_taper: tuple[float, ...] = (1.0, 0.65, 0.30),
+        preserve_highpass: bool = False,
+        context_bias: float = 0.0,
     ):
         super().__init__()
         if base.mode.name != "V8" or base.encoder.latent_channels != 3:
@@ -222,6 +288,9 @@ class V8DecoderContextAdapter(nn.Module):
             attention_dim=attention_dim,
             heads=attention_heads,
             blocks=adapter_blocks,
+            temporal_taper=temporal_taper,
+            preserve_highpass=preserve_highpass,
+            context_bias=context_bias,
         )
         if freeze_base:
             self.freeze_base()
@@ -264,6 +333,8 @@ class V8DecoderContextAdapter(nn.Module):
             attention_heads=int(config["heads"]),
             adapter_blocks=int(config["blocks"]),
             freeze_base=freeze_base,
+            temporal_taper=tuple(config.get("temporal_taper", (1.0, 0.65, 0.30))),
+            preserve_highpass=bool(config.get("preserve_highpass", False)),
         )
         model.context_adapter.load_state_dict(payload["adapter_state_dict"], strict=True)
         return model
@@ -384,6 +455,7 @@ class V8DecoderContextAdapter(nn.Module):
         use_adapter: bool = True,
         context_source_indices: torch.Tensor | None = None,
         context_reset: torch.Tensor | None = None,
+        recurrent_state: bool = False,
         return_gates: bool = False,
         return_base: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
@@ -400,7 +472,26 @@ class V8DecoderContextAdapter(nn.Module):
         )
         corrected = base_hidden
         gates = latents.new_zeros((batch, 0))
-        if use_adapter and count > 1:
+        if use_adapter and count > 1 and recurrent_state:
+            # Carry the corrected bottleneck forward.  The original adapter
+            # deliberately used only the previous *base* feature, which made
+            # it a pairwise boundary filter rather than a stream state.
+            adapted_items = [base_hidden[:, 0]]
+            gate_items = []
+            for index in range(1, count):
+                previous = adapted_items[-1]
+                previous_confidence = weights[:, index - 1].mean(dim=-1)
+                current_confidence = weights[:, index].mean(dim=-1)
+                pair_confidence = torch.minimum(previous_confidence, current_confidence)
+                reset = None if context_reset is None else context_reset[:, index - 1]
+                adapted, gate = self.context_adapter(
+                    base_hidden[:, index], previous, pair_confidence, reset=reset
+                )
+                adapted_items.append(adapted)
+                gate_items.append(gate)
+            corrected = torch.stack(adapted_items, dim=1)
+            gates = torch.stack(gate_items, dim=1)
+        elif use_adapter and count > 1:
             current = base_hidden[:, 1:].flatten(0, 1)
             if context_source_indices is None:
                 previous = base_hidden[:, :-1].flatten(0, 1)

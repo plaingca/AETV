@@ -40,6 +40,7 @@ from .modem import (
     modulate_gop_stream,
 )
 from .sync import Acquisition, SyncError, acquire
+from .stateful_gop_corrector import StatefulGOPCorrector
 
 __all__ = [
     "AETV_MODES",
@@ -81,4 +82,5 @@ __all__ = [
     "Acquisition",
     "SyncError",
     "acquire",
+    "StatefulGOPCorrector",
 ]

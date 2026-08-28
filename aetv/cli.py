@@ -27,11 +27,21 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         help="inference checkpoint (default: the selected mode's release checkpoint)",
     )
     parser.add_argument("--device", default=None, help="torch device, e.g. cuda or cpu")
+    parser.add_argument(
+        "--decoder-context-checkpoint",
+        default=None,
+        help="optional resettable receiver-side GOP context adapter checkpoint",
+    )
     parser.add_argument("--callsign", default="N0CALL", help="station identification carried on the beacon")
 
 
 def _load_codec(args) -> AETVCodec:
-    return AETVCodec(checkpoint=args.checkpoint, device=args.device, mode=args.mode)
+    return AETVCodec(
+        checkpoint=args.checkpoint,
+        device=args.device,
+        mode=args.mode,
+        decoder_context_checkpoint=args.decoder_context_checkpoint,
+    )
 
 
 def _encode_source(args, codec: AETVCodec) -> tuple[np.ndarray, list[np.ndarray]]:

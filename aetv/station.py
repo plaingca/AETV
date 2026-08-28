@@ -875,6 +875,7 @@ class RxEngine:
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
         self._stream_decoder = self._new_demodulator(codec.mode)
+        codec.reset_decoder_context()
         self._kiwi_discontinuity.clear()
         self._read_cursor = 0
         self._on_ring(self.ring)
@@ -992,6 +993,7 @@ class RxEngine:
             if self._kiwi_discontinuity.is_set():
                 self._kiwi_discontinuity.clear()
                 self._stream_decoder = self._new_demodulator(codec.mode)
+                codec.reset_decoder_context()
                 # Drop every sample written before the reset. The interrupted
                 # GOP cannot be repaired live; the next independently framed
                 # GOP will provide a fresh preamble and mode header.
@@ -1002,6 +1004,7 @@ class RxEngine:
             audio, self._read_cursor, overrun = ring.read_since(self._read_cursor)
             if overrun:
                 self._stream_decoder = self._new_demodulator(codec.mode)
+                codec.reset_decoder_context()
                 self.state.message = "receive buffer overrun; reacquiring"
             if audio.size == 0:
                 continue

@@ -3,9 +3,11 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 import pytest
 
 from aetv.codec import DEFAULT_CHECKPOINT, AETVCodec, resolve_checkpoint
+from aetv.stateful_gop_corrector import StatefulGOPCorrector
 from aetv.config import AETV_MODES
 from aetv.modem import demodulate_gop_stream, modulate_gop_stream
 
@@ -17,6 +19,24 @@ def test_resolve_checkpoint_from_environment(tmp_path, monkeypatch):
     checkpoint.touch()
     monkeypatch.setenv("AETV_CHECKPOINT", str(checkpoint))
     assert resolve_checkpoint() == checkpoint.resolve()
+
+
+def test_stateful_corrector_has_exact_bypass_for_missing_context():
+    corrector = StatefulGOPCorrector(width=4, blocks=1)
+    current = torch.rand(1, 3, 6, 8, 8)
+    with torch.inference_mode():
+        assert torch.equal(corrector(current, None), current)
+
+
+def test_stateful_corrector_zero_confidence_is_exact_bypass():
+    corrector = StatefulGOPCorrector(width=4, blocks=1)
+    with torch.no_grad():
+        corrector.output.bias.fill_(1.0)
+    current = torch.rand(1, 3, 6, 8, 8)
+    previous = torch.rand_like(current)
+    with torch.inference_mode():
+        output = corrector(current, previous, confidence=0.0)
+    assert torch.equal(output, current)
 
 
 @pytest.mark.skipif(

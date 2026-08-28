@@ -241,7 +241,7 @@ def receive_and_decode_features(
     separated = split_gops(sequence, mode.gop_frames)
     count = separated.shape[0] // batch
     z = model.encoder(separated)
-    if cell.snr_db is None and cell.fading is None:
+    if cell.snr_db is None and cell.fading in (None, "none"):
         received = z
         weights = torch.ones_like(z)
     else:
@@ -251,7 +251,7 @@ def receive_and_decode_features(
                 item.float().cpu().numpy(),
                 mode_name=mode.name,
                 snr_db=cell.snr_db,
-                fading_preset=cell.fading,
+                fading_preset=None if cell.fading == "none" else cell.fading,
             )
             received_rows.append(torch.from_numpy(latent))
             weight_rows.append(torch.from_numpy(weight))

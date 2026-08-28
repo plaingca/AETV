@@ -238,12 +238,14 @@ class VideoEncoder(nn.Module):
                 CausalConv3d(width * 2, latent_channels, 3, causal=causal),
             )
 
-    def forward(self, video):
+    def forward(self, video, stem_residual=None):
         x = video * 2 - 1
         if self.deep:
             # net indices: [0:3] stem+res at 1/2, [3:7] down+res at 1/4,
             # [7:12] down+res+attention at 1/8, [12] latent projection.
-            x = self.e0b(self.e0a(self.net[0:3](x)))
+            x = self.net[0:3](x)
+            x = self._add_stem_residual(x, stem_residual)
+            x = self.e0b(self.e0a(x))
             if self.deep2:
                 x = self.e0c(x)
             x = self.e1b(self.e1a(self.net[3:7](x)))
@@ -257,8 +259,11 @@ class VideoEncoder(nn.Module):
             if self.deep3:
                 x = self.e2d(x)
             z = torch.tanh(self.net[12](x))
-        else:
+        elif stem_residual is None:
             z = torch.tanh(self.net(x))
+        else:
+            x = self._add_stem_residual(self.net[0:3](x), stem_residual)
+            z = torch.tanh(self.net[3:](x))
         if self.clip_rms_latents:
             rms = z.flatten(1).pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-6)
             rms = rms[:, :, None, None, None]
@@ -266,6 +271,16 @@ class VideoEncoder(nn.Module):
             # Streaming-causal mode cannot leak future energy into an earlier slice.
             rms = z.pow(2).mean(dim=(1, 3, 4), keepdim=True).sqrt().clamp_min(1e-6)
         return z / rms
+
+    @staticmethod
+    def _add_stem_residual(features, stem_residual):
+        if stem_residual is None:
+            return features
+        if stem_residual.shape != features.shape:
+            stem_residual = F.interpolate(
+                stem_residual, size=features.shape[2:], mode="trilinear", align_corners=False
+            )
+        return features + stem_residual
 
 
 class VideoDecoder(nn.Module):

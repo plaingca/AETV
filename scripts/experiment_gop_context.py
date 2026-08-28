@@ -259,7 +259,7 @@ def decode_base_gops(
     separated = split_gops(sequence, mode.gop_frames)
     count = separated.shape[0] // batch
     z = model.encoder(separated)
-    if cell.snr_db is None and cell.fading is None:
+    if cell.snr_db is None and cell.fading in (None, "none"):
         received = z
         weights = torch.ones_like(z)
     else:
@@ -270,7 +270,7 @@ def decode_base_gops(
                 item.float().cpu().numpy(),
                 mode_name=mode.name,
                 snr_db=cell.snr_db,
-                fading_preset=cell.fading,
+                fading_preset=None if cell.fading == "none" else cell.fading,
             )
             received_rows.append(torch.from_numpy(latent))
             weight_rows.append(torch.from_numpy(weight))
@@ -348,10 +348,10 @@ def train_adapter(args: argparse.Namespace, mode: AETVModeSpec, device: torch.de
             total = (
                 args.source_weight * source_l1
                 + args.anchor_weight * anchor_l1
-                + args.boundary_weight * cross["boundary_delta"]
+                + args.boundary_weight * cross["boundary_rgb_delta"]
                 + args.lowpass_weight * cross["boundary_lowpass_step"]
                 + args.acceleration_weight * cross["boundary_acceleration"]
-                + args.within_weight * cross["within_delta"]
+                + args.within_weight * cross["within_gop_temporal_error"]
                 + args.vgg_source_weight * vgg_source
                 + args.vgg_anchor_weight * vgg_anchor
             )
@@ -373,7 +373,7 @@ def train_adapter(args: argparse.Namespace, mode: AETVModeSpec, device: torch.de
         if step == 1 or step % args.log_interval == 0 or step == args.steps:
             print(
                 f"step {step:>4}/{args.steps} total={row['total']:.5f} "
-                f"boundary={row['boundary_delta']:.5f} source={row['source_l1']:.5f} "
+                f"boundary={row['boundary_rgb_delta']:.5f} source={row['source_l1']:.5f} "
                 f"anchor={row['anchor_l1']:.5f} vgg={row['vgg_source']:.5f}",
                 flush=True,
             )

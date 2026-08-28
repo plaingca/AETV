@@ -104,8 +104,9 @@ def tensor_sha256(value: torch.Tensor) -> str:
 class SequenceCache(Dataset):
     """Read the first 12 contiguous frames from a fixed sequence cache."""
 
-    def __init__(self, root: Path, *, limit: int | None = None):
+    def __init__(self, root: Path, *, limit: int | None = None, max_frames: int = FRAMES_PER_EXAMPLE):
         self.root = root
+        self.max_frames = max_frames
         self.files = sorted(root.glob("sequence_*.pt"))
         if not self.files:
             self.files = sorted(root.glob("row_*.pt"))
@@ -121,11 +122,11 @@ class SequenceCache(Dataset):
         value = torch.load(self.files[index], map_location="cpu").float()
         if value.ndim != 4 or value.shape[0] != 3:
             raise ValueError(f"expected CTHW tensor in {self.files[index]}, got {tuple(value.shape)}")
-        if value.shape[1] < FRAMES_PER_EXAMPLE:
+        if value.shape[1] < self.max_frames:
             raise ValueError(
-                f"{self.files[index]} has {value.shape[1]} frames; need {FRAMES_PER_EXAMPLE}"
+                f"{self.files[index]} has {value.shape[1]} frames; need {self.max_frames}"
             )
-        value = value[:, :FRAMES_PER_EXAMPLE]
+        value = value[:, :self.max_frames]
         if value.max() > 1.0:
             value = value.div(255.0)
         return value.contiguous()

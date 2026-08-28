@@ -48,8 +48,40 @@ from train import (  # noqa: E402
 )
 
 
+def initialize_from_released(model: OverlappingGOPAutoencoder, checkpoint: Path) -> None:
+    """Transplant the released V8 encoder/decoder and retain its latent order."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    released = payload["model_state_dict"]
+    state = model.state_dict()
+    copied = 0
+    for key in ("encoder.encoder.", "decoder.decoder."):
+        for name in list(state):
+            if name.startswith(key) and name in released and state[name].shape == released[name].shape:
+                state[name].copy_(released[name])
+                copied += 1
+    # The released non-compact V8 layout is the first 2,808 grid coordinates;
+    # the final eight wire values are intentionally unused by its decoder.
+    pack = state["encoder.latent_pack.weight"]
+    unpack = state["decoder.latent_unpack.weight"]
+    if unpack.shape[1] != pack.shape[0]:
+        raise RuntimeError("unexpected V8 overlap latent geometry")
+    pack.zero_()
+    unpack.zero_()
+    pack_diagonal = min(pack.shape[0], pack.shape[1])
+    unpack_diagonal = min(unpack.shape[0], unpack.shape[1])
+    pack[:pack_diagonal, :pack_diagonal].copy_(torch.eye(pack_diagonal, dtype=pack.dtype))
+    unpack[:unpack_diagonal, :unpack_diagonal].copy_(torch.eye(unpack_diagonal, dtype=unpack.dtype))
+    model.load_state_dict(state, strict=True)
+    print(f"initialized overlap model from {checkpoint} ({copied} released tensors)", flush=True)
+
+
 def cached_loader(args: argparse.Namespace, mode, device: torch.device):
-    dataset = SequenceCache(args.data_dir / cache_name(mode, args.train_gops, "train"))
+    dataset = SequenceCache(
+        args.train_cache
+        if args.train_cache is not None
+        else args.data_dir / cache_name(mode, args.train_gops, "train"),
+        max_frames=args.train_gops * mode.gop_frames,
+    )
     generator = torch.Generator().manual_seed(args.seed)
     while True:
         loader = DataLoader(
@@ -201,7 +233,26 @@ def compute_losses(
     perceptual: MultiLayerVGGPerceptualLoss | None,
     args: argparse.Namespace,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    cross = boundary_losses(recon, target, AETV_MODES[args.mode].gop_frames)
+    frames_per_gop = AETV_MODES[args.mode].gop_frames
+    delta_error = (recon[:, :, 1:] - recon[:, :, :-1]) - (
+        target[:, :, 1:] - target[:, :, :-1]
+    )
+    boundaries = list(range(frames_per_gop, recon.shape[2], frames_per_gop))
+    if not boundaries:
+        raise ValueError("overlap training requires at least one GOP boundary")
+    boundary_delta = torch.stack(
+        [delta_error[:, :, boundary - 1] for boundary in boundaries], dim=2
+    ).abs().mean()
+    acceleration_error = delta_error[:, :, 1:] - delta_error[:, :, :-1]
+    acceleration = torch.stack(
+        [acceleration_error[:, :, boundary - 2:boundary] for boundary in boundaries], dim=2
+    ).abs().mean()
+    lowpass = F.avg_pool2d(
+        delta_error.permute(0, 2, 1, 3, 4).flatten(0, 1), 9, 1, 4
+    ).reshape(delta_error.shape[0], delta_error.shape[2], delta_error.shape[1], *delta_error.shape[-2:]).permute(0, 2, 1, 3, 4)
+    boundary_lowpass = torch.stack(
+        [lowpass[:, :, boundary - 1] for boundary in boundaries], dim=2
+    ).abs().mean()
     values = {
         "mse": F.mse_loss(recon, target),
         "l1": F.l1_loss(recon, target),
@@ -209,9 +260,9 @@ def compute_losses(
         "gradient": spatial_gradient_loss(recon, target),
         "temporal": temporal_delta_loss(recon, target),
         "acceleration": temporal_acceleration_loss(recon, target),
-        "boundary": cross["boundary_delta"],
-        "boundary_lowpass": cross["boundary_lowpass_step"],
-        "boundary_acceleration": cross["boundary_acceleration"],
+        "boundary": boundary_delta,
+        "boundary_lowpass": boundary_lowpass,
+        "boundary_acceleration": acceleration,
     }
     if perceptual is None:
         values["perceptual"] = recon.new_zeros(())
@@ -241,9 +292,13 @@ def evaluate(
     device: torch.device,
 ) -> dict | None:
     mode = model.mode
-    cache = args.data_dir / cache_name(mode, args.train_gops, "eval")
+    cache = (
+        args.eval_cache
+        if args.eval_cache is not None
+        else args.data_dir / cache_name(mode, args.train_gops, "eval")
+    )
     try:
-        dataset = SequenceCache(cache)
+        dataset = SequenceCache(cache, max_frames=args.train_gops * mode.gop_frames)
     except ValueError:
         print(f"evaluation skipped: no fixed cache at {cache}", flush=True)
         return None
@@ -305,6 +360,8 @@ def train(args: argparse.Namespace) -> None:
         ).to(device)
         payload = None
         start_step = 0
+        if args.init_checkpoint:
+            initialize_from_released(model, args.init_checkpoint)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=1e-4
     )
@@ -444,9 +501,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--mode", default="V8", choices=tuple(AETV_MODES))
     value.add_argument("--out", type=Path, default=Path("runs/v8-overlap-full"))
     value.add_argument("--resume", type=Path)
+    value.add_argument("--init-checkpoint", type=Path)
     value.add_argument("--reset-optimizer", action="store_true")
     value.add_argument("--data-source", choices=("stream", "cache"), default="stream")
     value.add_argument("--data-dir", type=Path, default=Path("runs/gop-boundary-data"))
+    value.add_argument("--train-cache", type=Path)
+    value.add_argument("--eval-cache", type=Path)
     value.add_argument("--hf-dataset", default="lance-format/Openvid-1M")
     value.add_argument("--train-gops", type=int, default=5)
     value.add_argument("--window-gops", type=int, default=5)

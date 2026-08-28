@@ -67,9 +67,11 @@ class AETVEncoder(nn.Module):
             deep3=is_deep3,
         )
 
-    def forward(self, video: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, video: torch.Tensor, stem_residual: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Encode (B, 3, T, H, W) -> (B, latent_budget)."""
-        z_grid = self.encoder(video)  # (B, C, T', H', W')
+        z_grid = self.encoder(video, stem_residual=stem_residual)  # (B, C, T', H', W')
         b = z_grid.shape[0]
         flat_z = z_grid.reshape(b, -1)
         if flat_z.shape[1] >= self.latent_budget:
