@@ -8,6 +8,8 @@ import math
 import threading
 import time
 
+import numpy as np
+
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -276,6 +278,7 @@ class ReceivePanel(QWidget):
         self._kiwi_force_auto = False
         self._start_after_kiwi_pick = False
         self._stop_thread: threading.Thread | None = None
+        self._emulated_video = None
         self._stateArrived.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._videoArrived.connect(self._show_video, Qt.ConnectionType.QueuedConnection)
@@ -354,6 +357,7 @@ class ReceivePanel(QWidget):
             return False
         try:
             self.preview.clear()
+            self._emulated_video = None
             self.engine.start()
         except Exception as error:
             self.status.setText(str(error))
@@ -399,7 +403,11 @@ class ReceivePanel(QWidget):
 
     def save_current(self) -> None:
         try:
-            path = self.engine.save_current()
+            path = (
+                self.engine.save_video(self._emulated_video)
+                if self._emulated_video is not None
+                else self.engine.save_current()
+            )
         except Exception as error:
             self.status.setText(str(error))
             return
@@ -1025,6 +1033,7 @@ class ReceivePanel(QWidget):
 
     def prepare_emulator(self, label: str) -> None:
         self.preview.clear()
+        self._emulated_video = None
         self.status.setText(f"Waiting for {label} loopback…")
         self.statusChanged.emit(self.status.text())
         self.progress.setValue(0)
@@ -1032,6 +1041,11 @@ class ReceivePanel(QWidget):
     def show_emulated(self, video, state: RxState) -> None:
         """Display locally recovered modem video in the normal receive pane."""
         mode = self.station.require_codec().mode
+        if self._emulated_video is None:
+            self._emulated_video = video.copy()
+        else:
+            self._emulated_video = np.concatenate([self._emulated_video, video], axis=0)
+            self._emulated_video = self._emulated_video[-mode.gop_frames * 300 :]
         self.preview.enqueue_rgb(
             video,
             fps=mode.fps,
@@ -1041,7 +1055,8 @@ class ReceivePanel(QWidget):
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
-        self.progress.setValue(min(100, max(5, state.gops * 8)))
+        requested_gops = max(1, int(self.station.settings.gops))
+        self.progress.setValue(min(100, max(5, round(100 * state.gops / requested_gops))))
 
     def _apply_ring(self, ring) -> None:
         if self._waterfall is None:

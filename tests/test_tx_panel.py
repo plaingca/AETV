@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from aetv.gui.rx_panel import ReceivePanel
 from aetv.gui.tx_panel import TransmitPanel
+from aetv.station import RxState
 
 
 class _Preview:
@@ -61,3 +63,37 @@ def test_mode_selection_requests_reload_before_transmit():
     assert requested == ["V7"]
     assert not button.enabled
     assert status.text == "loading V7 model…"
+
+
+def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
+    class Preview:
+        def enqueue_rgb(self, *_args, **_kwargs):
+            pass
+
+    class Progress:
+        def setValue(self, value):
+            self.value = value
+
+    panel = SimpleNamespace(
+        station=SimpleNamespace(
+            settings=SimpleNamespace(gops=10),
+            require_codec=lambda: SimpleNamespace(
+                mode=SimpleNamespace(fps=6, gop_frames=2)
+            ),
+        ),
+        preview=Preview(),
+        status=SimpleNamespace(setText=lambda _text: None),
+        statusChanged=SimpleNamespace(emit=lambda _text: None),
+        progress=Progress(),
+        _emulated_video=None,
+    )
+    first = np.zeros((2, 2, 3, 3), dtype=np.uint8)
+    last = np.ones((2, 2, 3, 3), dtype=np.uint8)
+
+    ReceivePanel.show_emulated(panel, first, RxState(gops=1, message="1/10"))
+    assert panel.progress.value == 10
+    ReceivePanel.show_emulated(panel, last, RxState(gops=10, message="10/10"))
+
+    assert panel.progress.value == 100
+    assert np.array_equal(panel._emulated_video[:2], first)
+    assert np.array_equal(panel._emulated_video[2:], last)

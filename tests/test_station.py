@@ -484,6 +484,24 @@ def test_soundcard_debug_sink_records_exact_ring_audio(tmp_path):
         assert saved.getnframes() == 3
 
 
+def test_rx_engine_can_save_supplied_loopback_video(monkeypatch, tmp_path):
+    from aetv.station import RxEngine, Station
+
+    video = np.zeros((4, 2, 3, 3), dtype=np.uint8)
+    saved = []
+    monkeypatch.setattr(
+        "aetv.station.write_mp4",
+        lambda frames, path, fps: saved.append((frames.copy(), path, fps)),
+    )
+    station = Station(StationSettings(receive_dir=str(tmp_path)))
+    station.codec = SimpleNamespace(mode=SimpleNamespace(name="V8", fps=6))
+    target = tmp_path / "loopback.mp4"
+
+    assert RxEngine(station).save_video(video, target) == target
+    assert np.array_equal(saved[0][0], video)
+    assert saved[0][1:] == (target, 6)
+
+
 def test_channel_loopback_decodes_without_keying(monkeypatch):
     from aetv.station import Station
 

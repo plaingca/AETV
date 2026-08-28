@@ -1164,8 +1164,12 @@ class RxEngine:
     def save_current(self, path: Path | None = None) -> Path | None:
         if self.last_video is None:
             return None
+        return self.save_video(self.last_video, path)
+
+    def save_video(self, video: np.ndarray, path: Path | None = None) -> Path:
+        """Save decoded frames, including video supplied by a local loopback."""
         folder = self.station.settings.receive_path()
         folder.mkdir(parents=True, exist_ok=True)
         target = path or folder / time.strftime("aetv_%Y%m%d-%H%M%S.mp4")
-        write_mp4(self.last_video, Path(target), self.station.require_codec().mode.fps)
+        write_mp4(video, Path(target), self.station.require_codec().mode.fps)
         return Path(target)
