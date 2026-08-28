@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import AETVModeSpec
+from .ffmpeg import ffmpeg_executable
 
 
 class CameraFrameBuffer:
@@ -327,12 +328,18 @@ def iter_video_file(
         # The duration control describes the transmission length, not a
         # maximum imposed by the selected clip. Repeat a short file so ffmpeg
         # can always supply the requested whole GOPs.
-        "ffmpeg", "-v", "error", "-stream_loop", "-1",
+        ffmpeg_executable(), "-v", "error", "-stream_loop", "-1",
         "-ss", f"{start_s:.3f}", "-i", str(path),
         "-vf", video_filter, "-frames:v", str(frames),
         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
     ]
-    proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    proc = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=600,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
     expected = frames * mode.height * mode.width * 3
     if proc.returncode or len(proc.stdout) != expected:
         raise RuntimeError(
@@ -367,14 +374,38 @@ def write_mp4(frames: np.ndarray, path: Path, fps: float) -> None:
         raise ValueError(f"expected (T, H, W, 3), got {frames.shape}")
     count, height, width, _ = frames.shape
     command = [
-        "ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+        ffmpeg_executable(),
+        "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{width}x{height}", "-r", str(fps), "-i", "pipe:0",
         "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
         "-pix_fmt", "yuv420p", str(path),
     ]
-    proc = subprocess.run(command, input=frames.tobytes(), stderr=subprocess.PIPE, timeout=600)
+    proc = subprocess.run(
+        command,
+        input=frames.tobytes(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=600,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
     if proc.returncode:
         raise RuntimeError(proc.stderr.decode("utf-8", "replace")[-2000:])
+
+
+def write_video_smoke_test(path: Path) -> None:
+    """Exercise the same FFmpeg path used by the receive Save video button."""
+    height, width = 32, 48
+    x = np.arange(width, dtype=np.uint8)[None, :]
+    y = np.arange(height, dtype=np.uint8)[:, None]
+    frames = np.empty((3, height, width, 3), dtype=np.uint8)
+    for index in range(len(frames)):
+        frames[index, :, :, 0] = x + index * 20
+        frames[index, :, :, 1] = y + index * 30
+        frames[index, :, :, 2] = 128
+    write_mp4(frames, path, fps=6.0)
+    payload = path.read_bytes()
+    if len(payload) < 32 or b"ftyp" not in payload[:32]:
+        raise RuntimeError(f"FFmpeg smoke test did not create a valid MP4: {path}")
 
 
 def write_side_by_side(left: np.ndarray, right: np.ndarray, path: Path, fps: float) -> None:

@@ -49,6 +49,7 @@ common=(
   --exclude-module aetv.channel
   --exclude-module aetv.data
   --exclude-module aetv.video_backbone
+  --exclude-module imageio_ffmpeg
   --add-data "$repo_root/aetv/assets:aetv/assets"
   --add-data "$hamlib_dir:aetv/bin"
 )
@@ -63,17 +64,29 @@ done
   "$repo_root/scripts/benchmark_inference.py"
 
 app_dir="$dist_root/AETV"
+ffmpeg_source="$("$python_bin" -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+if [[ ! -x "$ffmpeg_source" ]]; then
+  echo "imageio-ffmpeg did not provide a Linux executable: $ffmpeg_source" >&2
+  exit 1
+fi
+cp "$ffmpeg_source" "$app_dir/ffmpeg"
+chmod 755 "$app_dir/ffmpeg"
 cp "$dist_root/AETV-Benchmark/AETV-Benchmark" "$app_dir/AETV-Benchmark"
-cp "$repo_root/README.md" "$repo_root/LICENSE" "$repo_root/NOTICE" "$app_dir/"
+cp "$repo_root/README.md" "$repo_root/LICENSE" "$repo_root/NOTICE" \
+  "$repo_root/FFMPEG-NOTICE.txt" "$app_dir/"
 
 (
   cd "$app_dir"
+  ./AETV-Benchmark --video-save-smoke "$build_root/saved-video-smoke.mp4"
+  test -s "$build_root/saved-video-smoke.mp4"
   XDG_CACHE_HOME="$build_root/smoke-cache" \
     AETV_OFFLINE=1 ./AETV-Benchmark \
     --mode V8 --device cpu --warmup 0 --repeats 1 --json build-smoke.json
   XDG_CACHE_HOME="$build_root/smoke-cache" \
     XDG_CONFIG_HOME="$build_root/smoke-config" \
-    QT_QPA_PLATFORM=offscreen AETV_OFFLINE=1 ./AETV --smoke-test
+    QT_QPA_PLATFORM=offscreen AETV_OFFLINE=1 ./AETV --smoke-test \
+      --video-smoke-output "$build_root/saved-video-smoke.mp4"
+  test -s "$build_root/saved-video-smoke.mp4"
 )
 
 packaged_models="$app_dir/_internal/models"

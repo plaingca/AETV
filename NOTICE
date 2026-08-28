@@ -38,6 +38,10 @@ includes both licence texts and corresponding source information; users may
 replace the components with compatible builds. Upstream source and releases:
 https://github.com/Hamlib/Hamlib
 
+Portable packages also include an unmodified FFmpeg executable obtained from
+imageio-ffmpeg. See FFMPEG-NOTICE.txt in each package for license, source, and
+replacement information.
+
 Do not commit copyrighted test video or third-party model weights.
 Identify every transmission with your callsign; this software does not
 replace a license or a band-plan check.

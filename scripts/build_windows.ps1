@@ -52,6 +52,7 @@ $Common = @(
     "--exclude-module", "aetv.channel",
     "--exclude-module", "aetv.data",
     "--exclude-module", "aetv.video_backbone",
+    "--exclude-module", "imageio_ffmpeg",
     "--add-data", "$(Join-Path $RepoRoot 'aetv\assets');aetv/assets",
     "--add-data", "$HamlibDir;aetv/bin"
 )
@@ -72,6 +73,18 @@ foreach ($Model in $RuntimeModels) {
     (Join-Path $RepoRoot "scripts\audio_helper.py")
 
 $AppDir = Join-Path $DistRoot "AETV"
+# Qt uses the Windows ICU compatibility layer. PyInstaller can discover and
+# bundle an unrelated third-party icuuc.dll from the build host, which then
+# shadows the compatible Windows DLL and prevents PySide6.QtCore from loading.
+$ForeignIcu = Join-Path $AppDir "_internal\icuuc.dll"
+if (Test-Path -LiteralPath $ForeignIcu -PathType Leaf) {
+    Remove-Item -LiteralPath $ForeignIcu -Force
+}
+$FfmpegSource = (& $Python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())").Trim()
+if (-not (Test-Path -LiteralPath $FfmpegSource -PathType Leaf)) {
+    throw "imageio-ffmpeg did not provide a Windows executable: $FfmpegSource"
+}
+Copy-Item -LiteralPath $FfmpegSource -Destination (Join-Path $AppDir "ffmpeg.exe")
 Copy-Item -LiteralPath (Join-Path $DistRoot "AETV-Benchmark\AETV-Benchmark.exe") -Destination $AppDir
 $AudioHelperDir = Join-Path $AppDir "audio-helper"
 New-Item -ItemType Directory -Force -Path $AudioHelperDir | Out-Null
@@ -79,6 +92,7 @@ Copy-Item -LiteralPath (Join-Path $DistRoot "AETV-Audio.exe") -Destination $Audi
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "NOTICE") -Destination $AppDir
+Copy-Item -LiteralPath (Join-Path $RepoRoot "FFMPEG-NOTICE.txt") -Destination $AppDir
 
 $PreviousOffline = $env:AETV_OFFLINE
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM
@@ -91,6 +105,16 @@ try {
     $env:LOCALAPPDATA = Join-Path $BuildRoot "smoke-cache"
     Push-Location $AppDir
     try {
+        $VideoSmoke = Join-Path $BuildRoot "saved-video-smoke.mp4"
+        if (Test-Path -LiteralPath $VideoSmoke) {
+            Remove-Item -LiteralPath $VideoSmoke -Force
+        }
+        & ".\AETV-Benchmark.exe" --video-save-smoke $VideoSmoke | Out-Null
+        if ($LASTEXITCODE -ne 0 -or
+            -not (Test-Path -LiteralPath $VideoSmoke -PathType Leaf) -or
+            (Get-Item -LiteralPath $VideoSmoke).Length -lt 32) {
+            throw "Packaged Save video smoke test did not create an MP4"
+        }
         $BenchmarkDevice = if ($TestDirectML) { "dml" } else { "cpu" }
         $Smoke = & ".\AETV-Benchmark.exe" --mode V8 --device $BenchmarkDevice --warmup 0 --repeats 1
         if ($LASTEXITCODE -ne 0) {
@@ -100,7 +124,8 @@ try {
         if ($TestDirectML -and $SmokeResult.device -ne "DirectML") {
             throw "Packaged GPU benchmark did not select DirectML"
         }
-        $GuiSmoke = Start-Process -FilePath ".\AETV.exe" -ArgumentList "--smoke-test" `
+        $GuiSmoke = Start-Process -FilePath ".\AETV.exe" `
+            -ArgumentList @("--smoke-test", "--video-smoke-output", $VideoSmoke) `
             -PassThru -WindowStyle Hidden
         if (-not $GuiSmoke.WaitForExit(180000)) {
             Stop-Process -Id $GuiSmoke.Id -Force -ErrorAction SilentlyContinue

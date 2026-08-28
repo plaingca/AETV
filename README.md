@@ -75,6 +75,8 @@ to install or verify the other mode. Models are cached in
 `%LOCALAPPDATA%\AETV\models` on Windows and `$XDG_CACHE_HOME/aetv/models` (or
 `~/.cache/aetv/models`) on Linux. `AETV_MODEL_DIR` overrides that location.
 Windows may show a SmartScreen prompt until release binaries are code-signed.
+FFmpeg is included in the portable packages, so opening source videos and
+saving received MP4 files do not require a separate system installation.
 
 FlexRadio control, serial PTT, VOX/manual PTT, soundcards, and Hamlib direct rig
 control are self-contained. Windows packages include the official dynamically

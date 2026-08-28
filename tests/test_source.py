@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from aetv.source import CameraFrameBuffer, iter_video_file
+from aetv.source import CameraFrameBuffer, iter_video_file, write_video_smoke_test
 
 
 class _StuckThread:
@@ -95,8 +95,19 @@ def test_video_file_repeats_to_fill_requested_transmission(monkeypatch):
         )
 
     monkeypatch.setattr("aetv.source.subprocess.run", run)
+    monkeypatch.setattr("aetv.source.ffmpeg_executable", lambda: "C:/AETV/ffmpeg.exe")
 
     frames = iter_video_file("short.mp4", mode, frames=requested_frames)
 
     assert captured["command"][captured["command"].index("-stream_loop") + 1] == "-1"
+    assert captured["command"][0] == "C:/AETV/ffmpeg.exe"
     assert frames.shape == (requested_frames, mode.height, mode.width, 3)
+
+
+def test_video_save_smoke_test_creates_mp4(tmp_path):
+    target = tmp_path / "saved-video.mp4"
+
+    write_video_smoke_test(target)
+
+    assert target.stat().st_size > 32
+    assert b"ftyp" in target.read_bytes()[:32]

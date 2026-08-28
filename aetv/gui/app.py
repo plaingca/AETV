@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from aetv.settings import StationSettings, load_settings, save_settings
 from aetv.config import RELEASE_MODES
 from aetv.hfchannel import CHANNEL_PROFILES
 from aetv.station import Station
+from aetv.source import write_video_smoke_test
 from aetv.gui.rx_panel import ReceivePanel
 from aetv.gui.model_manager import ModelInventoryThread, ModelManagerDialog
 from aetv.gui.settings_dialog import SettingsDialog
@@ -610,6 +612,23 @@ def main(argv: list[str] | None = None) -> int:
     smoke_test = "--smoke-test" in args
     if smoke_test:
         args.remove("--smoke-test")
+    smoke_output = None
+    if "--video-smoke-output" in args:
+        index = args.index("--video-smoke-output")
+        if index + 1 >= len(args):
+            return 3
+        smoke_output = Path(args[index + 1])
+        del args[index : index + 2]
+    if smoke_test:
+        try:
+            if smoke_output is not None:
+                write_video_smoke_test(smoke_output)
+            else:
+                with tempfile.TemporaryDirectory(prefix="aetv-video-smoke-") as folder:
+                    write_video_smoke_test(Path(folder) / "saved-video.mp4")
+        except Exception as error:
+            print(f"packaged video save smoke test failed: {error}", file=sys.stderr)
+            return 3
     app = QApplication(args)
     app.setApplicationName("AETV")
     app.setApplicationDisplayName("AETV")
