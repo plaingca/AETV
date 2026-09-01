@@ -1,19 +1,216 @@
-"""Webcam and file sources that emit AETV-sized RGB frames."""
+"""Webcam, desktop, and file sources that emit AETV-sized RGB frames."""
 
 from __future__ import annotations
 
 import queue
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections import deque
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from .config import AETVModeSpec
 from .ffmpeg import ffmpeg_executable
+
+
+@dataclass(frozen=True)
+class ScreenCaptureSpec:
+    """A desktop capture target in virtual-desktop coordinates."""
+
+    name: str
+    bbox: tuple[int, int, int, int]
+    window_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PreparedClip:
+    """A file whose neural GOPs are ready for immediate modulation."""
+
+    path: str
+    mode_name: str
+    latents: tuple[np.ndarray, ...]
+    preview_frames: np.ndarray
+    start_s: float = 0.0
+
+    @property
+    def gops(self) -> int:
+        return len(self.latents)
+
+
+@dataclass(frozen=True)
+class ClipEdit:
+    """Non-destructive edit settings stored with a clip-bank slot."""
+
+    path: str
+    start_s: float
+    end_s: float
+    framing: str = "crop"
+
+    @property
+    def duration_s(self) -> float:
+        return max(0.0, self.end_s - self.start_s)
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "start_s": self.start_s,
+            "end_s": self.end_s,
+            "framing": self.framing,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "ClipEdit":
+        return cls(
+            path=str(value.get("path", "")),
+            start_s=max(0.0, float(value.get("start_s", 0.0))),
+            end_s=max(0.0, float(value.get("end_s", 0.0))),
+            framing=str(value.get("framing", "crop")),
+        )
+
+
+def list_windows() -> list[ScreenCaptureSpec]:
+    """Return visible top-level windows where the platform exposes them."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    results: list[ScreenCaptureSpec] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return True
+        if rect.right - rect.left < 32 or rect.bottom - rect.top < 32:
+            return True
+        results.append(
+            ScreenCaptureSpec(
+                title.value,
+                (rect.left, rect.top, rect.right, rect.bottom),
+                int(hwnd),
+            )
+        )
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return sorted(results, key=lambda item: item.name.casefold())
+
+
+def _current_screen_bbox(spec: ScreenCaptureSpec) -> tuple[int, int, int, int]:
+    if spec.window_id is None or sys.platform != "win32":
+        return spec.bbox
+    import ctypes
+    from ctypes import wintypes
+
+    rect = wintypes.RECT()
+    if not ctypes.windll.user32.GetWindowRect(spec.window_id, ctypes.byref(rect)):
+        raise RuntimeError(f"capture window is no longer available: {spec.name}")
+    if ctypes.windll.user32.IsIconic(spec.window_id):
+        raise RuntimeError(f"capture window is minimized: {spec.name}")
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def iter_screen_capture(
+    mode: AETVModeSpec,
+    spec: ScreenCaptureSpec,
+    duration_s: float | None = None,
+) -> Iterator[np.ndarray]:
+    """Sample the newest desktop image on the mode-rate monotonic clock.
+
+    Desktop grabs can be slower than the video frame rate on large monitors.
+    Keep grabbing on a background thread and repeat its newest image when
+    necessary, so a slow ImageGrab call cannot starve the TX audio stream.
+    """
+    try:
+        from PIL import ImageGrab
+    except ImportError as error:
+        raise RuntimeError("Pillow ImageGrab is required for screen capture") from error
+
+    condition = threading.Condition()
+    stop = threading.Event()
+    state: dict = {"frame": None, "error": None}
+    period = 1.0 / mode.fps
+
+    def grab_desktop() -> None:
+        next_grab_at = time.monotonic()
+        try:
+            while not stop.is_set():
+                delay = next_grab_at - time.monotonic()
+                if delay > 0 and stop.wait(delay):
+                    return
+                grab_started = time.monotonic()
+                bbox = _current_screen_bbox(spec)
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    raise RuntimeError(f"invalid screen capture area: {bbox}")
+                image = ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
+                frame = resize_frame(
+                    np.asarray(image, dtype=np.uint8).copy(),
+                    mode.width,
+                    mode.height,
+                )
+                with condition:
+                    state["frame"] = frame
+                    condition.notify_all()
+                grab_time = time.monotonic() - grab_started
+                # A very large desktop grab can otherwise occupy a CPU core
+                # continuously and slow neural encoding. Fast targets retain
+                # the mode frame rate; slow targets use at most 50% duty cycle
+                # and the sampler repeats their latest completed image.
+                next_grab_at = grab_started + max(period, 2.0 * grab_time)
+        except Exception as error:
+            with condition:
+                state["error"] = error
+                condition.notify_all()
+
+    worker = threading.Thread(
+        target=grab_desktop,
+        daemon=True,
+        name="aetv-screen-grabber",
+    )
+    worker.start()
+    try:
+        with condition:
+            ready_until = time.monotonic() + 10.0
+            while state["frame"] is None and state["error"] is None:
+                remaining = ready_until - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"screen capture did not start: {spec.name}")
+                condition.wait(remaining)
+            if state["error"] is not None:
+                raise state["error"]
+
+        limit = None if duration_s is None else int(round(duration_s * mode.fps))
+        next_frame_at = time.monotonic()
+        produced = 0
+        while limit is None or produced < limit:
+            delay = next_frame_at - time.monotonic()
+            if delay > 0 and stop.wait(delay):
+                return
+            with condition:
+                if state["error"] is not None:
+                    raise state["error"]
+                frame = state["frame"]
+            yield frame
+            produced += 1
+            next_frame_at = max(next_frame_at + period, time.monotonic())
+    finally:
+        stop.set()
+        worker.join(timeout=2.0)
 
 
 class CameraFrameBuffer:
@@ -175,6 +372,32 @@ def resize_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     return resized[top : top + height, left : left + width]
 
 
+def frame_for_output(
+    frame: np.ndarray, width: int, height: int, framing: str = "crop"
+) -> np.ndarray:
+    """Resize an RGB frame using the clip editor's chosen framing policy."""
+    if framing == "crop":
+        return resize_frame(frame, width, height)
+    try:
+        import cv2
+    except ImportError as error:
+        raise RuntimeError("opencv-python is required for video resize") from error
+    if framing == "stretch":
+        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+    if framing != "fit":
+        raise ValueError(f"unknown clip framing mode {framing!r}")
+    src_h, src_w = frame.shape[:2]
+    scale = min(height / src_h, width / src_w)
+    new_w = max(1, int(round(src_w * scale)))
+    new_h = max(1, int(round(src_h * scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    output = np.zeros((height, width, 3), dtype=np.uint8)
+    top = (height - new_h) // 2
+    left = (width - new_w) // 2
+    output[top : top + new_h, left : left + new_w] = resized
+    return output
+
+
 def iter_webcam(
     mode: AETVModeSpec,
     camera: int = 0,
@@ -315,15 +538,26 @@ def iter_video_file(
     mode: AETVModeSpec,
     start_s: float = 0.0,
     frames: int | None = None,
+    framing: str = "crop",
 ) -> np.ndarray:
     """Decode a video file into (T, H, W, 3) uint8 at the mode geometry."""
     if frames is None:
         raise ValueError("iter_video_file requires an exact frame count")
-    video_filter = (
-        f"fps={mode.fps},"
-        f"scale={mode.width}:{mode.height}:force_original_aspect_ratio=increase,"
-        f"crop={mode.width}:{mode.height}"
-    )
+    if framing == "crop":
+        resize_filter = (
+            f"scale={mode.width}:{mode.height}:force_original_aspect_ratio=increase,"
+            f"crop={mode.width}:{mode.height}"
+        )
+    elif framing == "fit":
+        resize_filter = (
+            f"scale={mode.width}:{mode.height}:force_original_aspect_ratio=decrease,"
+            f"pad={mode.width}:{mode.height}:(ow-iw)/2:(oh-ih)/2:black"
+        )
+    elif framing == "stretch":
+        resize_filter = f"scale={mode.width}:{mode.height}"
+    else:
+        raise ValueError(f"unknown clip framing mode {framing!r}")
+    video_filter = f"fps={mode.fps},{resize_filter}"
     command = [
         # The duration control describes the transmission length, not a
         # maximum imposed by the selected clip. Repeat a short file so ffmpeg
@@ -351,6 +585,26 @@ def iter_video_file(
     )
 
 
+def read_video_audio(
+    path: str | Path, duration_s: float, rate: int = 8000, *, start_s: float = 0.0
+) -> np.ndarray:
+    """Decode a media file's first mono audio track, padding silence as needed."""
+    samples = max(0, int(round(float(duration_s) * rate)))
+    command = [
+        ffmpeg_executable(), "-v", "error", "-ss", f"{start_s:.6f}",
+        "-i", str(path), "-vn", "-ac", "1",
+        "-ar", str(rate), "-t", f"{duration_s:.6f}", "-f", "f32le", "pipe:1",
+    ]
+    proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    if proc.returncode:
+        # A video without an audio stream is a valid silent program source.
+        return np.zeros(samples, dtype=np.float32)
+    audio = np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32, copy=True)
+    if len(audio) < samples:
+        audio = np.pad(audio, (0, samples - len(audio)))
+    return audio[:samples]
+
+
 def collect_gops(
     frames: np.ndarray | Iterator[np.ndarray],
     mode: AETVModeSpec,
@@ -368,8 +622,15 @@ def collect_gops(
     return stack[: n_gops * mode.gop_frames]
 
 
-def write_mp4(frames: np.ndarray, path: Path, fps: float) -> None:
-    """Write (T, H, W, 3) uint8 frames to an H.264 MP4."""
+def write_mp4(
+    frames: np.ndarray,
+    path: Path,
+    fps: float,
+    *,
+    audio: np.ndarray | None = None,
+    audio_rate: int = 8_000,
+) -> None:
+    """Write RGB frames and optional mono program audio to an H.264 MP4."""
     if frames.ndim != 4 or frames.shape[-1] != 3:
         raise ValueError(f"expected (T, H, W, 3), got {frames.shape}")
     count, height, width, _ = frames.shape
@@ -377,17 +638,39 @@ def write_mp4(frames: np.ndarray, path: Path, fps: float) -> None:
         ffmpeg_executable(),
         "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{width}x{height}", "-r", str(fps), "-i", "pipe:0",
-        "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
-        "-pix_fmt", "yuv420p", str(path),
     ]
-    proc = subprocess.run(
-        command,
-        input=frames.tobytes(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=600,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    audio_path: Path | None = None
+    if audio is not None:
+        from scipy.io import wavfile
+
+        duration_s = count / float(fps)
+        wanted = max(0, int(round(duration_s * int(audio_rate))))
+        samples = np.asarray(audio, dtype=np.float32).reshape(-1)[:wanted]
+        if len(samples) < wanted:
+            samples = np.pad(samples, (0, wanted - len(samples)))
+        handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        handle.close()
+        audio_path = Path(handle.name)
+        wavfile.write(audio_path, int(audio_rate), samples)
+        command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+    else:
+        command.append("-an")
+    command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "16"])
+    if audio_path is not None:
+        command.extend(["-c:a", "aac", "-b:a", "96k", "-shortest"])
+    command.extend(["-pix_fmt", "yuv420p", str(path)])
+    try:
+        proc = subprocess.run(
+            command,
+            input=frames.tobytes(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    finally:
+        if audio_path is not None:
+            audio_path.unlink(missing_ok=True)
     if proc.returncode:
         raise RuntimeError(proc.stderr.decode("utf-8", "replace")[-2000:])
 
@@ -402,10 +685,17 @@ def write_video_smoke_test(path: Path) -> None:
         frames[index, :, :, 0] = x + index * 20
         frames[index, :, :, 1] = y + index * 30
         frames[index, :, :, 2] = 128
-    write_mp4(frames, path, fps=6.0)
+    audio_rate = 8_000
+    duration_s = len(frames) / 6.0
+    timeline = np.arange(round(duration_s * audio_rate)) / audio_rate
+    audio = (0.2 * np.sin(2.0 * np.pi * 440.0 * timeline)).astype(np.float32)
+    write_mp4(frames, path, fps=6.0, audio=audio, audio_rate=audio_rate)
     payload = path.read_bytes()
     if len(payload) < 32 or b"ftyp" not in payload[:32]:
         raise RuntimeError(f"FFmpeg smoke test did not create a valid MP4: {path}")
+    recovered = read_video_audio(path, duration_s, audio_rate)
+    if float(np.sqrt(np.mean(recovered**2))) < 0.01:
+        raise RuntimeError(f"FFmpeg smoke test MP4 has no decodable audio: {path}")
 
 
 def write_side_by_side(left: np.ndarray, right: np.ndarray, path: Path, fps: float) -> None:

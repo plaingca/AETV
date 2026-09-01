@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 
 from aetv.audio_io import StreamResampler, resample_ratio
+from aetv.analog_av import COMPOSITE_FS
 from aetv.cat import CatConfig, NullPtt, RigctldClient, open_ptt
 from aetv.config import AETV_MODES
 from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
+from aetv.source import PreparedClip, ScreenCaptureSpec
 from aetv.station import (
     RxState,
     RxEngine,
@@ -343,6 +345,161 @@ def test_streaming_tx_prepares_first_gop_before_ptt(monkeypatch):
     assert events.index("produce:0") < events.index("ptt:True") < events.index("play:0")
 
 
+def test_composite_tx_polls_power_and_microphone_faders_per_gop(monkeypatch):
+    from aetv.station import Station
+
+    captured = []
+    opened = []
+
+    class InputStream:
+        def __init__(self):
+            self.stopped = False
+            self.closed = False
+
+        def stop(self):
+            self.stopped = True
+
+        def close(self):
+            self.closed = True
+
+    def open_input(_device, sink, rate, **_kwargs):
+        assert rate == 8000
+        stream = InputStream()
+        opened.append(stream)
+        # Both GOPs arrive through one device session, as they do in production.
+        sink.write(np.ones(16000, dtype=np.float32))
+        return stream, rate
+
+    monkeypatch.setattr("aetv.station.open_input_stream", open_input)
+
+    def mix(video, voice, *, video_power):
+        captured.append((video_power, float(np.mean(voice))))
+        return np.zeros(round(len(video) * 1.5), dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.mix_composite_chunk", mix)
+    settings = StationSettings(
+        mode="V8", waveform_mode="analog_av", av_video_power=0.2,
+        av_microphone_mix=0.0,
+    )
+    engine = TxEngine(Station(settings))
+    clip = np.concatenate((np.full(8000, 0.25), np.full(8000, 0.5))).astype(np.float32)
+    chunks = engine._composite_chunks(
+        iter((np.zeros(8000, np.float32), np.zeros(8000, np.float32))), clip, 2
+    )
+    next(chunks)
+    settings.av_video_power = 0.8
+    settings.av_microphone_mix = 1.0
+    next(chunks)
+    next(chunks)
+    assert captured[0][0] == 0.2
+    assert captured[1][0] == 0.8
+    # The second output carries the one-GOP-delayed first source mix.
+    assert captured[1][1] == pytest.approx(0.25)
+    # The drain carries the updated all-microphone mix (plus the final 0.1 s leadout).
+    assert captured[2][1] > 0.85
+    assert len(opened) == 1
+    assert opened[0].stopped and opened[0].closed
+
+
+def test_live_composite_uses_microphone_when_clip_fader_is_at_zero(monkeypatch):
+    """A webcam/screen TX has no clip track, so its mic must remain audible."""
+    captured_voice = []
+
+    class InputStream:
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    def open_input(_device, sink, rate, **_kwargs):
+        sink.write(np.ones(rate, dtype=np.float32))
+        return InputStream(), rate
+
+    def mix(video, voice, *, video_power):
+        captured_voice.append(np.asarray(voice).copy())
+        return np.zeros(round(len(video) * 1.5), dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.open_input_stream", open_input)
+    monkeypatch.setattr("aetv.station.mix_composite_chunk", mix)
+    settings = StationSettings(
+        mode="V8",
+        waveform_mode="analog_av",
+        av_video_power=0.0,
+        av_microphone_mix=0.0,
+    )
+    engine = TxEngine(Station(settings))
+
+    chunks = list(
+        engine._composite_chunks(
+            iter((np.zeros(8000, dtype=np.float32),)),
+            None,
+            1,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert np.max(np.abs(captured_voice[0])) == 0.0
+    assert np.mean(captured_voice[1]) > 0.8
+
+
+def test_composite_reports_post_fader_levels_and_pre_fader_clipping(monkeypatch):
+    levels = []
+
+    class InputStream:
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    def open_input(_device, sink, rate, **_kwargs):
+        sink.write(np.full(rate, 0.8, dtype=np.float32))
+        return InputStream(), rate
+
+    monkeypatch.setattr("aetv.station.open_input_stream", open_input)
+    monkeypatch.setattr(
+        "aetv.station.mix_composite_chunk",
+        lambda video, _voice, **_kwargs: np.asarray(video),
+    )
+    settings = StationSettings(
+        mode="V8",
+        waveform_mode="analog_av",
+        av_microphone_mix=0.25,
+    )
+    engine = TxEngine(Station(settings), on_audio_levels=levels.append)
+
+    list(
+        engine._composite_chunks(
+            iter((np.zeros(8000, dtype=np.float32),)),
+            np.full(8000, 1.2, dtype=np.float32),
+            1,
+        )
+    )
+
+    assert len(levels) == 1
+    assert levels[0]["microphone_peak"] == pytest.approx(0.2)
+    assert levels[0]["clip_peak"] == pytest.approx(0.9)
+    assert levels[0]["microphone_clipping"] is False
+    assert levels[0]["clip_clipping"] is True
+
+
+def test_transmit_output_meter_reports_final_waveform_peak_and_clipping():
+    levels = []
+    engine = TxEngine(Station(), on_audio_levels=levels.append)
+
+    engine._report_transmit_output_levels(
+        np.array([-0.25, 1.01, 0.5], dtype=np.float32)
+    )
+
+    assert levels == [
+        {
+            "output_peak": pytest.approx(1.01),
+            "output_clipping": True,
+        }
+    ]
+
+
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):
     captured = {}
 
@@ -406,6 +563,51 @@ def test_webcam_gops_are_captured_and_encoded_lazily(monkeypatch):
     next(stream)
     assert events[-3:] == ["frame:2", "frame:3", "encode:2"]
     stream.close()
+
+
+def test_live_transmit_switches_webcam_and_screen_at_gop_boundaries(monkeypatch):
+    selections = iter(
+        [
+            "webcam",
+            ScreenCaptureSpec("Monitor 1", (0, 0, 10, 10)),
+            "webcam",
+        ]
+    )
+    encoded = []
+
+    def camera_frames(_mode, **_kwargs):
+        for value in (1, 2, 3, 4):
+            yield np.full((2, 3, 3), value, dtype=np.uint8)
+
+    def screen_frames(_mode, _spec):
+        while True:
+            yield np.full((2, 3, 3), 9, dtype=np.uint8)
+
+    class Codec:
+        mode = SimpleNamespace(gop_frames=2)
+        device = "test"
+
+        def encode_gop(self, frames):
+            encoded.append(float(frames.mean()))
+            return np.array([frames.mean()], dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.iter_screen_capture", screen_frames)
+    station = Station(StationSettings(camera_index=0))
+    engine = TxEngine(
+        station,
+        camera_frames=camera_frames,
+        live_source=lambda: next(selections),
+    )
+
+    latents = list(engine._live_switching_gops(Codec(), 3, "webcam"))
+
+    assert len(latents) == 3
+    assert encoded == [1.5, 9.0, 3.5]
+    assert [timing["source"] for timing in engine.gop_timings] == [
+        "webcam",
+        "screen",
+        "webcam",
+    ]
 
 
 def test_stream_producer_does_not_encode_past_available_buffer(monkeypatch):
@@ -491,15 +693,133 @@ def test_rx_engine_can_save_supplied_loopback_video(monkeypatch, tmp_path):
     saved = []
     monkeypatch.setattr(
         "aetv.station.write_mp4",
-        lambda frames, path, fps: saved.append((frames.copy(), path, fps)),
+        lambda frames, path, fps, **kwargs: saved.append(
+            (frames.copy(), path, fps, kwargs)
+        ),
     )
     station = Station(StationSettings(receive_dir=str(tmp_path)))
     station.codec = SimpleNamespace(mode=SimpleNamespace(name="V8", fps=6))
     target = tmp_path / "loopback.mp4"
 
-    assert RxEngine(station).save_video(video, target) == target
+    audio = np.linspace(-0.5, 0.5, 8000, dtype=np.float32)
+    assert RxEngine(station).save_video(
+        video, target, audio=audio, audio_rate=8000
+    ) == target
     assert np.array_equal(saved[0][0], video)
-    assert saved[0][1:] == (target, 6)
+    assert saved[0][1:3] == (target, 6)
+    assert np.array_equal(saved[0][3]["audio"], audio)
+    assert saved[0][3]["audio_rate"] == 8000
+
+
+def test_live_receive_save_current_includes_retained_audio(monkeypatch, tmp_path):
+    saved = []
+    monkeypatch.setattr(
+        "aetv.station.write_mp4",
+        lambda frames, path, fps, **kwargs: saved.append((frames, path, fps, kwargs)),
+    )
+    station = Station(StationSettings(receive_dir=str(tmp_path)))
+    station.codec = SimpleNamespace(mode=SimpleNamespace(name="V8", fps=6))
+    engine = RxEngine(station)
+    engine.last_video = np.zeros((6, 2, 2, 3), dtype=np.uint8)
+    engine._append_received_audio(np.full(8000, 0.25, dtype=np.float32))
+    target = tmp_path / "live-rx.mp4"
+
+    assert engine.save_current(target) == target
+
+    assert saved[0][1:3] == (target, 6)
+    assert saved[0][3]["audio_rate"] == 8000
+    assert np.all(saved[0][3]["audio"] == 0.25)
+
+
+def test_received_audio_history_stays_aligned_to_retained_video_window():
+    engine = RxEngine(Station())
+    engine.last_audio = np.ones(300 * 8000, dtype=np.float32)
+    engine._append_received_audio(np.full(8000, 2.0, dtype=np.float32))
+
+    assert engine.last_audio is not None
+    assert len(engine.last_audio) == 300 * 8000
+    assert engine.last_audio[0] == 1
+    assert engine.last_audio[-1] == 2
+
+
+def test_receive_audio_meter_reports_raw_and_filtered_peaks_and_clipping():
+    levels = []
+    engine = RxEngine(Station(), on_audio_levels=levels.append)
+
+    engine._report_received_audio_levels(
+        np.array([-0.25, 1.01, 0.5], dtype=np.float32),
+        np.array([-0.25, 0.5], dtype=np.float32),
+    )
+
+    assert len(levels) == 1
+    assert levels[0]["raw_peak"] == pytest.approx(1.01)
+    assert levels[0]["raw_clipping"] is True
+    assert levels[0]["filtered_peak"] == pytest.approx(0.5)
+    assert levels[0]["filtered_clipping"] is False
+
+
+def test_composite_loopback_retains_received_program_audio(monkeypatch):
+    from aetv.station import Station
+
+    result = SimpleNamespace(
+        gops_latents=[np.array([1.0])],
+        gops_weights=[np.array([1.0])],
+        freq_offset=0.0,
+        sync_metric=0.9,
+        snr_db=20.0,
+        callsign="N0CALL",
+    )
+
+    class FakeChannel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def process(self, audio):
+            return audio
+
+    class FakeSeparator:
+        def process(self, audio):
+            values = np.asarray(audio, dtype=np.float32)
+            return np.ones_like(values), values
+
+    class FakeResampler:
+        def __init__(self, *_args):
+            pass
+
+        def __call__(self, audio):
+            return audio
+
+    class FakeDemodulator:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def feed(self, _audio):
+            return [result]
+
+    class Codec:
+        mode = SimpleNamespace(name="V8", band="W", gop_frames=1)
+
+        def decode_gop(self, *_args):
+            return np.zeros((1, 2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("aetv.station.StreamingChannelEmulator", FakeChannel)
+    monkeypatch.setattr("aetv.station.StreamingCompositeSeparator", FakeSeparator)
+    monkeypatch.setattr("aetv.station.StreamResampler", FakeResampler)
+    monkeypatch.setattr(
+        "aetv.station.resample_audio",
+        lambda audio, _source_rate, _target_rate: np.asarray(audio, dtype=np.float32),
+    )
+    monkeypatch.setattr("aetv.station.StreamingDemodulator", FakeDemodulator)
+    station = Station(StationSettings(mode="V8", waveform_mode="analog_av"))
+    engine = TxEngine(station)
+
+    assert engine._emulated_send_stream(
+        [np.ones(24, dtype=np.float32)], COMPOSITE_FS, 1, Codec(), "clean"
+    )
+
+    assert station.loopback_audio is not None
+    assert len(station.loopback_audio) == 8000
+    assert np.all(station.loopback_audio[:24] == 1.0)
 
 
 def test_channel_loopback_decodes_without_keying(monkeypatch):
@@ -628,3 +948,72 @@ def test_ptt_watchdog_fires(monkeypatch):
     assert fired == [True]
     dog.cancel()
     assert WATCHDOG_MARGIN_S == 15.0
+
+
+def test_prepare_clip_encodes_each_gop_in_background_format(monkeypatch):
+    mode = SimpleNamespace(name="V8", gop_frames=2)
+    frames = np.arange(4 * 2 * 3 * 3, dtype=np.uint8).reshape(4, 2, 3, 3)
+
+    class Codec:
+        def __init__(self):
+            self.mode = mode
+            self.encoded = []
+
+        def encode_gop(self, gop):
+            self.encoded.append(gop.copy())
+            return np.array([len(self.encoded)], dtype=np.float32)
+
+    codec = Codec()
+    station = SimpleNamespace(
+        codec_lock=threading.Lock(),
+        require_codec=lambda: codec,
+    )
+    monkeypatch.setattr("aetv.station.iter_video_file", lambda *_args, **_kwargs: frames)
+    progress = []
+
+    prepared = TxEngine(station).prepare_clip("show.mp4", "V8", 2, progress.append)
+
+    assert prepared.gops == 2
+    assert len(codec.encoded) == 2
+    assert prepared.preview_frames.shape == frames.shape
+    assert progress == [0.5, 1.0]
+
+
+def test_prepared_clip_transmit_bypasses_neural_encoder(monkeypatch):
+    mode = SimpleNamespace(
+        name="V8",
+        gop_frames=2,
+        geometry=SimpleNamespace(fs=8000),
+    )
+
+    class Codec:
+        def __init__(self):
+            self.mode = mode
+
+        def encode_gop(self, _gop):
+            raise AssertionError("prepared transmission must not encode again")
+
+    settings = StationSettings(mode="V8", tx_channel_profile="clean", debug_capture=False)
+    station = Station(settings)
+    station.codec = Codec()
+    prepared = PreparedClip(
+        "show.mp4",
+        "V8",
+        (np.array([1.0]), np.array([2.0])),
+        np.zeros((2, 2, 3, 3), dtype=np.uint8),
+    )
+    received = []
+    monkeypatch.setattr(
+        "aetv.station.modulate_continuous_chunks",
+        lambda encoded, **_kwargs: encoded,
+    )
+    engine = TxEngine(station)
+
+    def send(chunks, *_args):
+        received.extend(np.asarray(chunk).copy() for chunk in chunks)
+        return True
+
+    engine._emulated_send_stream = send
+
+    assert engine.transmit(prepared)
+    assert [item.tolist() for item in received] == [[0.7], [0.7]]

@@ -10,7 +10,8 @@ import time
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -38,7 +39,7 @@ from aetv.propagation import (
 )
 from aetv.settings import normalize_callsign
 from aetv.station import RxEngine, RxState
-from aetv.gui.widgets import ElidingLabel, VideoView
+from aetv.gui.widgets import AudioLevelMeter, ElidingLabel, VideoView
 
 
 class _KiwiListThread(QThread):
@@ -252,6 +253,7 @@ class ReceivePanel(QWidget):
     _videoArrived = Signal(object, object)
     _ringArrived = Signal(object)
     _stopArrived = Signal()
+    _audioLevelsArrived = Signal(object)
 
     def __init__(self, station, parent=None):
         super().__init__(parent)
@@ -262,6 +264,7 @@ class ReceivePanel(QWidget):
             on_error=self._errorArrived.emit,
             on_video=lambda video, state: self._videoArrived.emit(video, state),
             on_ring=self._ringArrived.emit,
+            on_audio_levels=self._audioLevelsArrived.emit,
         )
         self._waterfall = None
         self._kiwi_thread: _KiwiListThread | None = None
@@ -284,6 +287,9 @@ class ReceivePanel(QWidget):
         self._videoArrived.connect(self._show_video, Qt.ConnectionType.QueuedConnection)
         self._ringArrived.connect(self._apply_ring, Qt.ConnectionType.QueuedConnection)
         self._stopArrived.connect(self._finish_stop, Qt.ConnectionType.QueuedConnection)
+        self._audioLevelsArrived.connect(
+            self._apply_audio_levels, Qt.ConnectionType.QueuedConnection
+        )
         self._build()
 
     def attach_waterfall(self, waterfall) -> None:
@@ -328,6 +334,10 @@ class ReceivePanel(QWidget):
         ):
             QTimer.singleShot(0, self._refresh_kiwis)
 
+    def sync_waveform_mode(self) -> None:
+        """Refresh A/V-only controls without re-enumerating audio hardware."""
+        self._sync_source_visibility()
+
     def start(self) -> bool:
         if self._rf_pair_thread is not None and self._rf_pair_thread.isRunning():
             self._start_after_kiwi_pick = True
@@ -358,6 +368,8 @@ class ReceivePanel(QWidget):
         try:
             self.preview.clear()
             self._emulated_video = None
+            self.raw_input_meter.reset_level()
+            self.from_radio_meter.reset_level()
             self.engine.start()
         except Exception as error:
             self.status.setText(str(error))
@@ -404,7 +416,11 @@ class ReceivePanel(QWidget):
     def save_current(self) -> None:
         try:
             path = (
-                self.engine.save_video(self._emulated_video)
+                self.engine.save_video(
+                    self._emulated_video,
+                    audio=self.station.loopback_audio,
+                    audio_rate=self.station.loopback_audio_rate,
+                )
                 if self._emulated_video is not None
                 else self.engine.save_current()
             )
@@ -416,6 +432,19 @@ class ReceivePanel(QWidget):
             return
         self.logMessage.emit(f"saved {path}")
         self.status.setText(f"saved {path.name}")
+
+    def open_saved_video_directory(self) -> None:
+        folder = self.station.settings.receive_path()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            opened = QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(folder.resolve()))
+            )
+        except Exception as error:
+            self.status.setText(f"could not open saved video directory: {error}")
+            return
+        if not opened:
+            self.status.setText("could not open saved video directory")
 
     def _build(self) -> None:
         self.preview = VideoView("Start receiving")
@@ -429,6 +458,10 @@ class ReceivePanel(QWidget):
         self.source.addItem("Public KiwiSDR", "kiwi")
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
+        self.playback_label = QLabel("Program audio to")
+        self.playback_device = QComboBox()
+        self.raw_input_meter = AudioLevelMeter("Raw receiver input waveform")
+        self.from_radio_meter = AudioLevelMeter("Filtered from-radio program audio")
         self.kiwi_host = QLineEdit()
         self.kiwi_host.setMinimumWidth(190)
         self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
@@ -467,10 +500,14 @@ class ReceivePanel(QWidget):
         self.start_button = QPushButton("Start receiving")
         self.stop_button = QPushButton("Stop")
         self.save_button = QPushButton("Save video…")
+        self.open_saved_videos_button = QPushButton("Open saved video directory")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
         self.save_button.clicked.connect(self.save_current)
+        self.open_saved_videos_button.clicked.connect(
+            self.open_saved_video_directory
+        )
 
         self._strip = QWidget()
         strip = QVBoxLayout(self._strip)
@@ -480,6 +517,15 @@ class ReceivePanel(QWidget):
         row1.addWidget(self.source)
         row1.addWidget(self.input_device, 1)
         row1.addWidget(self.refresh_audio)
+        self.playback_row = QHBoxLayout()
+        self.playback_row.addWidget(self.playback_label)
+        self.playback_row.addWidget(self.playback_device, 1)
+        self.raw_meter_row = QHBoxLayout()
+        self.raw_meter_row.addWidget(QLabel("Raw input waveform"))
+        self.raw_meter_row.addWidget(self.raw_input_meter, 1)
+        self.audio_meter_row = QHBoxLayout()
+        self.audio_meter_row.addWidget(QLabel("Filtered program audio"))
+        self.audio_meter_row.addWidget(self.from_radio_meter, 1)
         row2 = QHBoxLayout()
         self.kiwi_label = QLabel("Receiver address")
         row2.addWidget(self.kiwi_label)
@@ -500,8 +546,12 @@ class ReceivePanel(QWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
         buttons.addWidget(self.save_button)
+        buttons.addWidget(self.open_saved_videos_button)
         buttons.addStretch(1)
         strip.addLayout(row1)
+        strip.addLayout(self.raw_meter_row)
+        strip.addLayout(self.playback_row)
+        strip.addLayout(self.audio_meter_row)
         strip.addLayout(row2)
         strip.addLayout(row3)
         strip.addLayout(path_row)
@@ -532,6 +582,13 @@ class ReceivePanel(QWidget):
         self.auto_kiwi.setVisible(kiwi)
         self.kiwi_recommendation.setVisible(kiwi)
         self.path_planner_button.setVisible(kiwi)
+        av = self.station.settings.waveform_mode == "analog_av"
+        self.playback_label.setVisible(av)
+        self.playback_device.setVisible(av)
+        for index in range(self.audio_meter_row.count()):
+            widget = self.audio_meter_row.itemAt(index).widget()
+            if widget is not None:
+                widget.setVisible(av)
         if kiwi and self.auto_kiwi.isChecked() and not self._receivers:
             QTimer.singleShot(0, self._refresh_kiwis)
 
@@ -539,12 +596,13 @@ class ReceivePanel(QWidget):
         current = self.station.settings.audio_input
         self.input_device.clear()
         self.input_device.addItem("System default", "")
+        devices = []
         try:
             devices = list_audio_devices("input")
             for item in devices:
                 self.input_device.addItem(item.label(), item.selection_value())
         except AudioUnavailable:
-            return
+            pass
         index = self.input_device.findData(current)
         if index < 0 and current not in {None, ""}:
             index = next(
@@ -552,17 +610,47 @@ class ReceivePanel(QWidget):
                 -1,
             )
         self.input_device.setCurrentIndex(max(0, index))
+        playback = self.station.settings.audio_playback_output
+        self.playback_device.clear()
+        self.playback_device.addItem("System default", "")
+        outputs = []
+        try:
+            outputs = list_audio_devices("output")
+            for item in outputs:
+                self.playback_device.addItem(item.label(), item.selection_value())
+        except AudioUnavailable:
+            pass
+        index = self.playback_device.findData(playback)
+        if index < 0 and playback not in {None, ""}:
+            index = next(
+                (i for i, item in enumerate(outputs, start=1) if item.name == str(playback)),
+                -1,
+            )
+        self.playback_device.setCurrentIndex(max(0, index))
 
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings
         settings.rx_source = self.source.currentData()
         settings.audio_input = self.input_device.currentData() or ""
+        settings.audio_playback_output = self.playback_device.currentData() or ""
         settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
         if settings.rx_source == "kiwi":
             settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
             self.kiwi_host.setText(settings.kiwi_host)
             settings.freq_mhz = settings.kiwi_dial_mhz
         settings.kiwi_auto_select = self.auto_kiwi.isChecked()
+
+    def _apply_audio_levels(self, levels: dict) -> None:
+        if "raw_peak" in levels:
+            self.raw_input_meter.set_level(
+                levels["raw_peak"],
+                levels.get("raw_clipping", False),
+            )
+        if "filtered_peak" in levels:
+            self.from_radio_meter.set_level(
+                levels["filtered_peak"],
+                levels.get("filtered_clipping", False),
+            )
 
     def _on_auto_kiwi_toggled(self, enabled: bool) -> None:
         self.station.settings.kiwi_auto_select = bool(enabled)
@@ -1034,6 +1122,7 @@ class ReceivePanel(QWidget):
     def prepare_emulator(self, label: str) -> None:
         self.preview.clear()
         self._emulated_video = None
+        self.station.loopback_audio = None
         self.status.setText(f"Waiting for {label} loopback…")
         self.statusChanged.emit(self.status.text())
         self.progress.setValue(0)
@@ -1061,7 +1150,10 @@ class ReceivePanel(QWidget):
     def _apply_ring(self, ring) -> None:
         if self._waterfall is None:
             return
-        self._waterfall.set_mode(self.station.settings.mode)
+        self._waterfall.set_mode(
+            self.station.settings.mode,
+            self.station.settings.waveform_mode == "analog_av",
+        )
         self._waterfall.set_ring(ring)
         if ring is None:
             self._waterfall.clear()

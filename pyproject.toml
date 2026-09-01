@@ -1,6 +1,6 @@
 [project]
 name = "aetv"
-version = "0.1.9"
+version = "0.1.16"
 description = "Live learned video over challenging amateur-radio channels"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,6 +42,7 @@ train = [
     "lpips>=0.1.4",
     "datasets>=2.18",
     "pylance>=10,<11",
+    "pystoi>=0.4.1",
     "tensorboard>=2.14",
 ]
 dev = [

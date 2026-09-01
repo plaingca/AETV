@@ -139,6 +139,19 @@ Detailed methodology and current machine results live in
 AETV identifies transmissions, but it cannot decide whether a frequency or
 bandwidth is legal at your station.
 
+### V8 audio/video transport
+
+The station application's **V8 A/V** transport keeps the V8 video codec while
+placing analog voice below a frequency-shifted V8 waveform. Select the
+microphone and received program-audio output in the transmit and receive
+panes. The audio/video power and clip-audio/microphone faders remain active
+during transmission and are sampled for each GOP. Prepared clips use their
+edited media-file audio; webcam and screen sends use microphone audio only.
+Voice is delayed by one GOP so it plays alongside decoded video.
+
+V8 A/V uses 12 kHz audio and requires an approximately 5 kHz transmit and
+receive passband. A normal 2.7 kHz SSB filter will remove the video branch.
+
 ## Run from source
 
 Source installs are for development; most operators should use the Windows

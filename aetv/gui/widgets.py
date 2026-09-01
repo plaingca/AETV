@@ -13,12 +13,58 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QPlainTextEdit,
+    QProgressBar,
     QSizePolicy,
     QWidget,
 )
 
 CANVAS = QColor("#202024")
 CANVAS_TEXT = QColor("#888888")
+
+
+class AudioLevelMeter(QProgressBar):
+    """Compact peak meter with a persistent, unambiguous clipping state."""
+
+    FLOOR_DB = -60.0
+
+    def __init__(self, channel: str, parent=None):
+        super().__init__(parent)
+        self.channel = channel
+        self.setRange(0, 600)
+        self.setTextVisible(True)
+        self.setMinimumWidth(150)
+        self.setToolTip(
+            f"{channel} peak level; CLIP stays latched until monitoring restarts"
+        )
+        self.reset_level()
+
+    def set_level(self, peak: float, clipping: bool = False) -> None:
+        peak = max(0.0, float(peak))
+        db = 20.0 * math.log10(peak) if peak > 0.0 else float("-inf")
+        shown_db = max(self.FLOOR_DB, min(0.0, db))
+        self.setValue(int(round((shown_db - self.FLOOR_DB) * 10.0)))
+        self._clipped = self._clipped or bool(clipping)
+        if self._clipped:
+            color = "#d93025"
+            text = f"CLIP · {db:.1f} dBFS" if math.isfinite(db) else "CLIP"
+        elif db >= -6.0:
+            color = "#e0a000"
+            text = f"{db:.1f} dBFS"
+        elif math.isfinite(db):
+            color = "#2e9d50"
+            text = f"{db:.1f} dBFS"
+        else:
+            color = "#687078"
+            text = "−∞ dBFS"
+        self.setFormat(text)
+        self.setStyleSheet(
+            "QProgressBar { text-align: center; } "
+            f"QProgressBar::chunk {{ background-color: {color}; }}"
+        )
+
+    def reset_level(self) -> None:
+        self._clipped = False
+        self.set_level(0.0, False)
 
 
 def blend_gop_boundary(

@@ -615,6 +615,58 @@ def record_audio(
     return mono.astype(np.float32)
 
 
+class AudioPlaybackStream:
+    """A persistent mono output used for received analog program audio."""
+
+    def __init__(self, rate: int, device: str | int | None = None):
+        self._rate = int(rate)
+        self._device = device
+        self._queue: queue.Queue = queue.Queue(maxsize=20)
+        self._stop = threading.Event()
+        self._sentinel = object()
+        self._error: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="aetv-program-audio",
+        )
+        self._thread.start()
+
+    def _chunks(self):
+        while True:
+            item = self._queue.get()
+            if item is self._sentinel:
+                return
+            yield item
+
+    def _run(self) -> None:
+        try:
+            play_chunk_stream(
+                self._chunks(),
+                self._rate,
+                device=self._device,
+                should_stop=self._stop.is_set,
+            )
+        except Exception as error:
+            self._error = error
+
+    def write(self, audio: np.ndarray) -> None:
+        if self._error is not None:
+            raise self._error
+        samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if samples.size:
+            self._queue.put(samples.copy())
+
+    def close(self) -> None:
+        try:
+            self._queue.put(self._sentinel, timeout=1.0)
+            self._thread.join(timeout=5.0)
+        finally:
+            if self._thread.is_alive():
+                self._stop.set()
+                self._thread.join(timeout=3.0)
+
+
 def open_input_stream(
     device, ring, samplerate: int, on_error=None, on_discontinuity=None
 ):
