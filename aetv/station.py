@@ -618,6 +618,7 @@ class TxEngine:
                     if peak > 0:
                         audio = audio * (settings.tx_level / peak)
                     self.last_wav = audio
+                    self._report_transmit_output_levels(audio)
                     if tx_recorder is not None and channel_profile == "radio":
                         tx_recorder.write(audio)
                     yield audio
@@ -748,6 +749,17 @@ class TxEngine:
                 delay,
                 video_power=float(self.station.settings.av_video_power),
             )
+
+    def _report_transmit_output_levels(self, audio: np.ndarray) -> None:
+        """Report the final leveled waveform handed to the radio transport."""
+        samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+        self._on_audio_levels(
+            {
+                "output_peak": peak,
+                "output_clipping": peak >= 0.99,
+            }
+        )
 
     def _emulated_send_stream(
         self,

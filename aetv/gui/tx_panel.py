@@ -329,6 +329,7 @@ class TransmitPanel(QWidget):
         self.mic_mix_label = QLabel()
         self.mic_meter = AudioLevelMeter("Microphone after fader")
         self.clip_meter = AudioLevelMeter("Clip audio after fader")
+        self.output_meter = AudioLevelMeter("Final raw transmit waveform")
         self.send_button = QPushButton("Send")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
@@ -384,6 +385,9 @@ class TransmitPanel(QWidget):
         self.audio_meter_row.addWidget(self.mic_meter, 1)
         self.audio_meter_row.addWidget(QLabel("Clip level"))
         self.audio_meter_row.addWidget(self.clip_meter, 1)
+        self.output_meter_row = QHBoxLayout()
+        self.output_meter_row.addWidget(QLabel("Raw output waveform"))
+        self.output_meter_row.addWidget(self.output_meter, 1)
         channel_row = QHBoxLayout()
         channel_row.addWidget(QLabel("Route"))
         self.channel_keys = ["radio", *CHANNEL_PROFILES]
@@ -414,6 +418,7 @@ class TransmitPanel(QWidget):
         strip.addLayout(self.av_row)
         strip.addLayout(self.mix_row)
         strip.addLayout(self.audio_meter_row)
+        strip.addLayout(self.output_meter_row)
         strip.addLayout(channel_row)
         strip.addWidget(self.progress)
         strip.addLayout(buttons)
@@ -939,6 +944,10 @@ class TransmitPanel(QWidget):
             widget = self.audio_meter_row.itemAt(index).widget()
             if widget is not None:
                 widget.setVisible(visible)
+        for index in range(self.output_meter_row.count()):
+            widget = self.output_meter_row.itemAt(index).widget()
+            if widget is not None:
+                widget.setVisible(visible)
         self._on_av_power_changed(self.av_power.value())
         self._on_mic_mix_changed(self.mic_mix.value())
 
@@ -951,18 +960,26 @@ class TransmitPanel(QWidget):
         self.mic_mix_label.setText(f"{value}% mic")
 
     def _apply_audio_levels(self, levels: dict) -> None:
-        self.mic_meter.set_level(
-            levels.get("microphone_peak", 0.0),
-            levels.get("microphone_clipping", False),
-        )
-        self.clip_meter.set_level(
-            levels.get("clip_peak", 0.0),
-            levels.get("clip_clipping", False),
-        )
+        if "microphone_peak" in levels:
+            self.mic_meter.set_level(
+                levels["microphone_peak"],
+                levels.get("microphone_clipping", False),
+            )
+        if "clip_peak" in levels:
+            self.clip_meter.set_level(
+                levels["clip_peak"],
+                levels.get("clip_clipping", False),
+            )
+        if "output_peak" in levels:
+            self.output_meter.set_level(
+                levels["output_peak"],
+                levels.get("output_clipping", False),
+            )
 
     def _reset_audio_levels(self) -> None:
         self.mic_meter.reset_level()
         self.clip_meter.reset_level()
+        self.output_meter.reset_level()
 
     def _apply_state(self, state: TxState) -> None:
         self.status.setText(state.message or state.phase.value)

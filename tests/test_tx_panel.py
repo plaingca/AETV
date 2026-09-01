@@ -214,7 +214,9 @@ def test_audio_level_update_routes_independent_channel_peaks():
         def set_level(self, peak, clipping):
             self.reading = (peak, clipping)
 
-    panel = SimpleNamespace(mic_meter=Meter(), clip_meter=Meter())
+    panel = SimpleNamespace(
+        mic_meter=Meter(), clip_meter=Meter(), output_meter=Meter()
+    )
 
     TransmitPanel._apply_audio_levels(
         panel,
@@ -223,11 +225,14 @@ def test_audio_level_update_routes_independent_channel_peaks():
             "microphone_clipping": False,
             "clip_peak": 1.1,
             "clip_clipping": True,
+            "output_peak": 0.9,
+            "output_clipping": False,
         },
     )
 
     assert panel.mic_meter.reading == (0.4, False)
     assert panel.clip_meter.reading == (1.1, True)
+    assert panel.output_meter.reading == (0.9, False)
 
 
 def test_receive_audio_level_update_routes_raw_and_filtered_radio_peaks():

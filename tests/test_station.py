@@ -484,6 +484,22 @@ def test_composite_reports_post_fader_levels_and_pre_fader_clipping(monkeypatch)
     assert levels[0]["clip_clipping"] is True
 
 
+def test_transmit_output_meter_reports_final_waveform_peak_and_clipping():
+    levels = []
+    engine = TxEngine(Station(), on_audio_levels=levels.append)
+
+    engine._report_transmit_output_levels(
+        np.array([-0.25, 1.01, 0.5], dtype=np.float32)
+    )
+
+    assert levels == [
+        {
+            "output_peak": pytest.approx(1.01),
+            "output_clipping": True,
+        }
+    ]
+
+
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):
     captured = {}
 
