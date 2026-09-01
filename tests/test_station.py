@@ -567,6 +567,37 @@ def test_rx_engine_can_save_supplied_loopback_video(monkeypatch, tmp_path):
     assert saved[0][3]["audio_rate"] == 8000
 
 
+def test_live_receive_save_current_includes_retained_audio(monkeypatch, tmp_path):
+    saved = []
+    monkeypatch.setattr(
+        "aetv.station.write_mp4",
+        lambda frames, path, fps, **kwargs: saved.append((frames, path, fps, kwargs)),
+    )
+    station = Station(StationSettings(receive_dir=str(tmp_path)))
+    station.codec = SimpleNamespace(mode=SimpleNamespace(name="V8", fps=6))
+    engine = RxEngine(station)
+    engine.last_video = np.zeros((6, 2, 2, 3), dtype=np.uint8)
+    engine._append_received_audio(np.full(8000, 0.25, dtype=np.float32))
+    target = tmp_path / "live-rx.mp4"
+
+    assert engine.save_current(target) == target
+
+    assert saved[0][1:3] == (target, 6)
+    assert saved[0][3]["audio_rate"] == 8000
+    assert np.all(saved[0][3]["audio"] == 0.25)
+
+
+def test_received_audio_history_stays_aligned_to_retained_video_window():
+    engine = RxEngine(Station())
+    engine.last_audio = np.ones(300 * 8000, dtype=np.float32)
+    engine._append_received_audio(np.full(8000, 2.0, dtype=np.float32))
+
+    assert engine.last_audio is not None
+    assert len(engine.last_audio) == 300 * 8000
+    assert engine.last_audio[0] == 1
+    assert engine.last_audio[-1] == 2
+
+
 def test_composite_loopback_retains_received_program_audio(monkeypatch):
     from aetv.station import Station
 

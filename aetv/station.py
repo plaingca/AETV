@@ -1132,6 +1132,7 @@ class RxEngine:
         self.ring: RingBuffer | None = None
         self.state = RxState()
         self.last_video: np.ndarray | None = None
+        self.last_audio: np.ndarray | None = None
         self._shown_gops = 0
         self._stream_decoder: StreamingDemodulator | None = None
         self._source_discontinuity = threading.Event()
@@ -1144,6 +1145,7 @@ class RxEngine:
         self._composite_video_resampler: StreamResampler | None = None
         self._composite_voice_resampler: StreamResampler | None = None
         self._audio_playback: AudioPlaybackStream | None = None
+        self._voice_history: RingBuffer | None = None
 
     @property
     def listening(self) -> bool:
@@ -1157,6 +1159,7 @@ class RxEngine:
         self._stop.clear()
         self._shown_gops = 0
         self.last_video = None
+        self.last_audio = None
         self._last_result = None
         composite = settings.waveform_mode == "analog_av"
         capture_rate = COMPOSITE_FS if composite else codec.mode.geometry.fs
@@ -1172,6 +1175,7 @@ class RxEngine:
             self._audio_playback = AudioPlaybackStream(
                 NATIVE_AETV_FS, settings.audio_playback_output or None
             )
+            self._voice_history = RingBuffer(4.0, NATIVE_AETV_FS)
         if settings.debug_capture:
             prefix = _debug_prefix(settings, f"rx_{settings.rx_source}")
             self._debug_log = _JsonlRecorder(prefix.with_suffix(".modem.jsonl"))
@@ -1281,6 +1285,7 @@ class RxEngine:
         self._composite_separator = None
         self._composite_video_resampler = None
         self._composite_voice_resampler = None
+        self._voice_history = None
         if self.station.settings.autosave and self.last_video is not None and self._last_result is not None:
             self._autosave(self.last_video, self._last_result)
         self.ring = None
@@ -1370,6 +1375,8 @@ class RxEngine:
                     assert self._composite_voice_resampler is not None
                     audio = self._composite_video_resampler(video_12k)
                     voice = self._composite_voice_resampler(voice_12k)
+                    if self._voice_history is not None and voice.size:
+                        self._voice_history.write(voice)
                     if self._audio_playback is not None and voice.size:
                         self._audio_playback.write(voice)
                 demodulator = self._stream_decoder
@@ -1378,36 +1385,52 @@ class RxEngine:
                 demod_started = time.perf_counter()
                 results = demodulator.feed(audio)
                 demod_s = time.perf_counter() - demod_started
-                for result in results:
-                    for latents, weights in zip(result.gops_latents, result.gops_weights):
-                        decode_started = time.perf_counter()
-                        with self.station.codec_lock:
-                            decoded = codec.decode_gop(latents, weights)
-                        decode_s = time.perf_counter() - decode_started
-                        with ring.lock:
-                            backlog_s = max(
-                                0.0,
-                                (ring.total_written - self._read_cursor) / ring.fs,
-                            )
-                        self._record_modem_debug(
-                            {
-                                "event": "gop_decoded",
-                                "time": time.time(),
-                                "device": str(codec.device),
-                                "decode_ms": 1000.0 * decode_s,
-                                "demod_batch_ms": 1000.0 * demod_s,
-                                "rx_backlog_s": backlog_s,
-                            }
+                received = [
+                    (result, latents, weights)
+                    for result in results
+                    for latents, weights in zip(result.gops_latents, result.gops_weights)
+                ]
+                received_audio: list[np.ndarray | None] = [None] * len(received)
+                if self._voice_history is not None and received:
+                    needed = len(received) * NATIVE_AETV_FS
+                    recent = self._voice_history.tail(needed)
+                    if len(recent) < needed:
+                        recent = np.pad(recent, (needed - len(recent), 0))
+                    received_audio = [
+                        recent[index * NATIVE_AETV_FS : (index + 1) * NATIVE_AETV_FS]
+                        for index in range(len(received))
+                    ]
+                for (result, latents, weights), audio_gop in zip(received, received_audio):
+                    decode_started = time.perf_counter()
+                    with self.station.codec_lock:
+                        decoded = codec.decode_gop(latents, weights)
+                    decode_s = time.perf_counter() - decode_started
+                    with ring.lock:
+                        backlog_s = max(
+                            0.0,
+                            (ring.total_written - self._read_cursor) / ring.fs,
                         )
-                        self._shown_gops += 1
-                        self._last_result = result
-                        if self.last_video is None:
-                            self.last_video = decoded
-                        else:
-                            self.last_video = np.concatenate([self.last_video, decoded], axis=0)
-                            max_frames = codec.mode.gop_frames * 300
-                            self.last_video = self.last_video[-max_frames:]
-                        self._update_from_result(result, decoded)
+                    self._record_modem_debug(
+                        {
+                            "event": "gop_decoded",
+                            "time": time.time(),
+                            "device": str(codec.device),
+                            "decode_ms": 1000.0 * decode_s,
+                            "demod_batch_ms": 1000.0 * demod_s,
+                            "rx_backlog_s": backlog_s,
+                        }
+                    )
+                    self._shown_gops += 1
+                    self._last_result = result
+                    if self.last_video is None:
+                        self.last_video = decoded
+                    else:
+                        self.last_video = np.concatenate([self.last_video, decoded], axis=0)
+                        max_frames = codec.mode.gop_frames * 300
+                        self.last_video = self.last_video[-max_frames:]
+                    if audio_gop is not None:
+                        self._append_received_audio(audio_gop)
+                    self._update_from_result(result, decoded)
             except SyncError as error:
                 self.state.message = str(error)
                 self._on_state(self.state)
@@ -1446,6 +1469,18 @@ class RxEngine:
         if decoded is not None:
             self._on_video(decoded, self.state)
 
+    def _append_received_audio(self, audio: np.ndarray) -> None:
+        """Retain one aligned voice GOP for live A/V save and autosave."""
+        samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if len(samples) < NATIVE_AETV_FS:
+            samples = np.pad(samples, (0, NATIVE_AETV_FS - len(samples)))
+        samples = samples[:NATIVE_AETV_FS]
+        if self.last_audio is None:
+            self.last_audio = samples.copy()
+        else:
+            self.last_audio = np.concatenate((self.last_audio, samples))
+            self.last_audio = self.last_audio[-300 * NATIVE_AETV_FS :]
+
     def _autosave(self, video: np.ndarray, result) -> None:
         folder = self.station.settings.receive_path()
         folder.mkdir(parents=True, exist_ok=True)
@@ -1453,7 +1488,16 @@ class RxEngine:
         call = result.callsign or "unknown"
         path = folder / f"{stamp}_{call}_{self.station.settings.mode}.mp4"
         try:
-            write_mp4(video, path, self.station.require_codec().mode.fps)
+            if self.last_audio is None:
+                write_mp4(video, path, self.station.require_codec().mode.fps)
+            else:
+                write_mp4(
+                    video,
+                    path,
+                    self.station.require_codec().mode.fps,
+                    audio=self.last_audio,
+                    audio_rate=NATIVE_AETV_FS,
+                )
             self.station.log(f"saved {path}")
         except Exception as error:
             self._on_error(f"autosave failed: {error}")
@@ -1461,7 +1505,12 @@ class RxEngine:
     def save_current(self, path: Path | None = None) -> Path | None:
         if self.last_video is None:
             return None
-        return self.save_video(self.last_video, path)
+        return self.save_video(
+            self.last_video,
+            path,
+            audio=self.last_audio,
+            audio_rate=NATIVE_AETV_FS,
+        )
 
     def save_video(
         self,
