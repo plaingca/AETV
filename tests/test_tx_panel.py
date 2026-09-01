@@ -308,3 +308,25 @@ def test_loopback_save_passes_recovered_audio_to_mp4_writer():
     assert np.array_equal(captured["audio"], audio)
     assert captured["audio_rate"] == 8000
     assert panel.status.text == "saved loopback.mp4"
+
+
+def test_open_saved_video_directory_uses_configured_receive_path(
+    monkeypatch, tmp_path
+):
+    opened = []
+    receive_dir = tmp_path / "received videos"
+    panel = SimpleNamespace(
+        station=SimpleNamespace(
+            settings=SimpleNamespace(receive_path=lambda: receive_dir)
+        ),
+        status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
+    )
+    monkeypatch.setattr(
+        "aetv.gui.rx_panel.QDesktopServices.openUrl",
+        lambda url: opened.append(Path(url.toLocalFile())) or True,
+    )
+
+    ReceivePanel.open_saved_video_directory(panel)
+
+    assert receive_dir.is_dir()
+    assert opened == [receive_dir.resolve()]

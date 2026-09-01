@@ -10,7 +10,8 @@ import time
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -432,6 +433,19 @@ class ReceivePanel(QWidget):
         self.logMessage.emit(f"saved {path}")
         self.status.setText(f"saved {path.name}")
 
+    def open_saved_video_directory(self) -> None:
+        folder = self.station.settings.receive_path()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            opened = QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(folder.resolve()))
+            )
+        except Exception as error:
+            self.status.setText(f"could not open saved video directory: {error}")
+            return
+        if not opened:
+            self.status.setText("could not open saved video directory")
+
     def _build(self) -> None:
         self.preview = VideoView("Start receiving")
         self.status = ElidingLabel("Stopped")
@@ -486,10 +500,14 @@ class ReceivePanel(QWidget):
         self.start_button = QPushButton("Start receiving")
         self.stop_button = QPushButton("Stop")
         self.save_button = QPushButton("Save video…")
+        self.open_saved_videos_button = QPushButton("Open saved video directory")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
         self.save_button.clicked.connect(self.save_current)
+        self.open_saved_videos_button.clicked.connect(
+            self.open_saved_video_directory
+        )
 
         self._strip = QWidget()
         strip = QVBoxLayout(self._strip)
@@ -528,6 +546,7 @@ class ReceivePanel(QWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.stop_button)
         buttons.addWidget(self.save_button)
+        buttons.addWidget(self.open_saved_videos_button)
         buttons.addStretch(1)
         strip.addLayout(row1)
         strip.addLayout(self.raw_meter_row)
