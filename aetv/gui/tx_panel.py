@@ -545,7 +545,7 @@ class TransmitPanel(QWidget):
     def _open_clip_editor(
         self, index: int, path: str, initial: ClipEdit | None
     ) -> None:
-        mode_name = str(self.mode.currentData() or self.station.settings.mode)
+        mode_name = self._selected_mode_name()
         try:
             dialog = ClipEditorDialog(
                 path,
@@ -625,7 +625,7 @@ class TransmitPanel(QWidget):
         self._selected_clip = None
         self._prepared_clips.clear()
         codec = self.station.codec
-        mode_name = str(self.mode.currentData() or self.station.settings.mode)
+        mode_name = self._selected_mode_name()
         if codec is None or codec.mode.name != mode_name:
             return
         edits = list(self._clip_edits.items())

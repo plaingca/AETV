@@ -3,7 +3,9 @@
 from types import SimpleNamespace
 
 import numpy as np
+from PySide6.QtWidgets import QDialog
 
+from aetv.config import AETV_MODES
 from aetv.gui.rx_panel import ReceivePanel
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.station import RxState
@@ -63,6 +65,62 @@ def test_mode_selection_requests_reload_before_transmit():
     assert requested == ["V7"]
     assert not button.enabled
     assert status.text == "loading V7 model…"
+
+
+def test_av_clip_editor_uses_v8_codec_mode(monkeypatch):
+    opened = {}
+
+    class Dialog:
+        def __init__(self, path, mode, **_kwargs):
+            opened["path"] = path
+            opened["mode"] = mode
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr("aetv.gui.tx_panel.ClipEditorDialog", Dialog)
+    panel = SimpleNamespace(
+        mode=SimpleNamespace(currentData=lambda: "V8_AV"),
+        station=SimpleNamespace(settings=SimpleNamespace(mode="V8")),
+        status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
+        gops=SimpleNamespace(value=lambda: 10),
+        _selected_mode_name=lambda: "V8",
+    )
+
+    TransmitPanel._open_clip_editor(panel, 0, "program.mp4", None)
+
+    assert opened == {"path": "program.mp4", "mode": AETV_MODES["V8"]}
+
+
+def test_av_clip_preparation_uses_loaded_v8_codec(monkeypatch):
+    started = []
+
+    class Thread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            started.append(self.args)
+
+    monkeypatch.setattr("aetv.gui.tx_panel.threading.Thread", Thread)
+    cell = SimpleNamespace(set_progress=lambda value: setattr(cell, "progress", value))
+    edit = SimpleNamespace()
+    panel = SimpleNamespace(
+        _clip_generation=0,
+        _selected_clip=3,
+        _prepared_clips={3: object()},
+        _clip_edits={3: edit},
+        clip_grid=SimpleNamespace(cells=[None, None, None, cell]),
+        station=SimpleNamespace(codec=SimpleNamespace(mode=SimpleNamespace(name="V8"))),
+        _selected_mode_name=lambda: "V8",
+        _prepare_clip_batch=lambda *_args: None,
+    )
+
+    TransmitPanel._queue_clip_preparation(panel)
+
+    assert cell.progress == 0.0
+    assert started == [([(3, edit)], "V8", 1)]
 
 
 def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
