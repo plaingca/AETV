@@ -230,6 +230,18 @@ def test_audio_level_update_routes_independent_channel_peaks():
     assert panel.clip_meter.reading == (1.1, True)
 
 
+def test_receive_audio_level_update_routes_filtered_radio_peak():
+    class Meter:
+        def set_level(self, peak, clipping):
+            self.reading = (peak, clipping)
+
+    panel = SimpleNamespace(from_radio_meter=Meter())
+
+    ReceivePanel._apply_audio_levels(panel, {"peak": 0.75, "clipping": False})
+
+    assert panel.from_radio_meter.reading == (0.75, False)
+
+
 def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
     class Preview:
         def enqueue_rgb(self, *_args, **_kwargs):

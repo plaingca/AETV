@@ -38,7 +38,7 @@ from aetv.propagation import (
 )
 from aetv.settings import normalize_callsign
 from aetv.station import RxEngine, RxState
-from aetv.gui.widgets import ElidingLabel, VideoView
+from aetv.gui.widgets import AudioLevelMeter, ElidingLabel, VideoView
 
 
 class _KiwiListThread(QThread):
@@ -252,6 +252,7 @@ class ReceivePanel(QWidget):
     _videoArrived = Signal(object, object)
     _ringArrived = Signal(object)
     _stopArrived = Signal()
+    _audioLevelsArrived = Signal(object)
 
     def __init__(self, station, parent=None):
         super().__init__(parent)
@@ -262,6 +263,7 @@ class ReceivePanel(QWidget):
             on_error=self._errorArrived.emit,
             on_video=lambda video, state: self._videoArrived.emit(video, state),
             on_ring=self._ringArrived.emit,
+            on_audio_levels=self._audioLevelsArrived.emit,
         )
         self._waterfall = None
         self._kiwi_thread: _KiwiListThread | None = None
@@ -284,6 +286,9 @@ class ReceivePanel(QWidget):
         self._videoArrived.connect(self._show_video, Qt.ConnectionType.QueuedConnection)
         self._ringArrived.connect(self._apply_ring, Qt.ConnectionType.QueuedConnection)
         self._stopArrived.connect(self._finish_stop, Qt.ConnectionType.QueuedConnection)
+        self._audioLevelsArrived.connect(
+            self._apply_audio_levels, Qt.ConnectionType.QueuedConnection
+        )
         self._build()
 
     def attach_waterfall(self, waterfall) -> None:
@@ -362,6 +367,7 @@ class ReceivePanel(QWidget):
         try:
             self.preview.clear()
             self._emulated_video = None
+            self.from_radio_meter.reset_level()
             self.engine.start()
         except Exception as error:
             self.status.setText(str(error))
@@ -439,6 +445,7 @@ class ReceivePanel(QWidget):
         self.input_device = QComboBox()
         self.playback_label = QLabel("Program audio to")
         self.playback_device = QComboBox()
+        self.from_radio_meter = AudioLevelMeter("Filtered from-radio program audio")
         self.kiwi_host = QLineEdit()
         self.kiwi_host.setMinimumWidth(190)
         self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
@@ -493,6 +500,9 @@ class ReceivePanel(QWidget):
         self.playback_row = QHBoxLayout()
         self.playback_row.addWidget(self.playback_label)
         self.playback_row.addWidget(self.playback_device, 1)
+        self.audio_meter_row = QHBoxLayout()
+        self.audio_meter_row.addWidget(QLabel("From-radio audio"))
+        self.audio_meter_row.addWidget(self.from_radio_meter, 1)
         row2 = QHBoxLayout()
         self.kiwi_label = QLabel("Receiver address")
         row2.addWidget(self.kiwi_label)
@@ -516,6 +526,7 @@ class ReceivePanel(QWidget):
         buttons.addStretch(1)
         strip.addLayout(row1)
         strip.addLayout(self.playback_row)
+        strip.addLayout(self.audio_meter_row)
         strip.addLayout(row2)
         strip.addLayout(row3)
         strip.addLayout(path_row)
@@ -549,6 +560,10 @@ class ReceivePanel(QWidget):
         av = self.station.settings.waveform_mode == "analog_av"
         self.playback_label.setVisible(av)
         self.playback_device.setVisible(av)
+        for index in range(self.audio_meter_row.count()):
+            widget = self.audio_meter_row.itemAt(index).widget()
+            if widget is not None:
+                widget.setVisible(av)
         if kiwi and self.auto_kiwi.isChecked() and not self._receivers:
             QTimer.singleShot(0, self._refresh_kiwis)
 
@@ -599,6 +614,12 @@ class ReceivePanel(QWidget):
             self.kiwi_host.setText(settings.kiwi_host)
             settings.freq_mhz = settings.kiwi_dial_mhz
         settings.kiwi_auto_select = self.auto_kiwi.isChecked()
+
+    def _apply_audio_levels(self, levels: dict) -> None:
+        self.from_radio_meter.set_level(
+            levels.get("peak", 0.0),
+            levels.get("clipping", False),
+        )
 
     def _on_auto_kiwi_toggled(self, enabled: bool) -> None:
         self.station.settings.kiwi_auto_select = bool(enabled)

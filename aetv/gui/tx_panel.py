@@ -41,7 +41,7 @@ from aetv.source import (
 from aetv.station import TxEngine, TxPhase, TxState
 from aetv.gui.clip_editor import ClipEditorDialog
 from aetv.gui.clip_grid import ClipGrid
-from aetv.gui.widgets import ElidingLabel, VideoView
+from aetv.gui.widgets import AudioLevelMeter, ElidingLabel, VideoView
 
 
 class _RegionSelector(QDialog):
@@ -91,52 +91,6 @@ class _RegionSelector(QDialog):
         top_left = self.mapToGlobal(local.topLeft())
         self.selection = QRect(top_left, local.size())
         self.accept()
-
-
-class _AudioLevelMeter(QProgressBar):
-    """Compact peak meter with a persistent, unambiguous clipping state."""
-
-    FLOOR_DB = -60.0
-
-    def __init__(self, channel: str, parent=None):
-        super().__init__(parent)
-        self.channel = channel
-        self.setRange(0, 600)
-        self.setTextVisible(True)
-        self.setMinimumWidth(150)
-        self.setToolTip(
-            f"{channel} peak level after its audio fader; CLIP detects overload "
-            "before the fader"
-        )
-        self.reset_level()
-
-    def set_level(self, peak: float, clipping: bool = False) -> None:
-        peak = max(0.0, float(peak))
-        db = 20.0 * math.log10(peak) if peak > 0.0 else float("-inf")
-        shown_db = max(self.FLOOR_DB, min(0.0, db))
-        self.setValue(int(round((shown_db - self.FLOOR_DB) * 10.0)))
-        self._clipped = self._clipped or bool(clipping)
-        if self._clipped:
-            color = "#d93025"
-            text = f"CLIP · {db:.1f} dBFS" if math.isfinite(db) else "CLIP"
-        elif db >= -6.0:
-            color = "#e0a000"
-            text = f"{db:.1f} dBFS"
-        elif math.isfinite(db):
-            color = "#2e9d50"
-            text = f"{db:.1f} dBFS"
-        else:
-            color = "#687078"
-            text = "−∞ dBFS"
-        self.setFormat(text)
-        self.setStyleSheet(
-            "QProgressBar { text-align: center; } "
-            f"QProgressBar::chunk {{ background-color: {color}; }}"
-        )
-
-    def reset_level(self) -> None:
-        self._clipped = False
-        self.set_level(0.0, False)
 
 
 class TransmitPanel(QWidget):
@@ -373,8 +327,8 @@ class TransmitPanel(QWidget):
         self.mic_mix = QSlider(Qt.Orientation.Horizontal)
         self.mic_mix.setRange(0, 100)
         self.mic_mix_label = QLabel()
-        self.mic_meter = _AudioLevelMeter("Microphone")
-        self.clip_meter = _AudioLevelMeter("Clip audio")
+        self.mic_meter = AudioLevelMeter("Microphone after fader")
+        self.clip_meter = AudioLevelMeter("Clip audio after fader")
         self.send_button = QPushButton("Send")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)

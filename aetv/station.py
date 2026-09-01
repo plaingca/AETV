@@ -1337,12 +1337,21 @@ class _PttWatchdog:
 
 
 class RxEngine:
-    def __init__(self, station: Station, on_state=None, on_error=None, on_video=None, on_ring=None):
+    def __init__(
+        self,
+        station: Station,
+        on_state=None,
+        on_error=None,
+        on_video=None,
+        on_ring=None,
+        on_audio_levels=None,
+    ):
         self.station = station
         self._on_state = on_state or (lambda _state: None)
         self._on_error = on_error or (lambda _msg: None)
         self._on_video = on_video or (lambda _video, _info: None)
         self._on_ring = on_ring or (lambda _ring: None)
+        self._on_audio_levels = on_audio_levels or (lambda _levels: None)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._stream = None
@@ -1594,6 +1603,7 @@ class RxEngine:
                     assert self._composite_voice_resampler is not None
                     audio = self._composite_video_resampler(video_12k)
                     voice = self._composite_voice_resampler(voice_12k)
+                    self._report_received_audio_levels(voice)
                     if self._voice_history is not None and voice.size:
                         self._voice_history.write(voice)
                     if self._audio_playback is not None and voice.size:
@@ -1659,6 +1669,12 @@ class RxEngine:
                 continue
             if next_poll < time.monotonic():
                 next_poll = time.monotonic()
+
+    def _report_received_audio_levels(self, voice: np.ndarray) -> None:
+        """Report filtered program audio exactly as it is sent to playback."""
+        samples = np.asarray(voice, dtype=np.float32).reshape(-1)
+        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+        self._on_audio_levels({"peak": peak, "clipping": peak >= 0.99})
 
     def _update_from_result(self, result, decoded) -> None:
         identity = f"de {result.callsign}" if result.callsign else "beacon acquiring"
