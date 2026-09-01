@@ -21,11 +21,19 @@ from pathlib import Path
 import numpy as np
 
 from .audio_io import (
+    AudioPlaybackStream,
     StreamResampler,
     open_input_stream,
     play_cancellable,
     play_chunk_stream,
+    record_audio,
     resample_ratio,
+)
+from .analog_av import (
+    COMPOSITE_FS,
+    NATIVE_AETV_FS,
+    StreamingCompositeSeparator,
+    mix_composite_chunk,
 )
 from .cat import CatConfig, NullPtt, open_ptt
 from .codec import AETVCodec, resolve_checkpoint
@@ -48,6 +56,7 @@ from .source import (
     iter_screen_capture,
     iter_video_file,
     iter_webcam,
+    read_video_audio,
     write_mp4,
 )
 from .sync import SyncError
@@ -338,6 +347,7 @@ class TxEngine:
             mode_name=mode_name,
             latents=tuple(latents),
             preview_frames=np.ascontiguousarray(frames[preview_indices]),
+            start_s=float(start_s),
         )
 
     def transmit(self, source: str | ScreenCaptureSpec | PreparedClip) -> bool:
@@ -421,23 +431,43 @@ class TxEngine:
                 callsign=settings.callsign,
                 total_gops=n_gops,
             )
+            if settings.waveform_mode == "analog_av":
+                if isinstance(source, PreparedClip):
+                    clip_audio = read_video_audio(
+                        source.path,
+                        n_gops,
+                        NATIVE_AETV_FS,
+                        start_s=source.start_s,
+                    )
+                elif isinstance(source, str) and source.lower() not in {
+                    "webcam", "cam", "camera"
+                }:
+                    clip_audio = read_video_audio(source, n_gops, NATIVE_AETV_FS)
+                else:
+                    clip_audio = np.zeros(n_gops * NATIVE_AETV_FS, dtype=np.float32)
+                chunks = self._composite_chunks(chunks, clip_audio, n_gops)
+                transmit_rate = COMPOSITE_FS
+            else:
+                transmit_rate = codec.mode.geometry.fs
             channel_profile = settings.tx_channel_profile
 
             if settings.debug_capture:
                 tx_prefix = _debug_prefix(settings, f"tx_{codec.mode.name}_{settings.callsign}")
                 tx_recorder = _PcmWaveRecorder(
-                    tx_prefix.with_suffix(".tx.wav"), codec.mode.geometry.fs
+                    tx_prefix.with_suffix(".tx.wav"), transmit_rate
                 )
                 tx_metadata = {
                     "started_at": time.time(),
                     "source": source.path if isinstance(source, PreparedClip) else str(source),
                     "mode": codec.mode.name,
                     "callsign": settings.callsign,
-                    "sample_rate": codec.mode.geometry.fs,
+                    "sample_rate": transmit_rate,
                     "requested_gops": n_gops,
                     "framing": "continuous",
                     "payload_gop_seconds": 1.0,
-                    "expected_waveform_seconds": n_gops + 0.65,
+                    "expected_waveform_seconds": n_gops + (
+                        1.65 if settings.waveform_mode == "analog_av" else 0.65
+                    ),
                     "tx_level": settings.tx_level,
                     "frequency_mhz": settings.freq_mhz,
                     "flex_host": settings.flex_host,
@@ -469,10 +499,10 @@ class TxEngine:
 
             if channel_profile != "radio":
                 return self._emulated_send_stream(
-                    leveled_chunks(), codec.mode.geometry.fs, n_gops, codec,
+                    leveled_chunks(), transmit_rate, n_gops, codec,
                     channel_profile, tx_recorder,
                 )
-            return self._keyed_send_stream(leveled_chunks(), codec.mode.geometry.fs, n_gops)
+            return self._keyed_send_stream(leveled_chunks(), transmit_rate, n_gops)
         except Exception as error:
             self._on_error(str(error))
             self._set(TxPhase.FAILED, self.state.progress, str(error))
@@ -488,6 +518,53 @@ class TxEngine:
                     json.dumps(tx_metadata, indent=2, allow_nan=True) + "\n",
                     encoding="utf-8",
                 )
+
+    def _composite_chunks(self, video_chunks, clip_audio: np.ndarray, n_gops: int):
+        """Add delayed microphone/program audio while polling the live faders."""
+        delay = np.zeros(NATIVE_AETV_FS, dtype=np.float32)
+        for index, video in enumerate(video_chunks):
+            settings = self.station.settings
+            mic_mix = float(np.clip(settings.av_microphone_mix, 0.0, 1.0))
+            clip = np.asarray(
+                clip_audio[index * NATIVE_AETV_FS : (index + 1) * NATIVE_AETV_FS],
+                dtype=np.float32,
+            )
+            if len(clip) < NATIVE_AETV_FS:
+                clip = np.pad(clip, (0, NATIVE_AETV_FS - len(clip)))
+            if mic_mix > 0.0:
+                mic = record_audio(
+                    1.0, NATIVE_AETV_FS, device=settings.microphone_input or None
+                )
+                mic = np.asarray(mic, dtype=np.float32).reshape(-1)
+                if len(mic) < NATIVE_AETV_FS:
+                    mic = np.pad(mic, (0, NATIVE_AETV_FS - len(mic)))
+                mic = mic[:NATIVE_AETV_FS]
+            else:
+                mic = np.zeros(NATIVE_AETV_FS, dtype=np.float32)
+            voice_gop = mic_mix * mic + (1.0 - mic_mix) * clip
+
+            native_video = np.asarray(video, dtype=np.float32).reshape(-1)
+            source_voice = np.zeros(len(native_video), dtype=np.float32)
+            trailing = int(round(0.1 * NATIVE_AETV_FS)) if index == n_gops - 1 else 0
+            start = max(0, len(source_voice) - trailing - NATIVE_AETV_FS)
+            take = min(NATIVE_AETV_FS, len(source_voice) - start)
+            source_voice[start : start + take] = voice_gop[:take]
+            delayed_stream = np.concatenate((delay, source_voice))
+            delayed = delayed_stream[: len(source_voice)]
+            delay = delayed_stream[len(source_voice) :]
+            yield mix_composite_chunk(
+                native_video,
+                delayed,
+                video_power=float(settings.av_video_power),
+            )
+
+        # Drain the one-GOP voice delay after the final video payload.
+        if delay.size and np.max(np.abs(delay)) > 1e-8:
+            yield mix_composite_chunk(
+                np.zeros(len(delay), dtype=np.float32),
+                delay,
+                video_power=float(self.station.settings.av_video_power),
+            )
 
     def _emulated_send_stream(
         self,
@@ -512,6 +589,11 @@ class TxEngine:
         block_samples = max(1, fs // 10)
         stream_started: float | None = None
         delivered_samples = 0
+        separator = StreamingCompositeSeparator() if fs == COMPOSITE_FS else None
+        video_resampler = (
+            StreamResampler(*resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS))
+            if separator is not None else None
+        )
         for clean in chunks:
             if self._cancel.is_set():
                 self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
@@ -540,7 +622,11 @@ class TxEngine:
                 if delay > 0 and self._cancel.wait(delay):
                     self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
                     return False
-                results = demodulator.feed(block)
+                modem_audio = block
+                if separator is not None:
+                    _voice, native_12k = separator.process(modem_audio)
+                    modem_audio = video_resampler(native_12k)
+                results = demodulator.feed(modem_audio)
                 for result in results:
                     for latents, weights in zip(result.gops_latents, result.gops_weights):
                         with self.station.codec_lock:
@@ -747,18 +833,19 @@ class TxEngine:
             and settings.flex_native_audio
         ):
             tx_geometry = AETV_MODES[settings.mode].geometry
+            filter_low = 0 if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[0])
+            filter_high = 5000 if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[1])
             self.station.log(
                 f"Flex {settings.mode} TX mask: "
-                f"{int(tx_geometry.tx_bandpass[0])}-"
-                f"{int(tx_geometry.tx_bandpass[1])} Hz"
+                f"{filter_low}-{filter_high} Hz"
             )
             flex_session = FlexVitaSession(
                 settings.flex_host,
                 frequency_mhz=settings.freq_mhz,
                 mode=settings.require_mode or "DIGU",
                 power=settings.flex_power,
-                filter_low=int(tx_geometry.tx_bandpass[0]),
-                filter_high=int(tx_geometry.tx_bandpass[1]),
+                filter_low=filter_low,
+                filter_high=filter_high,
             )
             # Stream creation and DAX ownership must complete while receiving;
             # otherwise the first VITA packets can arrive before the radio has
@@ -981,6 +1068,10 @@ class RxEngine:
         self._debug_log: _JsonlRecorder | None = None
         self._iq_recorder: _KiwiIqRecorder | None = None
         self._soundcard_recorder: _PcmWaveRecorder | None = None
+        self._composite_separator: StreamingCompositeSeparator | None = None
+        self._composite_video_resampler: StreamResampler | None = None
+        self._composite_voice_resampler: StreamResampler | None = None
+        self._audio_playback: AudioPlaybackStream | None = None
 
     @property
     def listening(self) -> bool:
@@ -995,7 +1086,20 @@ class RxEngine:
         self._shown_gops = 0
         self.last_video = None
         self._last_result = None
-        self.ring = RingBuffer(settings.buffer_seconds, codec.mode.geometry.fs)
+        composite = settings.waveform_mode == "analog_av"
+        capture_rate = COMPOSITE_FS if composite else codec.mode.geometry.fs
+        self.ring = RingBuffer(settings.buffer_seconds, capture_rate)
+        if composite:
+            self._composite_separator = StreamingCompositeSeparator()
+            self._composite_video_resampler = StreamResampler(
+                *resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS)
+            )
+            self._composite_voice_resampler = StreamResampler(
+                *resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS)
+            )
+            self._audio_playback = AudioPlaybackStream(
+                NATIVE_AETV_FS, settings.audio_playback_output or None
+            )
         if settings.debug_capture:
             prefix = _debug_prefix(settings, f"rx_{settings.rx_source}")
             self._debug_log = _JsonlRecorder(prefix.with_suffix(".modem.jsonl"))
@@ -1010,13 +1114,13 @@ class RxEngine:
                         "iq_center_khz": codec.mode.geometry.fcenter_hz / 1000.0
                         + settings.kiwi_dial_mhz * 1000.0,
                         "mode": codec.mode.name,
-                        "destination_rate": codec.mode.geometry.fs,
+                        "destination_rate": capture_rate,
                     },
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
             elif settings.rx_source == "soundcard":
                 self._soundcard_recorder = _PcmWaveRecorder(
-                    prefix.with_suffix(".audio.wav"), codec.mode.geometry.fs
+                    prefix.with_suffix(".audio.wav"), capture_rate
                 )
                 self.station.log(
                     f"RX soundcard debug: {self._soundcard_recorder.path}"
@@ -1032,7 +1136,7 @@ class RxEngine:
                 host=settings.kiwi_host,
                 dial_mhz=settings.kiwi_dial_mhz,
                 fcenter_hz=codec.mode.geometry.fcenter_hz,
-                dst_rate=codec.mode.geometry.fs,
+                dst_rate=capture_rate,
                 ring=self.ring,
                 user=settings.kiwi_user or settings.callsign,
                 password=settings.kiwi_password,
@@ -1048,13 +1152,13 @@ class RxEngine:
                 frequency_mhz=settings.freq_mhz,
                 mode=settings.require_mode or "DIGU",
                 power=settings.flex_power,
-                filter_low=int(codec.mode.geometry.tx_bandpass[0]),
-                filter_high=int(codec.mode.geometry.tx_bandpass[1]),
+                filter_low=0 if composite else int(codec.mode.geometry.tx_bandpass[0]),
+                filter_high=5000 if composite else int(codec.mode.geometry.tx_bandpass[1]),
             )
-            if codec.mode.geometry.fs == 24000:
+            if capture_rate == 24000:
                 write_flex = self.ring.write
             else:
-                resample_flex = StreamResampler(*resample_ratio(24000, codec.mode.geometry.fs))
+                resample_flex = StreamResampler(*resample_ratio(24000, capture_rate))
                 write_flex = lambda chunk: self.ring.write(resample_flex(chunk))
             self._flex.start_rx(
                 write_flex,
@@ -1070,7 +1174,7 @@ class RxEngine:
             self._stream, _rate = open_input_stream(
                 settings.audio_input or None,
                 audio_sink,
-                codec.mode.geometry.fs,
+                capture_rate,
                 on_error=self._on_error,
                 on_discontinuity=self._on_soundcard_discontinuity,
             )
@@ -1096,6 +1200,15 @@ class RxEngine:
         if thread is not None:
             thread.join(timeout=4.0)
         self._thread = None
+        if self._audio_playback is not None:
+            try:
+                self._audio_playback.close()
+            except Exception:
+                pass
+            self._audio_playback = None
+        self._composite_separator = None
+        self._composite_video_resampler = None
+        self._composite_voice_resampler = None
         if self.station.settings.autosave and self.last_video is not None and self._last_result is not None:
             self._autosave(self.last_video, self._last_result)
         self.ring = None
@@ -1179,6 +1292,14 @@ class RxEngine:
             if audio.size == 0:
                 continue
             try:
+                if self._composite_separator is not None:
+                    voice_12k, video_12k = self._composite_separator.process(audio)
+                    assert self._composite_video_resampler is not None
+                    assert self._composite_voice_resampler is not None
+                    audio = self._composite_video_resampler(video_12k)
+                    voice = self._composite_voice_resampler(voice_12k)
+                    if self._audio_playback is not None and voice.size:
+                        self._audio_playback.write(voice)
                 demodulator = self._stream_decoder
                 if demodulator is None:
                     demodulator = self._stream_decoder = self._new_demodulator(codec.mode)

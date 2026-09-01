@@ -328,6 +328,10 @@ class ReceivePanel(QWidget):
         ):
             QTimer.singleShot(0, self._refresh_kiwis)
 
+    def sync_waveform_mode(self) -> None:
+        """Refresh A/V-only controls without re-enumerating audio hardware."""
+        self._sync_source_visibility()
+
     def start(self) -> bool:
         if self._rf_pair_thread is not None and self._rf_pair_thread.isRunning():
             self._start_after_kiwi_pick = True
@@ -429,6 +433,8 @@ class ReceivePanel(QWidget):
         self.source.addItem("Public KiwiSDR", "kiwi")
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
+        self.playback_label = QLabel("Program audio to")
+        self.playback_device = QComboBox()
         self.kiwi_host = QLineEdit()
         self.kiwi_host.setMinimumWidth(190)
         self.kiwi_host.setPlaceholderText("Paste http://host:8073/ or host:port")
@@ -480,6 +486,9 @@ class ReceivePanel(QWidget):
         row1.addWidget(self.source)
         row1.addWidget(self.input_device, 1)
         row1.addWidget(self.refresh_audio)
+        self.playback_row = QHBoxLayout()
+        self.playback_row.addWidget(self.playback_label)
+        self.playback_row.addWidget(self.playback_device, 1)
         row2 = QHBoxLayout()
         self.kiwi_label = QLabel("Receiver address")
         row2.addWidget(self.kiwi_label)
@@ -502,6 +511,7 @@ class ReceivePanel(QWidget):
         buttons.addWidget(self.save_button)
         buttons.addStretch(1)
         strip.addLayout(row1)
+        strip.addLayout(self.playback_row)
         strip.addLayout(row2)
         strip.addLayout(row3)
         strip.addLayout(path_row)
@@ -532,6 +542,9 @@ class ReceivePanel(QWidget):
         self.auto_kiwi.setVisible(kiwi)
         self.kiwi_recommendation.setVisible(kiwi)
         self.path_planner_button.setVisible(kiwi)
+        av = self.station.settings.waveform_mode == "analog_av"
+        self.playback_label.setVisible(av)
+        self.playback_device.setVisible(av)
         if kiwi and self.auto_kiwi.isChecked() and not self._receivers:
             QTimer.singleShot(0, self._refresh_kiwis)
 
@@ -539,12 +552,13 @@ class ReceivePanel(QWidget):
         current = self.station.settings.audio_input
         self.input_device.clear()
         self.input_device.addItem("System default", "")
+        devices = []
         try:
             devices = list_audio_devices("input")
             for item in devices:
                 self.input_device.addItem(item.label(), item.selection_value())
         except AudioUnavailable:
-            return
+            pass
         index = self.input_device.findData(current)
         if index < 0 and current not in {None, ""}:
             index = next(
@@ -552,11 +566,29 @@ class ReceivePanel(QWidget):
                 -1,
             )
         self.input_device.setCurrentIndex(max(0, index))
+        playback = self.station.settings.audio_playback_output
+        self.playback_device.clear()
+        self.playback_device.addItem("System default", "")
+        outputs = []
+        try:
+            outputs = list_audio_devices("output")
+            for item in outputs:
+                self.playback_device.addItem(item.label(), item.selection_value())
+        except AudioUnavailable:
+            pass
+        index = self.playback_device.findData(playback)
+        if index < 0 and playback not in {None, ""}:
+            index = next(
+                (i for i, item in enumerate(outputs, start=1) if item.name == str(playback)),
+                -1,
+            )
+        self.playback_device.setCurrentIndex(max(0, index))
 
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings
         settings.rx_source = self.source.currentData()
         settings.audio_input = self.input_device.currentData() or ""
+        settings.audio_playback_output = self.playback_device.currentData() or ""
         settings.kiwi_dial_mhz = float(self.kiwi_dial.value())
         if settings.rx_source == "kiwi":
             settings.kiwi_host = normalize_kiwi_host(self.kiwi_host.text())
@@ -1061,7 +1093,10 @@ class ReceivePanel(QWidget):
     def _apply_ring(self, ring) -> None:
         if self._waterfall is None:
             return
-        self._waterfall.set_mode(self.station.settings.mode)
+        self._waterfall.set_mode(
+            self.station.settings.mode,
+            self.station.settings.waveform_mode == "analog_av",
+        )
         self._waterfall.set_ring(ring)
         if ring is None:
             self._waterfall.clear()

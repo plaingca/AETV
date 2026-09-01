@@ -54,6 +54,14 @@ Everything is under `runs/analog-voice-v8-upper`:
 
 The experiment uses `aetv/analog_av.py`. Nine focused analog/composite tests pass. The generated MP4 is H.264 Constrained Baseline with `yuv420p`, AAC-LC at 48 kHz, fast-start layout, and was fully decoded with FFmpeg after generation.
 
+## Station integration
+
+The desktop station now exposes this waveform as **V8 A/V**. It provides
+separate radio-output, microphone-input, and received-program-audio device
+selectors, live audio/video power allocation, and a live clip/microphone
+crossfader. The receive path uses causal streaming separation filters before
+feeding V8 to the normal modem and voice to the selected playback device.
+
 ## Next validation
 
 The current result proves ideal spectral coexistence and synchronization. Before integrating it into the station GUI, evaluate the composite through:
@@ -61,4 +69,4 @@ The current result proves ideal spectral coexistence and synchronization. Before
 1. the actual 5 kHz radio/DAX filter response and transmitter linearity;
 2. composite peak limiting and unequal voice/video power allocations;
 3. AWGN, selective fading, and frequency offset with separate voice and V8 quality measurements;
-4. causal streaming filters, whose group delay must be included in the audio playout delay.
+4. hardware measurement of the causal streaming filters and their group delay.

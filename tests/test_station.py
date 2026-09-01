@@ -344,6 +344,42 @@ def test_streaming_tx_prepares_first_gop_before_ptt(monkeypatch):
     assert events.index("produce:0") < events.index("ptt:True") < events.index("play:0")
 
 
+def test_composite_tx_polls_power_and_microphone_faders_per_gop(monkeypatch):
+    from aetv.station import Station
+
+    captured = []
+    monkeypatch.setattr(
+        "aetv.station.record_audio",
+        lambda *_args, **_kwargs: np.ones(8000, dtype=np.float32),
+    )
+
+    def mix(video, voice, *, video_power):
+        captured.append((video_power, float(np.mean(voice))))
+        return np.zeros(round(len(video) * 1.5), dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.mix_composite_chunk", mix)
+    settings = StationSettings(
+        mode="V8", waveform_mode="analog_av", av_video_power=0.2,
+        av_microphone_mix=0.0,
+    )
+    engine = TxEngine(Station(settings))
+    clip = np.concatenate((np.full(8000, 0.25), np.full(8000, 0.5))).astype(np.float32)
+    chunks = engine._composite_chunks(
+        iter((np.zeros(8000, np.float32), np.zeros(8000, np.float32))), clip, 2
+    )
+    next(chunks)
+    settings.av_video_power = 0.8
+    settings.av_microphone_mix = 1.0
+    next(chunks)
+    next(chunks)
+    assert captured[0][0] == 0.2
+    assert captured[1][0] == 0.8
+    # The second output carries the one-GOP-delayed first source mix.
+    assert captured[1][1] == pytest.approx(0.25)
+    # The drain carries the updated all-microphone mix (plus the final 0.1 s leadout).
+    assert captured[2][1] > 0.85
+
+
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):
     captured = {}
 

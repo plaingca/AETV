@@ -132,3 +132,57 @@ def compose_delayed_stream(
     composite = upper + speech
     scale = float(peak) / max(float(np.max(np.abs(composite))), float(peak))
     return composite * scale, speech * scale, upper * scale
+
+
+def mix_composite_chunk(
+    aetv_8k: np.ndarray,
+    voice_8k: np.ndarray,
+    *,
+    video_power: float,
+    peak: float = 0.95,
+) -> np.ndarray:
+    """Compose one aligned stream chunk using an average-power allocation."""
+    upper = translate_aetv_up(aetv_8k)
+    voice = prepare_voice(voice_8k)
+    count = min(len(upper), len(voice))
+    upper, voice = upper[:count], voice[:count]
+    video_power = float(np.clip(video_power, 0.0, 1.0))
+
+    def unit_rms(values: np.ndarray) -> np.ndarray:
+        rms = float(np.sqrt(np.mean(values**2))) if values.size else 0.0
+        return values / rms if rms > 1e-12 else np.zeros_like(values)
+
+    composite = (
+        np.sqrt(video_power) * unit_rms(upper)
+        + np.sqrt(1.0 - video_power) * unit_rms(voice)
+    )
+    maximum = float(np.max(np.abs(composite))) if composite.size else 0.0
+    if maximum > peak:
+        composite *= float(peak) / maximum
+    return composite.astype(np.float32)
+
+
+class StreamingCompositeSeparator:
+    """Causal receive filters for live analog voice and translated V8."""
+
+    def __init__(self):
+        self._voice_sos = signal.butter(8, VOICE_HIGH_HZ, "lowpass", fs=COMPOSITE_FS, output="sos")
+        self._upper_sos = signal.butter(
+            8, (AETV_FILTER_LOW_HZ, AETV_FILTER_HIGH_HZ), "bandpass",
+            fs=COMPOSITE_FS, output="sos",
+        )
+        self._native_sos = signal.butter(8, 2_850.0, "lowpass", fs=COMPOSITE_FS, output="sos")
+        self._voice_zi = signal.sosfilt_zi(self._voice_sos) * 0.0
+        self._upper_zi = signal.sosfilt_zi(self._upper_sos) * 0.0
+        self._native_zi = signal.sosfilt_zi(self._native_sos) * 0.0
+        self._sample = 0
+
+    def process(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        values = np.asarray(composite, dtype=np.float64).reshape(-1)
+        voice, self._voice_zi = signal.sosfilt(self._voice_sos, values, zi=self._voice_zi)
+        upper, self._upper_zi = signal.sosfilt(self._upper_sos, values, zi=self._upper_zi)
+        indices = self._sample + np.arange(len(values), dtype=np.float64)
+        self._sample += len(values)
+        mixed = 2.0 * upper * np.cos(2.0 * np.pi * AETV_SHIFT_HZ * indices / COMPOSITE_FS)
+        native, self._native_zi = signal.sosfilt(self._native_sos, mixed, zi=self._native_zi)
+        return voice.astype(np.float32), native.astype(np.float32)

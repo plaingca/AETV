@@ -50,6 +50,11 @@ class StationSettings:
 
     audio_input: str = ""
     audio_output: str = ""
+    microphone_input: str = ""
+    audio_playback_output: str = ""
+    waveform_mode: str = "video"  # video | analog_av
+    av_video_power: float = 0.5
+    av_microphone_mix: float = 0.5
     tx_level: float = 0.7
     rx_source: str = "soundcard"  # soundcard | flex | kiwi
     buffer_seconds: float = 90.0
@@ -109,6 +114,14 @@ class StationSettings:
             problems.append(f"mode {self.mode!r} is not a validated release mode")
         if not 0.05 <= self.tx_level <= 1.0:
             problems.append("TX level must be between 0.05 and 1.0")
+        if self.waveform_mode not in {"video", "analog_av"}:
+            problems.append(f"unknown waveform mode {self.waveform_mode!r}")
+        if self.waveform_mode == "analog_av" and self.mode != "V8":
+            problems.append("V8 A/V transport requires video mode V8")
+        if not 0.0 <= self.av_video_power <= 1.0:
+            problems.append("A/V video power must be between 0 and 1")
+        if not 0.0 <= self.av_microphone_mix <= 1.0:
+            problems.append("microphone mix must be between 0 and 1")
         if self.gops < 1:
             problems.append("GOP count must be >= 1")
         if self.tx_channel_profile != "radio" and self.tx_channel_profile not in CHANNEL_PROFILES:

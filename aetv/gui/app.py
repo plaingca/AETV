@@ -75,6 +75,8 @@ def _rx_runtime_config(settings: StationSettings) -> tuple:
     return (
         settings.rx_source,
         settings.audio_input,
+        getattr(settings, "audio_playback_output", ""),
+        getattr(settings, "waveform_mode", "video"),
         settings.flex_host,
         settings.flex_power,
         settings.freq_mhz,
@@ -88,6 +90,16 @@ def _rx_runtime_config(settings: StationSettings) -> tuple:
         settings.decode_every_s,
         settings.debug_capture,
     )
+
+
+def _configure_waterfall(waterfall, settings: StationSettings) -> None:
+    """Apply the composite display while tolerating simple UI adapters."""
+    try:
+        waterfall.set_mode(
+            settings.mode, getattr(settings, "waveform_mode", "video") == "analog_av"
+        )
+    except TypeError:
+        waterfall.set_mode(settings.mode)
 
 
 def _smoke_codec_result(window) -> int | None:
@@ -129,7 +141,7 @@ class MainWindow(QMainWindow):
         self.rx = ReceivePanel(self.station)
         self.tx = TransmitPanel(self.station)
         self.waterfall = Waterfall()
-        self.waterfall.set_mode(self.settings.mode)
+        _configure_waterfall(self.waterfall, self.settings)
         self.rx.attach_waterfall(self.waterfall)
 
         panes = QSplitter(Qt.Orientation.Horizontal)
@@ -284,7 +296,7 @@ class MainWindow(QMainWindow):
         self.tx.send_button.setEnabled(True)
         self.tx.model_ready()
         self.rx.start_button.setEnabled(True)
-        self.waterfall.set_mode(self.settings.mode)
+        _configure_waterfall(self.waterfall, self.settings)
         self._log(f"codec ready: {text}")
         if self._resume_rx_after_codec_reload:
             self._resume_rx_after_codec_reload = False
@@ -377,6 +389,8 @@ class MainWindow(QMainWindow):
         previous_mode = self.settings.mode
         if self.settings.mode not in available:
             self.settings.mode = available[0]
+            if self.settings.mode != "V8":
+                self.settings.waveform_mode = "video"
             self._log(
                 f"{previous_mode} has no installed model; using {self.settings.mode}"
             )
@@ -392,7 +406,7 @@ class MainWindow(QMainWindow):
         self.station.settings = self.settings
         self.rx.sync_from_config()
         self.tx.sync_from_config()
-        self.waterfall.set_mode(self.settings.mode)
+        _configure_waterfall(self.waterfall, self.settings)
         self._refresh_station_label()
         if not codec_matches:
             self._load_codec()
@@ -413,7 +427,7 @@ class MainWindow(QMainWindow):
         self.station.settings = self.settings
         self.rx.sync_from_config()
         self.tx.sync_from_config()
-        self.waterfall.set_mode(self.settings.mode)
+        _configure_waterfall(self.waterfall, self.settings)
         self._refresh_station_label()
         self._log("settings saved")
         codec_config = _codec_config(self.settings)
@@ -448,17 +462,32 @@ class MainWindow(QMainWindow):
         self.rx.start()
 
     def _on_tx_mode_requested(self, mode: str) -> None:
-        if mode == self.settings.mode or self.tx.transmitting():
+        if self.tx.transmitting():
             return
         previous = self.settings.mode
+        codec_changed = mode != previous
         self.settings.mode = mode
-        # A local runtime bundle belongs to one geometry and cannot be reused
-        # after selecting the other release mode.
-        self.settings.checkpoint = ""
+        if codec_changed:
+            # A local runtime bundle belongs to one geometry and cannot be reused
+            # after selecting the other release mode.
+            self.settings.checkpoint = ""
         save_settings(self.settings)
         self.station.settings = self.settings
-        self.waterfall.set_mode(mode)
+        sync_waveform = getattr(self.rx, "sync_waveform_mode", None)
+        if sync_waveform is not None:
+            sync_waveform()
+        _configure_waterfall(self.waterfall, self.settings)
         self._refresh_station_label()
+        if not codec_changed:
+            self._log(
+                "V8 A/V transport enabled"
+                if self.settings.waveform_mode == "analog_av"
+                else "video-only transport enabled"
+            )
+            if self.rx.listening():
+                self._restart_rx_after_settings_stop = True
+                self.rx.stop()
+            return
         self._log(f"mode changed from {previous} to {mode}; loading model")
         if self.rx.listening():
             self._reload_codec_after_rx_stop = True
@@ -502,7 +531,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_station_label(self) -> None:
         backend = self.settings.cat_backend if not self.settings.audio_only else "audio-only"
-        self.station_label.setText(f"  {self.settings.callsign}  {self.settings.mode}  ")
+        mode_label = "V8 A/V" if self.settings.waveform_mode == "analog_av" else self.settings.mode
+        self.station_label.setText(f"  {self.settings.callsign}  {mode_label}  ")
         if backend == "none":
             self.rig_label.setText("CAT off")
         elif backend == "flex":

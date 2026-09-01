@@ -35,6 +35,7 @@ class PreparedClip:
     mode_name: str
     latents: tuple[np.ndarray, ...]
     preview_frames: np.ndarray
+    start_s: float = 0.0
 
     @property
     def gops(self) -> int:
@@ -522,6 +523,26 @@ def iter_video_file(
     return np.frombuffer(proc.stdout, dtype=np.uint8).copy().reshape(
         frames, mode.height, mode.width, 3
     )
+
+
+def read_video_audio(
+    path: str | Path, duration_s: float, rate: int = 8000, *, start_s: float = 0.0
+) -> np.ndarray:
+    """Decode a media file's first mono audio track, padding silence as needed."""
+    samples = max(0, int(round(float(duration_s) * rate)))
+    command = [
+        ffmpeg_executable(), "-v", "error", "-ss", f"{start_s:.6f}",
+        "-i", str(path), "-vn", "-ac", "1",
+        "-ar", str(rate), "-t", f"{duration_s:.6f}", "-f", "f32le", "pipe:1",
+    ]
+    proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
+    if proc.returncode:
+        # A video without an audio stream is a valid silent program source.
+        return np.zeros(samples, dtype=np.float32)
+    audio = np.frombuffer(proc.stdout, dtype="<f4").astype(np.float32, copy=True)
+    if len(audio) < samples:
+        audio = np.pad(audio, (0, samples - len(audio)))
+    return audio[:samples]
 
 
 def collect_gops(

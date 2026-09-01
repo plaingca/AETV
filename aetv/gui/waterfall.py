@@ -114,10 +114,14 @@ class Waterfall(QWidget):
         if ring is not None:
             self._fs = ring.fs
 
-    def set_mode(self, mode_name: str) -> None:
+    def set_mode(self, mode_name: str, composite: bool = False) -> None:
         mode = AETV_MODES[mode_name]
-        self._fs = mode.geometry.fs
-        self._band_lo, self._band_hi = mode.geometry.tx_bandpass
+        if composite:
+            self._fs = 12_000
+            self._band_lo, self._band_hi = 0.0, 5_000.0
+        else:
+            self._fs = mode.geometry.fs
+            self._band_lo, self._band_hi = mode.geometry.tx_bandpass
         self._reset_scaling()
 
     def _reset_scaling(self) -> None:

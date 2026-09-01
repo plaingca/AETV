@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QRubberBand,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -109,6 +110,7 @@ class TransmitPanel(QWidget):
     _clipProgress = Signal(int, float, int)
     _clipReady = Signal(int, object, int)
     _clipFailed = Signal(int, str, int)
+    _inputsArrived = Signal(object)
     loopbackVideo = Signal(object, object)
 
     def __init__(self, station, parent=None):
@@ -150,6 +152,7 @@ class TransmitPanel(QWidget):
         self._clipProgress.connect(self._apply_clip_progress, Qt.ConnectionType.QueuedConnection)
         self._clipReady.connect(self._apply_clip_ready, Qt.ConnectionType.QueuedConnection)
         self._clipFailed.connect(self._apply_clip_failed, Qt.ConnectionType.QueuedConnection)
+        self._inputsArrived.connect(self._apply_inputs, Qt.ConnectionType.QueuedConnection)
         self._file_path = ""
         self._build()
 
@@ -165,7 +168,8 @@ class TransmitPanel(QWidget):
     def sync_from_config(self) -> None:
         settings = self.station.settings
         previous = self.mode.blockSignals(True)
-        self.mode.setCurrentIndex(max(0, self.mode.findData(settings.mode)))
+        selected = "V8_AV" if settings.waveform_mode == "analog_av" else settings.mode
+        self.mode.setCurrentIndex(max(0, self.mode.findData(selected)))
         self.mode.blockSignals(previous)
         self.gops.setValue(settings.gops)
         level = max(0.05, min(1.0, settings.tx_level))
@@ -176,6 +180,9 @@ class TransmitPanel(QWidget):
             if button is not None:
                 button.setChecked(True)
         self._sync_channel_route()
+        self.av_power.setValue(int(round(settings.av_video_power * 100)))
+        self.mic_mix.setValue(int(round(settings.av_microphone_mix * 100)))
+        self._sync_av_controls()
         self._fill_cameras()
         self._fill_outputs()
 
@@ -223,6 +230,9 @@ class TransmitPanel(QWidget):
         self.send_button.setEnabled(False)
         self.mode.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        self.mode.setEnabled(False)
+        self.microphone.setEnabled(False)
+        self.output.setEnabled(False)
         for button in self.channel_buttons.buttons():
             button.setEnabled(False)
         self.progress.setValue(0)
@@ -284,6 +294,11 @@ class TransmitPanel(QWidget):
         self.mode = QComboBox()
         for name in RELEASE_MODES:
             self.mode.addItem(RELEASE_MODE_LABELS[name], name)
+        v8 = AETV_MODES["V8"]
+        self.mode.addItem(
+            f"V8 A/V — {v8.width}×{v8.height} @ {v8.fps:g} fps + analog audio",
+            "V8_AV",
+        )
         self.gops = QSpinBox()
         self.gops.setRange(1, 300)
         self.gops.setSuffix(" s")
@@ -292,6 +307,13 @@ class TransmitPanel(QWidget):
         self.level_db.setSingleStep(0.5)
         self.level_db.setSuffix(" dB FS")
         self.output = QComboBox()
+        self.microphone = QComboBox()
+        self.av_power = QSlider(Qt.Orientation.Horizontal)
+        self.av_power.setRange(0, 100)
+        self.av_power_label = QLabel()
+        self.mic_mix = QSlider(Qt.Orientation.Horizontal)
+        self.mic_mix.setRange(0, 100)
+        self.mic_mix_label = QLabel()
         self.send_button = QPushButton("Send")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
@@ -331,6 +353,17 @@ class TransmitPanel(QWidget):
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("To radio"))
         out_row.addWidget(self.output, 1)
+        self.av_row = QHBoxLayout()
+        self.av_row.addWidget(QLabel("Microphone"))
+        self.av_row.addWidget(self.microphone, 1)
+        self.av_row.addWidget(QLabel("Audio / video power"))
+        self.av_row.addWidget(self.av_power, 1)
+        self.av_row.addWidget(self.av_power_label)
+        self.mix_row = QHBoxLayout()
+        self.mix_row.addWidget(QLabel("Clip audio"))
+        self.mix_row.addWidget(self.mic_mix, 1)
+        self.mix_row.addWidget(QLabel("Microphone"))
+        self.mix_row.addWidget(self.mic_mix_label)
         channel_row = QHBoxLayout()
         channel_row.addWidget(QLabel("Route"))
         self.channel_keys = ["radio", *CHANNEL_PROFILES]
@@ -358,6 +391,8 @@ class TransmitPanel(QWidget):
         strip.addLayout(file_row)
         strip.addLayout(mode_row)
         strip.addLayout(out_row)
+        strip.addLayout(self.av_row)
+        strip.addLayout(self.mix_row)
         strip.addLayout(channel_row)
         strip.addWidget(self.progress)
         strip.addLayout(buttons)
@@ -396,6 +431,8 @@ class TransmitPanel(QWidget):
         self.camera.currentIndexChanged.connect(self._restart_preview)
         self.screen_target.currentIndexChanged.connect(self._restart_preview)
         self.mode.currentIndexChanged.connect(self._on_mode_changed)
+        self.av_power.valueChanged.connect(self._on_av_power_changed)
+        self.mic_mix.valueChanged.connect(self._on_mic_mix_changed)
         self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
@@ -423,7 +460,7 @@ class TransmitPanel(QWidget):
         if self._preview_thread is not None and self._preview_thread.is_alive():
             return
         self._preview_stop.clear()
-        mode_name = self.mode.currentData() or self.station.settings.mode
+        mode_name = self._selected_mode_name()
         camera = int(self.camera.currentData() or 0)
         screen = self.screen_target.currentData() if self.screen_radio.isChecked() else None
         self._preview_thread = threading.Thread(
@@ -467,17 +504,6 @@ class TransmitPanel(QWidget):
             return
         self._preview_restart_pending = False
         self._start_preview()
-
-    def _on_mode_changed(self, index: int) -> None:
-        self._restart_preview(index)
-        self._selected_clip = None
-        if hasattr(self, "_prepared_clips"):
-            self._prepared_clips.clear()
-        mode = self.mode.currentData()
-        if mode and mode != self.station.settings.mode:
-            self.send_button.setEnabled(False)
-            self.status.setText(f"loading {mode} model…")
-            self.modeRequested.emit(str(mode))
 
     def _stop_preview(self) -> None:
         self._preview_stop.set()
@@ -742,6 +768,11 @@ class TransmitPanel(QWidget):
         except AudioUnavailable:
             outputs = []
         self._outputsArrived.emit(outputs)
+        try:
+            inputs = list_audio_devices("input")
+        except AudioUnavailable:
+            inputs = []
+        self._inputsArrived.emit(inputs)
 
     def _apply_outputs(self, outputs) -> None:
         self._output_load_active = False
@@ -758,12 +789,33 @@ class TransmitPanel(QWidget):
             )
         self.output.setCurrentIndex(max(0, index))
 
+    def _apply_inputs(self, inputs) -> None:
+        current = self.station.settings.microphone_input
+        self.microphone.clear()
+        self.microphone.addItem("System default", "")
+        for item in inputs:
+            self.microphone.addItem(item.label(), item.selection_value())
+        index = self.microphone.findData(current)
+        if index < 0 and current not in {None, ""}:
+            index = next(
+                (i for i, item in enumerate(inputs, start=1) if item.name == str(current)),
+                -1,
+            )
+        self.microphone.setCurrentIndex(max(0, index))
+
     def _apply_panel_settings(self) -> None:
         settings = self.station.settings
+        settings.mode = self._selected_mode_name()
+        settings.waveform_mode = (
+            "analog_av" if self.mode.currentData() == "V8_AV" else "video"
+        )
         settings.gops = int(self.gops.value())
         settings.tx_level = float(10 ** (self.level_db.value() / 20.0))
         settings.camera_index = int(self.camera.currentData() or 0)
         settings.audio_output = self.output.currentData() or ""
+        settings.microphone_input = self.microphone.currentData() or ""
+        settings.av_video_power = self.av_power.value() / 100.0
+        settings.av_microphone_mix = self.mic_mix.value() / 100.0
         settings.tx_channel_profile = self.selected_channel_profile()
 
     def selected_channel_profile(self) -> str:
@@ -780,6 +832,53 @@ class TransmitPanel(QWidget):
         self.output.setEnabled(not testing)
         self.send_button.setText("Run loopback" if testing else "Send")
 
+    def _selected_mode_name(self) -> str:
+        return "V8" if self.mode.currentData() == "V8_AV" else (
+            self.mode.currentData() or self.station.settings.mode
+        )
+
+    def _on_mode_changed(self, index: int) -> None:
+        selected = self.mode.currentData()
+        base_mode = "V8" if selected == "V8_AV" else (
+            selected or self.station.settings.mode
+        )
+        waveform_mode = (
+            "analog_av" if selected == "V8_AV" else "video"
+        )
+        self.station.settings.waveform_mode = waveform_mode
+        if hasattr(self, "_sync_av_controls"):
+            self._sync_av_controls()
+        self._restart_preview(index)
+        if hasattr(self, "_selected_clip"):
+            self._selected_clip = None
+        if hasattr(self, "_prepared_clips"):
+            self._prepared_clips.clear()
+        if base_mode != self.station.settings.mode:
+            self.send_button.setEnabled(False)
+            self.status.setText(f"loading {base_mode} model…")
+        self.modeRequested.emit(base_mode)
+
+    def _sync_av_controls(self) -> None:
+        visible = self.mode.currentData() == "V8_AV"
+        for index in range(self.av_row.count()):
+            widget = self.av_row.itemAt(index).widget()
+            if widget is not None:
+                widget.setVisible(visible)
+        for index in range(self.mix_row.count()):
+            widget = self.mix_row.itemAt(index).widget()
+            if widget is not None:
+                widget.setVisible(visible)
+        self._on_av_power_changed(self.av_power.value())
+        self._on_mic_mix_changed(self.mic_mix.value())
+
+    def _on_av_power_changed(self, value: int) -> None:
+        self.station.settings.av_video_power = value / 100.0
+        self.av_power_label.setText(f"{100 - value}% / {value}%")
+
+    def _on_mic_mix_changed(self, value: int) -> None:
+        self.station.settings.av_microphone_mix = value / 100.0
+        self.mic_mix_label.setText(f"{value}% mic")
+
     def _apply_state(self, state: TxState) -> None:
         self.status.setText(state.message or state.phase.value)
         self.progress.setValue(int(round(state.progress * 100)))
@@ -792,6 +891,8 @@ class TransmitPanel(QWidget):
             )
             self.mode.setEnabled(True)
             self.cancel_button.setEnabled(False)
+            self.mode.setEnabled(True)
+            self.microphone.setEnabled(True)
             for button in self.channel_buttons.buttons():
                 button.setEnabled(True)
             self._sync_channel_route()
