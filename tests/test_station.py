@@ -348,10 +348,28 @@ def test_composite_tx_polls_power_and_microphone_faders_per_gop(monkeypatch):
     from aetv.station import Station
 
     captured = []
-    monkeypatch.setattr(
-        "aetv.station.record_audio",
-        lambda *_args, **_kwargs: np.ones(8000, dtype=np.float32),
-    )
+    opened = []
+
+    class InputStream:
+        def __init__(self):
+            self.stopped = False
+            self.closed = False
+
+        def stop(self):
+            self.stopped = True
+
+        def close(self):
+            self.closed = True
+
+    def open_input(_device, sink, rate, **_kwargs):
+        assert rate == 8000
+        stream = InputStream()
+        opened.append(stream)
+        # Both GOPs arrive through one device session, as they do in production.
+        sink.write(np.ones(16000, dtype=np.float32))
+        return stream, rate
+
+    monkeypatch.setattr("aetv.station.open_input_stream", open_input)
 
     def mix(video, voice, *, video_power):
         captured.append((video_power, float(np.mean(voice))))
@@ -378,6 +396,8 @@ def test_composite_tx_polls_power_and_microphone_faders_per_gop(monkeypatch):
     assert captured[1][1] == pytest.approx(0.25)
     # The drain carries the updated all-microphone mix (plus the final 0.1 s leadout).
     assert captured[2][1] > 0.85
+    assert len(opened) == 1
+    assert opened[0].stopped and opened[0].closed
 
 
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):

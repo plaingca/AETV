@@ -26,7 +26,6 @@ from .audio_io import (
     open_input_stream,
     play_cancellable,
     play_chunk_stream,
-    record_audio,
     resample_ratio,
 )
 from .analog_av import (
@@ -99,6 +98,46 @@ class _PcmWaveRecorder:
 
     def close(self) -> None:
         self._wave.close()
+
+
+class _LiveMicrophoneBuffer:
+    """Bounded, blocking sample FIFO fed by the persistent input callback."""
+
+    def __init__(self, rate: int, seconds: float = 4.0):
+        self._limit = max(1, int(round(rate * seconds)))
+        self._samples = np.zeros(0, dtype=np.float32)
+        self._condition = threading.Condition()
+
+    def write(self, values: np.ndarray) -> None:
+        samples = np.asarray(values, dtype=np.float32).reshape(-1)
+        if not samples.size:
+            return
+        with self._condition:
+            self._samples = np.concatenate((self._samples, samples))
+            if len(self._samples) > self._limit:
+                self._samples = self._samples[-self._limit :]
+            self._condition.notify_all()
+
+    def read(
+        self, count: int, should_stop=None, timeout_s: float = 1.25
+    ) -> np.ndarray:
+        """Return one block, padding if a failed device stops producing."""
+        count = max(0, int(count))
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        with self._condition:
+            while len(self._samples) < count:
+                if should_stop is not None and should_stop():
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._condition.wait(min(0.05, remaining))
+            take = min(count, len(self._samples))
+            result = self._samples[:take].copy()
+            self._samples = self._samples[take:]
+        if take < count:
+            result = np.pad(result, (0, count - take))
+        return result
 
 
 class _RecordingSink:
@@ -522,41 +561,52 @@ class TxEngine:
     def _composite_chunks(self, video_chunks, clip_audio: np.ndarray, n_gops: int):
         """Add delayed microphone/program audio while polling the live faders."""
         delay = np.zeros(NATIVE_AETV_FS, dtype=np.float32)
-        for index, video in enumerate(video_chunks):
-            settings = self.station.settings
-            mic_mix = float(np.clip(settings.av_microphone_mix, 0.0, 1.0))
-            clip = np.asarray(
-                clip_audio[index * NATIVE_AETV_FS : (index + 1) * NATIVE_AETV_FS],
-                dtype=np.float32,
+        microphone = _LiveMicrophoneBuffer(NATIVE_AETV_FS)
+        input_stream = None
+        try:
+            input_stream, _native_rate = open_input_stream(
+                self.station.settings.microphone_input or None,
+                microphone,
+                NATIVE_AETV_FS,
+                on_error=lambda message: self.station.log(f"TX microphone: {message}"),
             )
-            if len(clip) < NATIVE_AETV_FS:
-                clip = np.pad(clip, (0, NATIVE_AETV_FS - len(clip)))
-            if mic_mix > 0.0:
-                mic = record_audio(
-                    1.0, NATIVE_AETV_FS, device=settings.microphone_input or None
+        except Exception as error:
+            self.station.log(f"TX microphone unavailable; using clip audio only: {error}")
+        try:
+            for index, video in enumerate(video_chunks):
+                settings = self.station.settings
+                mic_mix = float(np.clip(settings.av_microphone_mix, 0.0, 1.0))
+                clip = np.asarray(
+                    clip_audio[index * NATIVE_AETV_FS : (index + 1) * NATIVE_AETV_FS],
+                    dtype=np.float32,
                 )
-                mic = np.asarray(mic, dtype=np.float32).reshape(-1)
-                if len(mic) < NATIVE_AETV_FS:
-                    mic = np.pad(mic, (0, NATIVE_AETV_FS - len(mic)))
-                mic = mic[:NATIVE_AETV_FS]
-            else:
-                mic = np.zeros(NATIVE_AETV_FS, dtype=np.float32)
-            voice_gop = mic_mix * mic + (1.0 - mic_mix) * clip
+                if len(clip) < NATIVE_AETV_FS:
+                    clip = np.pad(clip, (0, NATIVE_AETV_FS - len(clip)))
+                mic = microphone.read(
+                    NATIVE_AETV_FS,
+                    self._cancel.is_set,
+                    timeout_s=1.25 if input_stream is not None and mic_mix > 0.0 else 0.0,
+                )
+                voice_gop = mic_mix * mic + (1.0 - mic_mix) * clip
 
-            native_video = np.asarray(video, dtype=np.float32).reshape(-1)
-            source_voice = np.zeros(len(native_video), dtype=np.float32)
-            trailing = int(round(0.1 * NATIVE_AETV_FS)) if index == n_gops - 1 else 0
-            start = max(0, len(source_voice) - trailing - NATIVE_AETV_FS)
-            take = min(NATIVE_AETV_FS, len(source_voice) - start)
-            source_voice[start : start + take] = voice_gop[:take]
-            delayed_stream = np.concatenate((delay, source_voice))
-            delayed = delayed_stream[: len(source_voice)]
-            delay = delayed_stream[len(source_voice) :]
-            yield mix_composite_chunk(
-                native_video,
-                delayed,
-                video_power=float(settings.av_video_power),
-            )
+                native_video = np.asarray(video, dtype=np.float32).reshape(-1)
+                source_voice = np.zeros(len(native_video), dtype=np.float32)
+                trailing = int(round(0.1 * NATIVE_AETV_FS)) if index == n_gops - 1 else 0
+                start = max(0, len(source_voice) - trailing - NATIVE_AETV_FS)
+                take = min(NATIVE_AETV_FS, len(source_voice) - start)
+                source_voice[start : start + take] = voice_gop[:take]
+                delayed_stream = np.concatenate((delay, source_voice))
+                delayed = delayed_stream[: len(source_voice)]
+                delay = delayed_stream[len(source_voice) :]
+                yield mix_composite_chunk(
+                    native_video,
+                    delayed,
+                    video_power=float(settings.av_video_power),
+                )
+        finally:
+            if input_stream is not None:
+                input_stream.stop()
+                input_stream.close()
 
         # Drain the one-GOP voice delay after the final video payload.
         if delay.size and np.max(np.abs(delay)) > 1e-8:
