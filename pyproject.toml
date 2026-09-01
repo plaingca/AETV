@@ -1,6 +1,6 @@
 [project]
 name = "aetv"
-version = "0.1.15"
+version = "0.1.16"
 description = "Live learned video over challenging amateur-radio channels"
 readme = "README.md"
 requires-python = ">=3.10"
