@@ -34,6 +34,23 @@ def test_voice_filter_rejects_content_above_2200_hz():
     )
 
 
+def test_streaming_voice_filter_strongly_rejects_lowest_ofdm_carrier():
+    timeline = np.arange(2 * COMPOSITE_FS) / COMPOSITE_FS
+    composite = (
+        np.sin(2 * np.pi * 1_000 * timeline)
+        + np.sin(2 * np.pi * AETV_LOW_HZ * timeline)
+    )
+    separator = StreamingCompositeSeparator()
+    blocks = []
+    for start in range(0, len(composite), 1_200):
+        voice, _video = separator.process(composite[start : start + 1_200])
+        blocks.append(voice)
+    recovered = np.concatenate(blocks)[1_200:]
+    assert _tone_power(recovered, 1_000, COMPOSITE_FS) > 1e8 * _tone_power(
+        recovered, AETV_LOW_HZ, COMPOSITE_FS
+    )
+
+
 def test_aetv_translation_occupies_upper_slice_and_round_trips():
     time = np.arange(8000) / 8000
     native = np.sin(2 * np.pi * 450 * time) + np.sin(2 * np.pi * 2650 * time)

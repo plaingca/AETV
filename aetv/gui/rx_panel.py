@@ -408,7 +408,11 @@ class ReceivePanel(QWidget):
     def save_current(self) -> None:
         try:
             path = (
-                self.engine.save_video(self._emulated_video)
+                self.engine.save_video(
+                    self._emulated_video,
+                    audio=self.station.loopback_audio,
+                    audio_rate=self.station.loopback_audio_rate,
+                )
                 if self._emulated_video is not None
                 else self.engine.save_current()
             )
@@ -1066,6 +1070,7 @@ class ReceivePanel(QWidget):
     def prepare_emulator(self, label: str) -> None:
         self.preview.clear()
         self._emulated_video = None
+        self.station.loopback_audio = None
         self.status.setText(f"Waiting for {label} loopback…")
         self.statusChanged.emit(self.status.text())
         self.progress.setValue(0)

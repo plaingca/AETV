@@ -1,6 +1,7 @@
 """Transmit-panel preview routing."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtWidgets import QDialog
@@ -155,3 +156,28 @@ def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
     assert panel.progress.value == 100
     assert np.array_equal(panel._emulated_video[:2], first)
     assert np.array_equal(panel._emulated_video[2:], last)
+
+
+def test_loopback_save_passes_recovered_audio_to_mp4_writer():
+    captured = {}
+    audio = np.ones(8000, dtype=np.float32)
+
+    class Engine:
+        def save_video(self, video, **kwargs):
+            captured["video"] = video
+            captured.update(kwargs)
+            return Path("loopback.mp4")
+
+    panel = SimpleNamespace(
+        _emulated_video=np.zeros((2, 2, 3, 3), dtype=np.uint8),
+        station=SimpleNamespace(loopback_audio=audio, loopback_audio_rate=8000),
+        engine=Engine(),
+        status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
+        logMessage=SimpleNamespace(emit=lambda _message: None),
+    )
+
+    ReceivePanel.save_current(panel)
+
+    assert np.array_equal(captured["audio"], audio)
+    assert captured["audio_rate"] == 8000
+    assert panel.status.text == "saved loopback.mp4"

@@ -166,20 +166,32 @@ class StreamingCompositeSeparator:
     """Causal receive filters for live analog voice and translated V8."""
 
     def __init__(self):
-        self._voice_sos = signal.butter(8, VOICE_HIGH_HZ, "lowpass", fs=COMPOSITE_FS, output="sos")
+        # The former 8th-order Butterworth was only about 12--16 dB down at
+        # the translated modem's 2.5--2.6 kHz lower edge.  That is audible as
+        # OFDM buzz whenever video power is high.  This 20 ms Kaiser FIR keeps
+        # the complete transmitted speech band while providing >100 dB stop
+        # rejection at the start of the upper slice.
+        self._voice_taps = signal.firwin(
+            241,
+            2_300.0,
+            fs=COMPOSITE_FS,
+            window=("kaiser", 10.0),
+        )
         self._upper_sos = signal.butter(
             8, (AETV_FILTER_LOW_HZ, AETV_FILTER_HIGH_HZ), "bandpass",
             fs=COMPOSITE_FS, output="sos",
         )
         self._native_sos = signal.butter(8, 2_850.0, "lowpass", fs=COMPOSITE_FS, output="sos")
-        self._voice_zi = signal.sosfilt_zi(self._voice_sos) * 0.0
+        self._voice_zi = np.zeros(len(self._voice_taps) - 1, dtype=np.float64)
         self._upper_zi = signal.sosfilt_zi(self._upper_sos) * 0.0
         self._native_zi = signal.sosfilt_zi(self._native_sos) * 0.0
         self._sample = 0
 
     def process(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         values = np.asarray(composite, dtype=np.float64).reshape(-1)
-        voice, self._voice_zi = signal.sosfilt(self._voice_sos, values, zi=self._voice_zi)
+        voice, self._voice_zi = signal.lfilter(
+            self._voice_taps, [1.0], values, zi=self._voice_zi
+        )
         upper, self._upper_zi = signal.sosfilt(self._upper_sos, values, zi=self._upper_zi)
         indices = self._sample + np.arange(len(values), dtype=np.float64)
         self._sample += len(values)

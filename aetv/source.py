@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -562,8 +563,15 @@ def collect_gops(
     return stack[: n_gops * mode.gop_frames]
 
 
-def write_mp4(frames: np.ndarray, path: Path, fps: float) -> None:
-    """Write (T, H, W, 3) uint8 frames to an H.264 MP4."""
+def write_mp4(
+    frames: np.ndarray,
+    path: Path,
+    fps: float,
+    *,
+    audio: np.ndarray | None = None,
+    audio_rate: int = 8_000,
+) -> None:
+    """Write RGB frames and optional mono program audio to an H.264 MP4."""
     if frames.ndim != 4 or frames.shape[-1] != 3:
         raise ValueError(f"expected (T, H, W, 3), got {frames.shape}")
     count, height, width, _ = frames.shape
@@ -571,17 +579,39 @@ def write_mp4(frames: np.ndarray, path: Path, fps: float) -> None:
         ffmpeg_executable(),
         "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{width}x{height}", "-r", str(fps), "-i", "pipe:0",
-        "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
-        "-pix_fmt", "yuv420p", str(path),
     ]
-    proc = subprocess.run(
-        command,
-        input=frames.tobytes(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        timeout=600,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    audio_path: Path | None = None
+    if audio is not None:
+        from scipy.io import wavfile
+
+        duration_s = count / float(fps)
+        wanted = max(0, int(round(duration_s * int(audio_rate))))
+        samples = np.asarray(audio, dtype=np.float32).reshape(-1)[:wanted]
+        if len(samples) < wanted:
+            samples = np.pad(samples, (0, wanted - len(samples)))
+        handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        handle.close()
+        audio_path = Path(handle.name)
+        wavfile.write(audio_path, int(audio_rate), samples)
+        command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+    else:
+        command.append("-an")
+    command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "16"])
+    if audio_path is not None:
+        command.extend(["-c:a", "aac", "-b:a", "96k", "-shortest"])
+    command.extend(["-pix_fmt", "yuv420p", str(path)])
+    try:
+        proc = subprocess.run(
+            command,
+            input=frames.tobytes(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    finally:
+        if audio_path is not None:
+            audio_path.unlink(missing_ok=True)
     if proc.returncode:
         raise RuntimeError(proc.stderr.decode("utf-8", "replace")[-2000:])
 
@@ -596,10 +626,17 @@ def write_video_smoke_test(path: Path) -> None:
         frames[index, :, :, 0] = x + index * 20
         frames[index, :, :, 1] = y + index * 30
         frames[index, :, :, 2] = 128
-    write_mp4(frames, path, fps=6.0)
+    audio_rate = 8_000
+    duration_s = len(frames) / 6.0
+    timeline = np.arange(round(duration_s * audio_rate)) / audio_rate
+    audio = (0.2 * np.sin(2.0 * np.pi * 440.0 * timeline)).astype(np.float32)
+    write_mp4(frames, path, fps=6.0, audio=audio, audio_rate=audio_rate)
     payload = path.read_bytes()
     if len(payload) < 32 or b"ftyp" not in payload[:32]:
         raise RuntimeError(f"FFmpeg smoke test did not create a valid MP4: {path}")
+    recovered = read_video_audio(path, duration_s, audio_rate)
+    if float(np.sqrt(np.mean(recovered**2))) < 0.01:
+        raise RuntimeError(f"FFmpeg smoke test MP4 has no decodable audio: {path}")
 
 
 def write_side_by_side(left: np.ndarray, right: np.ndarray, path: Path, fps: float) -> None:

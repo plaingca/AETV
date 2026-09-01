@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from aetv.audio_io import StreamResampler, resample_ratio
+from aetv.analog_av import COMPOSITE_FS
 from aetv.cat import CatConfig, NullPtt, RigctldClient, open_ptt
 from aetv.config import AETV_MODES
 from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
@@ -548,15 +549,86 @@ def test_rx_engine_can_save_supplied_loopback_video(monkeypatch, tmp_path):
     saved = []
     monkeypatch.setattr(
         "aetv.station.write_mp4",
-        lambda frames, path, fps: saved.append((frames.copy(), path, fps)),
+        lambda frames, path, fps, **kwargs: saved.append(
+            (frames.copy(), path, fps, kwargs)
+        ),
     )
     station = Station(StationSettings(receive_dir=str(tmp_path)))
     station.codec = SimpleNamespace(mode=SimpleNamespace(name="V8", fps=6))
     target = tmp_path / "loopback.mp4"
 
-    assert RxEngine(station).save_video(video, target) == target
+    audio = np.linspace(-0.5, 0.5, 8000, dtype=np.float32)
+    assert RxEngine(station).save_video(
+        video, target, audio=audio, audio_rate=8000
+    ) == target
     assert np.array_equal(saved[0][0], video)
-    assert saved[0][1:] == (target, 6)
+    assert saved[0][1:3] == (target, 6)
+    assert np.array_equal(saved[0][3]["audio"], audio)
+    assert saved[0][3]["audio_rate"] == 8000
+
+
+def test_composite_loopback_retains_received_program_audio(monkeypatch):
+    from aetv.station import Station
+
+    result = SimpleNamespace(
+        gops_latents=[np.array([1.0])],
+        gops_weights=[np.array([1.0])],
+        freq_offset=0.0,
+        sync_metric=0.9,
+        snr_db=20.0,
+        callsign="N0CALL",
+    )
+
+    class FakeChannel:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def process(self, audio):
+            return audio
+
+    class FakeSeparator:
+        def process(self, audio):
+            values = np.asarray(audio, dtype=np.float32)
+            return np.ones_like(values), values
+
+    class FakeResampler:
+        def __init__(self, *_args):
+            pass
+
+        def __call__(self, audio):
+            return audio
+
+    class FakeDemodulator:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def feed(self, _audio):
+            return [result]
+
+    class Codec:
+        mode = SimpleNamespace(name="V8", band="W", gop_frames=1)
+
+        def decode_gop(self, *_args):
+            return np.zeros((1, 2, 2, 3), dtype=np.uint8)
+
+    monkeypatch.setattr("aetv.station.StreamingChannelEmulator", FakeChannel)
+    monkeypatch.setattr("aetv.station.StreamingCompositeSeparator", FakeSeparator)
+    monkeypatch.setattr("aetv.station.StreamResampler", FakeResampler)
+    monkeypatch.setattr(
+        "aetv.station.resample_audio",
+        lambda audio, _source_rate, _target_rate: np.asarray(audio, dtype=np.float32),
+    )
+    monkeypatch.setattr("aetv.station.StreamingDemodulator", FakeDemodulator)
+    station = Station(StationSettings(mode="V8", waveform_mode="analog_av"))
+    engine = TxEngine(station)
+
+    assert engine._emulated_send_stream(
+        [np.ones(24, dtype=np.float32)], COMPOSITE_FS, 1, Codec(), "clean"
+    )
+
+    assert station.loopback_audio is not None
+    assert len(station.loopback_audio) == 8000
+    assert np.all(station.loopback_audio[:24] == 1.0)
 
 
 def test_channel_loopback_decodes_without_keying(monkeypatch):

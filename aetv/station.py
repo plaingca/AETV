@@ -26,6 +26,7 @@ from .audio_io import (
     open_input_stream,
     play_cancellable,
     play_chunk_stream,
+    resample_audio,
     resample_ratio,
 )
 from .analog_av import (
@@ -254,6 +255,8 @@ class Station:
         self.settings = settings or StationSettings()
         self.codec: AETVCodec | None = None
         self.codec_lock = threading.Lock()
+        self.loopback_audio: np.ndarray | None = None
+        self.loopback_audio_rate = NATIVE_AETV_FS
         self._on_log = lambda _msg: None
 
     def set_logger(self, callback) -> None:
@@ -392,6 +395,7 @@ class TxEngine:
     def transmit(self, source: str | ScreenCaptureSpec | PreparedClip) -> bool:
         self._cancel.clear()
         self.gop_timings = []
+        self.station.loopback_audio = None
         settings = self.station.settings
         tx_recorder: _PcmWaveRecorder | None = None
         tx_metadata: dict = {}
@@ -640,6 +644,7 @@ class TxEngine:
         stream_started: float | None = None
         delivered_samples = 0
         separator = StreamingCompositeSeparator() if fs == COMPOSITE_FS else None
+        loopback_voice: list[np.ndarray] = []
         video_resampler = (
             StreamResampler(*resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS))
             if separator is not None else None
@@ -674,7 +679,8 @@ class TxEngine:
                     return False
                 modem_audio = block
                 if separator is not None:
-                    _voice, native_12k = separator.process(modem_audio)
+                    voice_12k, native_12k = separator.process(modem_audio)
+                    loopback_voice.append(voice_12k)
                     modem_audio = video_resampler(native_12k)
                 results = demodulator.feed(modem_audio)
                 for result in results:
@@ -706,6 +712,22 @@ class TxEngine:
             raise SyncError("modulator produced no loopback audio")
         if decoded_count == 0:
             raise SyncError(f"{profile.label} loopback recovered no GOPs")
+        if loopback_voice:
+            voice = resample_audio(
+                np.concatenate(loopback_voice), COMPOSITE_FS, NATIVE_AETV_FS
+            )
+            wanted = n_gops * NATIVE_AETV_FS
+            # Continuous framing adds 0.55 s acquisition before the first
+            # payload, the composite adds the intentional one-GOP voice delay,
+            # and the modem leaves a final 0.1 s tail.  Select the aligned
+            # program region immediately preceding that tail.
+            tail = int(round(0.1 * NATIVE_AETV_FS))
+            start = max(0, len(voice) - wanted - tail)
+            voice = voice[start : start + wanted]
+            if len(voice) < wanted:
+                voice = np.pad(voice, (0, wanted - len(voice)))
+            self.station.loopback_audio = voice.astype(np.float32, copy=False)
+            self.station.loopback_audio_rate = NATIVE_AETV_FS
         self._set(
             TxPhase.DONE,
             1.0,
@@ -1441,10 +1463,26 @@ class RxEngine:
             return None
         return self.save_video(self.last_video, path)
 
-    def save_video(self, video: np.ndarray, path: Path | None = None) -> Path:
+    def save_video(
+        self,
+        video: np.ndarray,
+        path: Path | None = None,
+        *,
+        audio: np.ndarray | None = None,
+        audio_rate: int = NATIVE_AETV_FS,
+    ) -> Path:
         """Save decoded frames, including video supplied by a local loopback."""
         folder = self.station.settings.receive_path()
         folder.mkdir(parents=True, exist_ok=True)
         target = path or folder / time.strftime("aetv_%Y%m%d-%H%M%S.mp4")
-        write_mp4(video, Path(target), self.station.require_codec().mode.fps)
+        if audio is None:
+            write_mp4(video, Path(target), self.station.require_codec().mode.fps)
+        else:
+            write_mp4(
+                video,
+                Path(target),
+                self.station.require_codec().mode.fps,
+                audio=audio,
+                audio_rate=audio_rate,
+            )
         return Path(target)
