@@ -367,6 +367,7 @@ class ReceivePanel(QWidget):
         try:
             self.preview.clear()
             self._emulated_video = None
+            self.raw_input_meter.reset_level()
             self.from_radio_meter.reset_level()
             self.engine.start()
         except Exception as error:
@@ -445,6 +446,7 @@ class ReceivePanel(QWidget):
         self.input_device = QComboBox()
         self.playback_label = QLabel("Program audio to")
         self.playback_device = QComboBox()
+        self.raw_input_meter = AudioLevelMeter("Raw receiver input waveform")
         self.from_radio_meter = AudioLevelMeter("Filtered from-radio program audio")
         self.kiwi_host = QLineEdit()
         self.kiwi_host.setMinimumWidth(190)
@@ -500,8 +502,11 @@ class ReceivePanel(QWidget):
         self.playback_row = QHBoxLayout()
         self.playback_row.addWidget(self.playback_label)
         self.playback_row.addWidget(self.playback_device, 1)
+        self.raw_meter_row = QHBoxLayout()
+        self.raw_meter_row.addWidget(QLabel("Raw input waveform"))
+        self.raw_meter_row.addWidget(self.raw_input_meter, 1)
         self.audio_meter_row = QHBoxLayout()
-        self.audio_meter_row.addWidget(QLabel("From-radio audio"))
+        self.audio_meter_row.addWidget(QLabel("Filtered program audio"))
         self.audio_meter_row.addWidget(self.from_radio_meter, 1)
         row2 = QHBoxLayout()
         self.kiwi_label = QLabel("Receiver address")
@@ -525,6 +530,7 @@ class ReceivePanel(QWidget):
         buttons.addWidget(self.save_button)
         buttons.addStretch(1)
         strip.addLayout(row1)
+        strip.addLayout(self.raw_meter_row)
         strip.addLayout(self.playback_row)
         strip.addLayout(self.audio_meter_row)
         strip.addLayout(row2)
@@ -616,10 +622,16 @@ class ReceivePanel(QWidget):
         settings.kiwi_auto_select = self.auto_kiwi.isChecked()
 
     def _apply_audio_levels(self, levels: dict) -> None:
-        self.from_radio_meter.set_level(
-            levels.get("peak", 0.0),
-            levels.get("clipping", False),
-        )
+        if "raw_peak" in levels:
+            self.raw_input_meter.set_level(
+                levels["raw_peak"],
+                levels.get("raw_clipping", False),
+            )
+        if "filtered_peak" in levels:
+            self.from_radio_meter.set_level(
+                levels["filtered_peak"],
+                levels.get("filtered_clipping", False),
+            )
 
     def _on_auto_kiwi_toggled(self, enabled: bool) -> None:
         self.station.settings.kiwi_auto_select = bool(enabled)

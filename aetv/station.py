@@ -1596,18 +1596,21 @@ class RxEngine:
                 self.state.message = "receive buffer overrun; reacquiring"
             if audio.size == 0:
                 continue
+            raw_audio = audio
             try:
+                filtered_voice = None
                 if self._composite_separator is not None:
                     voice_12k, video_12k = self._composite_separator.process(audio)
                     assert self._composite_video_resampler is not None
                     assert self._composite_voice_resampler is not None
                     audio = self._composite_video_resampler(video_12k)
                     voice = self._composite_voice_resampler(voice_12k)
-                    self._report_received_audio_levels(voice)
+                    filtered_voice = voice
                     if self._voice_history is not None and voice.size:
                         self._voice_history.write(voice)
                     if self._audio_playback is not None and voice.size:
                         self._audio_playback.write(voice)
+                self._report_received_audio_levels(raw_audio, filtered_voice)
                 demodulator = self._stream_decoder
                 if demodulator is None:
                     demodulator = self._stream_decoder = self._new_demodulator(codec.mode)
@@ -1670,11 +1673,31 @@ class RxEngine:
             if next_poll < time.monotonic():
                 next_poll = time.monotonic()
 
-    def _report_received_audio_levels(self, voice: np.ndarray) -> None:
-        """Report filtered program audio exactly as it is sent to playback."""
-        samples = np.asarray(voice, dtype=np.float32).reshape(-1)
-        peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-        self._on_audio_levels({"peak": peak, "clipping": peak >= 0.99})
+    def _report_received_audio_levels(
+        self,
+        raw: np.ndarray,
+        filtered: np.ndarray | None = None,
+    ) -> None:
+        """Report receiver input plus filtered program audio when available."""
+
+        def peak_of(samples: np.ndarray) -> float:
+            values = np.asarray(samples, dtype=np.float32).reshape(-1)
+            return float(np.max(np.abs(values))) if values.size else 0.0
+
+        raw_peak = peak_of(raw)
+        levels = {
+            "raw_peak": raw_peak,
+            "raw_clipping": raw_peak >= 0.99,
+        }
+        if filtered is not None:
+            filtered_peak = peak_of(filtered)
+            levels.update(
+                {
+                    "filtered_peak": filtered_peak,
+                    "filtered_clipping": filtered_peak >= 0.99,
+                }
+            )
+        self._on_audio_levels(levels)
 
     def _update_from_result(self, result, decoded) -> None:
         identity = f"de {result.callsign}" if result.callsign else "beacon acquiring"

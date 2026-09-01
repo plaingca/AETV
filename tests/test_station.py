@@ -726,17 +726,20 @@ def test_received_audio_history_stays_aligned_to_retained_video_window():
     assert engine.last_audio[-1] == 2
 
 
-def test_receive_audio_meter_reports_filtered_playback_peak_and_clipping():
+def test_receive_audio_meter_reports_raw_and_filtered_peaks_and_clipping():
     levels = []
     engine = RxEngine(Station(), on_audio_levels=levels.append)
 
     engine._report_received_audio_levels(
-        np.array([-0.25, 1.01, 0.5], dtype=np.float32)
+        np.array([-0.25, 1.01, 0.5], dtype=np.float32),
+        np.array([-0.25, 0.5], dtype=np.float32),
     )
 
     assert len(levels) == 1
-    assert levels[0]["peak"] == pytest.approx(1.01)
-    assert levels[0]["clipping"] is True
+    assert levels[0]["raw_peak"] == pytest.approx(1.01)
+    assert levels[0]["raw_clipping"] is True
+    assert levels[0]["filtered_peak"] == pytest.approx(0.5)
+    assert levels[0]["filtered_clipping"] is False
 
 
 def test_composite_loopback_retains_received_program_audio(monkeypatch):

@@ -230,15 +230,24 @@ def test_audio_level_update_routes_independent_channel_peaks():
     assert panel.clip_meter.reading == (1.1, True)
 
 
-def test_receive_audio_level_update_routes_filtered_radio_peak():
+def test_receive_audio_level_update_routes_raw_and_filtered_radio_peaks():
     class Meter:
         def set_level(self, peak, clipping):
             self.reading = (peak, clipping)
 
-    panel = SimpleNamespace(from_radio_meter=Meter())
+    panel = SimpleNamespace(raw_input_meter=Meter(), from_radio_meter=Meter())
 
-    ReceivePanel._apply_audio_levels(panel, {"peak": 0.75, "clipping": False})
+    ReceivePanel._apply_audio_levels(
+        panel,
+        {
+            "raw_peak": 1.02,
+            "raw_clipping": True,
+            "filtered_peak": 0.75,
+            "filtered_clipping": False,
+        },
+    )
 
+    assert panel.raw_input_meter.reading == (1.02, True)
     assert panel.from_radio_meter.reading == (0.75, False)
 
 
