@@ -1,5 +1,6 @@
 """Transmit-panel preview routing."""
 
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import QDialog
 from aetv.config import AETV_MODES
 from aetv.gui.rx_panel import ReceivePanel
 from aetv.gui.tx_panel import TransmitPanel
+from aetv.source import ScreenCaptureSpec
 from aetv.station import RxState
 
 
@@ -122,6 +124,21 @@ def test_av_clip_preparation_uses_loaded_v8_codec(monkeypatch):
 
     assert cell.progress == 0.0
     assert started == [([(3, edit)], "V8", 1)]
+
+
+def test_live_source_selection_updates_during_transmit():
+    screen = ScreenCaptureSpec("Monitor 1", (0, 0, 1920, 1080))
+    panel = SimpleNamespace(
+        cam_radio=SimpleNamespace(isChecked=lambda: False),
+        screen_radio=SimpleNamespace(isChecked=lambda: True),
+        screen_target=SimpleNamespace(currentData=lambda: screen),
+        _live_source_lock=threading.Lock(),
+        _active_live_source="webcam",
+    )
+
+    TransmitPanel._update_active_live_source(panel)
+
+    assert panel._active_live_source == screen
 
 
 def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():

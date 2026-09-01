@@ -324,6 +324,7 @@ class TxEngine:
         player=None,
         camera_frames=None,
         on_loopback=None,
+        live_source=None,
     ):
         self.station = station
         self._on_state = on_state or (lambda _state: None)
@@ -333,6 +334,7 @@ class TxEngine:
         self._player = player
         self._camera_frames = camera_frames
         self._on_loopback = on_loopback or (lambda _video, _state: None)
+        self._live_source = live_source
         self._cancel = threading.Event()
         self.state = TxState()
         self.last_wav: np.ndarray | None = None
@@ -425,9 +427,17 @@ class TxEngine:
 
                 encoded_gops = prepared_gops()
             elif isinstance(source, (str,)) and source.lower() in {"webcam", "cam", "camera"}:
-                encoded_gops = self._live_webcam_gops(codec, n_gops)
+                encoded_gops = (
+                    self._live_switching_gops(codec, n_gops, source)
+                    if self._live_source is not None
+                    else self._live_webcam_gops(codec, n_gops)
+                )
             elif isinstance(source, ScreenCaptureSpec):
-                encoded_gops = self._live_screen_gops(codec, n_gops, source)
+                encoded_gops = (
+                    self._live_switching_gops(codec, n_gops, source)
+                    if self._live_source is not None
+                    else self._live_screen_gops(codec, n_gops, source)
+                )
             else:
                 frames = self._capture(source, codec)
                 if frames is None:
@@ -1034,6 +1044,78 @@ class TxEngine:
                         "capture_s": encode_started - capture_started,
                         "encode_s": time.perf_counter() - encode_started,
                         "prepare_s": time.perf_counter() - capture_started,
+                    }
+                )
+                yield latent
+        finally:
+            close = getattr(camera_frames, "close", None)
+            if close is not None:
+                close()
+
+    def _live_switching_gops(
+        self,
+        codec,
+        n_gops: int,
+        initial: str | ScreenCaptureSpec,
+    ):
+        """Capture live GOPs while allowing webcam/screen changes between GOPs."""
+        mode = codec.mode
+        camera_frames = None
+        screen_frames = None
+        screen_spec = None
+        try:
+            for index in range(n_gops):
+                selected = self._live_source() if self._live_source is not None else initial
+                if not isinstance(selected, ScreenCaptureSpec) and str(selected).lower() not in {
+                    "webcam", "cam", "camera"
+                }:
+                    selected = initial
+                capture_started = time.perf_counter()
+                if isinstance(selected, ScreenCaptureSpec):
+                    if screen_frames is None or selected != screen_spec:
+                        screen_frames = iter_screen_capture(mode, selected)
+                        screen_spec = selected
+                    source_frames = screen_frames
+                    source_label = "screen"
+                else:
+                    if camera_frames is None:
+                        if self._camera_frames is None:
+                            camera_frames = iter_webcam(
+                                mode, camera=self.station.settings.camera_index
+                            )
+                        else:
+                            camera_frames = self._camera_frames(
+                                mode,
+                                camera=self.station.settings.camera_index,
+                                should_stop=self._cancel.is_set,
+                            )
+                    source_frames = camera_frames
+                    source_label = "webcam"
+                frames = []
+                for _ in range(mode.gop_frames):
+                    if self._cancel.is_set():
+                        return
+                    frames.append(next(source_frames))
+                gop = np.stack(frames, axis=0)
+                self.last_frames = gop
+                self._on_preview(gop)
+                self._set(
+                    TxPhase.SENDING
+                    if self.state.phase in {TxPhase.KEYING, TxPhase.SENDING}
+                    else TxPhase.CAPTURING,
+                    index / max(1, n_gops),
+                    f"{source_label} GOP {index + 1}/{n_gops}: encoding",
+                )
+                with self.station.codec_lock:
+                    encode_started = time.perf_counter()
+                    latent = codec.encode_gop(gop)
+                self.gop_timings.append(
+                    {
+                        "gop": index + 1,
+                        "source": source_label,
+                        "device": str(getattr(codec, "device", "unknown")),
+                        "capture_s": encode_started - capture_started,
+                        "encode_s": time.perf_counter() - encode_started,
                     }
                 )
                 yield latent

@@ -19,7 +19,7 @@ from aetv.config import AETV_MODES
 from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
-from aetv.source import PreparedClip
+from aetv.source import PreparedClip, ScreenCaptureSpec
 from aetv.station import (
     RxState,
     RxEngine,
@@ -464,6 +464,51 @@ def test_webcam_gops_are_captured_and_encoded_lazily(monkeypatch):
     next(stream)
     assert events[-3:] == ["frame:2", "frame:3", "encode:2"]
     stream.close()
+
+
+def test_live_transmit_switches_webcam_and_screen_at_gop_boundaries(monkeypatch):
+    selections = iter(
+        [
+            "webcam",
+            ScreenCaptureSpec("Monitor 1", (0, 0, 10, 10)),
+            "webcam",
+        ]
+    )
+    encoded = []
+
+    def camera_frames(_mode, **_kwargs):
+        for value in (1, 2, 3, 4):
+            yield np.full((2, 3, 3), value, dtype=np.uint8)
+
+    def screen_frames(_mode, _spec):
+        while True:
+            yield np.full((2, 3, 3), 9, dtype=np.uint8)
+
+    class Codec:
+        mode = SimpleNamespace(gop_frames=2)
+        device = "test"
+
+        def encode_gop(self, frames):
+            encoded.append(float(frames.mean()))
+            return np.array([frames.mean()], dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.iter_screen_capture", screen_frames)
+    station = Station(StationSettings(camera_index=0))
+    engine = TxEngine(
+        station,
+        camera_frames=camera_frames,
+        live_source=lambda: next(selections),
+    )
+
+    latents = list(engine._live_switching_gops(Codec(), 3, "webcam"))
+
+    assert len(latents) == 3
+    assert encoded == [1.5, 9.0, 3.5]
+    assert [timing["source"] for timing in engine.gop_timings] == [
+        "webcam",
+        "screen",
+        "webcam",
+    ]
 
 
 def test_stream_producer_does_not_encode_past_available_buffer(monkeypatch):

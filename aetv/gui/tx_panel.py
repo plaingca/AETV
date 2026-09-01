@@ -117,6 +117,8 @@ class TransmitPanel(QWidget):
         super().__init__(parent)
         self.station = station
         self._camera_frames = CameraFrameBuffer()
+        self._live_source_lock = threading.Lock()
+        self._active_live_source: str | ScreenCaptureSpec = "webcam"
         self.engine = TxEngine(
             station,
             on_state=self._stateArrived.emit,
@@ -124,6 +126,7 @@ class TransmitPanel(QWidget):
             on_preview=self._previewArrived.emit,
             camera_frames=self._camera_frames.frames,
             on_loopback=lambda video, state: self.loopbackVideo.emit(video, state),
+            live_source=self._live_source_for_tx,
         )
         self._thread: threading.Thread | None = None
         self._start_gate = threading.Event()
@@ -215,6 +218,9 @@ class TransmitPanel(QWidget):
             source = self._prepared_clips[self._selected_clip]
         else:
             source = self._file_path
+        if source == "webcam" or isinstance(source, ScreenCaptureSpec):
+            with self._live_source_lock:
+                self._active_live_source = source
         if source == "webcam" or isinstance(source, ScreenCaptureSpec):
             # Hand the camera from the Qt preview subscriber to TX before the
             # encoder/CUDA worker starts.  Leaving queued QImage paints active
@@ -429,13 +435,15 @@ class TransmitPanel(QWidget):
                     self._show_clip_edit(index, edit)
         self.sync_from_config()
         self.camera.currentIndexChanged.connect(self._restart_preview)
-        self.screen_target.currentIndexChanged.connect(self._restart_preview)
+        self.screen_target.currentIndexChanged.connect(self._on_screen_target_changed)
         self.mode.currentIndexChanged.connect(self._on_mode_changed)
         self.av_power.valueChanged.connect(self._on_av_power_changed)
         self.mic_mix.valueChanged.connect(self._on_mic_mix_changed)
         self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
+        if _on:
+            self._update_active_live_source()
         if (
             (self.cam_radio.isChecked() or self.screen_radio.isChecked())
             and not self.transmitting()
@@ -444,6 +452,27 @@ class TransmitPanel(QWidget):
             self._restart_preview(0)
         else:
             self._stop_preview()
+
+    def _update_active_live_source(self) -> None:
+        selected: str | ScreenCaptureSpec | None = None
+        if self.cam_radio.isChecked():
+            selected = "webcam"
+        elif self.screen_radio.isChecked():
+            candidate = self.screen_target.currentData()
+            if isinstance(candidate, ScreenCaptureSpec):
+                selected = candidate
+        if selected is not None:
+            with self._live_source_lock:
+                self._active_live_source = selected
+
+    def _live_source_for_tx(self) -> str | ScreenCaptureSpec:
+        with self._live_source_lock:
+            return self._active_live_source
+
+    def _on_screen_target_changed(self, index: int) -> None:
+        if self.screen_radio.isChecked():
+            self._update_active_live_source()
+        self._restart_preview(index)
 
     def _restart_preview(self, _index: int) -> None:
         if not hasattr(self, "cam_radio"):
