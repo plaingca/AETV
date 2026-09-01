@@ -133,6 +133,10 @@ Detailed methodology and current machine results live in
 - Enter your callsign in **Settings**.
 - Pick **Standard channel** unless both ends have an 8 kHz audio path.
 - Select the radio input/output devices and configure CAT/PTT if desired.
+- Audio settings can optionally emit or receive an analytic stereo I/Q signal
+  with independent I/Q↔L/R or I/Q↔R/L mappings. Mono remains the default in
+  both directions. Matching TX and RX modes support a direct stereo audio
+  loopback test without RF hardware.
 - Use **Local loopback** first. It exercises the complete modem without keying a radio.
 - Confirm your licence, regional band plan, occupied bandwidth, frequency, and power before transmitting.
 

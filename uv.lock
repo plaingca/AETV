@@ -27,7 +27,7 @@ wheels = [
 
 [[package]]
 name = "aetv"
-version = "0.1.16"
+version = "0.1.17"
 source = { editable = "." }
 dependencies = [
     { name = "imageio-ffmpeg" },

@@ -33,6 +33,7 @@ from aetv import (
     modulate_gop_stream,
 )
 from aetv import beacon, framing, ofdm
+from aetv.audio_io import StreamingIQToMono, iq_chunk_stream
 from aetv.config import PROTOCOL_VERSION, reference_noise_bandwidth_scale
 from aetv.hfchannel import (
     CHANNEL_PROFILES,
@@ -177,6 +178,25 @@ def test_v8_transmit_waveform_stays_inside_nominal_3khz_channel():
     outside = spectrum[(frequencies < 300.0) | (frequencies > 3000.0)].sum()
     # Leave 40 dB of margin for FFT leakage while enforcing the OTA mask.
     assert outside / spectrum.sum() < 1e-4
+
+
+def test_v8_modem_decodes_through_stereo_iq_audio_loopback():
+    mode = AETV_MODES["V8"]
+    original = np.random.default_rng(918).standard_normal(
+        mode.latents_per_gop
+    ).astype(np.float32)
+    mono = modulate_gop_stream([original], mode_name="V8", callsign="N0CALL")
+    tx_chunks = list(iq_chunk_stream([mono[:5000], mono[5000:]], "iq_lr"))
+    iq_receiver = StreamingIQToMono("iq_lr")
+    recovered_audio = np.concatenate(
+        [iq_receiver.process(chunk) for chunk in tx_chunks]
+    )
+
+    decoded = demodulate_gop_stream(
+        recovered_audio, band=mode.band, drift_track="off"
+    )
+    assert len(decoded.gops_latents) == 1
+    assert np.corrcoef(original, decoded.gops_latents[0])[0, 1] > 0.95
 
 
 def test_pilot_sequence_and_papr():

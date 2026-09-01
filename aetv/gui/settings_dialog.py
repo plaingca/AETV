@@ -191,6 +191,10 @@ class SettingsDialog(QDialog):
         settings.tx_level = float(10 ** (self.level_db.value() / 20.0))
         settings.audio_input = self.audio_input.currentData() or ""
         settings.audio_output = self.audio_output.currentData() or ""
+        settings.rx_audio_mode = self.rx_audio_mode.currentData()
+        settings.rx_iq_mapping = self.rx_iq_mapping.currentData()
+        settings.tx_audio_mode = self.tx_audio_mode.currentData()
+        settings.tx_iq_mapping = self.tx_iq_mapping.currentData()
         settings.rx_source = self.rx_source.currentData()
         settings.cat_backend = self.cat_backend.currentData()
         settings.hamlib_model = int(self.hamlib_model.currentData() or 0)
@@ -300,6 +304,30 @@ class SettingsDialog(QDialog):
         self.audio_output = QComboBox()
         self.audio_input.addItem("Loading devices…", self._settings.audio_input)
         self.audio_output.addItem("Loading devices…", self._settings.audio_output)
+        self.rx_audio_mode = QComboBox()
+        self.rx_audio_mode.addItem("Mono", "mono")
+        self.rx_audio_mode.addItem("Stereo I/Q (analytic signal)", "iq")
+        self.rx_audio_mode.setCurrentIndex(
+            max(0, self.rx_audio_mode.findData(self._settings.rx_audio_mode))
+        )
+        self.rx_iq_mapping = QComboBox()
+        self.rx_iq_mapping.addItem("I ← Left, Q ← Right", "iq_lr")
+        self.rx_iq_mapping.addItem("I ← Right, Q ← Left", "iq_rl")
+        self.rx_iq_mapping.setCurrentIndex(
+            max(0, self.rx_iq_mapping.findData(self._settings.rx_iq_mapping))
+        )
+        self.tx_audio_mode = QComboBox()
+        self.tx_audio_mode.addItem("Mono (same signal on L/R)", "mono")
+        self.tx_audio_mode.addItem("Stereo I/Q (analytic signal)", "iq")
+        self.tx_audio_mode.setCurrentIndex(
+            max(0, self.tx_audio_mode.findData(self._settings.tx_audio_mode))
+        )
+        self.tx_iq_mapping = QComboBox()
+        self.tx_iq_mapping.addItem("I → Left, Q → Right", "iq_lr")
+        self.tx_iq_mapping.addItem("I → Right, Q → Left", "iq_rl")
+        self.tx_iq_mapping.setCurrentIndex(
+            max(0, self.tx_iq_mapping.findData(self._settings.tx_iq_mapping))
+        )
         refresh = QPushButton("Refresh devices")
         refresh.clicked.connect(self._load_device_inventory)
         self.rx_source = QComboBox()
@@ -318,10 +346,26 @@ class SettingsDialog(QDialog):
         self.decode_every.setSuffix(" s")
         form.addRow("Receive source", self.rx_source)
         form.addRow("Input", self.audio_input)
+        form.addRow("Receive audio", self.rx_audio_mode)
+        form.addRow("RX I/Q channel mapping", self.rx_iq_mapping)
         form.addRow("Output (to radio)", self.audio_output)
+        form.addRow("Transmit audio", self.tx_audio_mode)
+        form.addRow("I/Q channel mapping", self.tx_iq_mapping)
         form.addRow("", refresh)
         form.addRow("Receive buffer", self.buffer_s)
         form.addRow("RX poll interval", self.decode_every)
+        self.rx_audio_mode.currentIndexChanged.connect(
+            lambda: self.rx_iq_mapping.setEnabled(
+                self.rx_audio_mode.currentData() == "iq"
+            )
+        )
+        self.rx_iq_mapping.setEnabled(self.rx_audio_mode.currentData() == "iq")
+        self.tx_audio_mode.currentIndexChanged.connect(
+            lambda: self.tx_iq_mapping.setEnabled(
+                self.tx_audio_mode.currentData() == "iq"
+            )
+        )
+        self.tx_iq_mapping.setEnabled(self.tx_audio_mode.currentData() == "iq")
         return page
 
     def _rig_tab(self) -> QWidget:

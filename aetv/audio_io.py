@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from math import gcd
 from pathlib import Path
 
@@ -253,6 +254,120 @@ class StreamResampler:
         return y[skip : skip + take]
 
 
+HILBERT_NUM_TAPS = 513
+
+
+@lru_cache(maxsize=1)
+def _hilbert_taps() -> np.ndarray:
+    from scipy.signal import remez
+
+    # DC and exact Nyquist have no unique quadrature value. AETV's useful
+    # passband lies inside these conservative transition regions.
+    return remez(
+        HILBERT_NUM_TAPS, [0.01, 0.99], [1.0], type="hilbert", fs=2.0
+    )
+
+
+class StreamingHilbertIQ:
+    """Convert real samples to phase-aligned analytic I/Q stereo frames.
+
+    The FIR and exact I-path delay retain state across GOP chunks, avoiding
+    phase or amplitude discontinuities at their boundaries. The convention is
+    ``I + jQ`` with positive input frequencies.
+    """
+
+    NUM_TAPS = HILBERT_NUM_TAPS
+
+    def __init__(self, mapping: str = "iq_lr"):
+        if mapping not in {"iq_lr", "iq_rl"}:
+            raise ValueError(f"unknown I/Q channel mapping {mapping!r}")
+        self.mapping = mapping
+        self.delay = (self.NUM_TAPS - 1) // 2
+        self._taps = _hilbert_taps()
+        self._q_state = np.zeros(self.NUM_TAPS - 1, dtype=np.float64)
+        self._i_state = np.zeros(self.delay, dtype=np.float64)
+
+    def process(self, chunk: np.ndarray) -> np.ndarray:
+        """Return float32 stereo frames for one mono chunk."""
+        from scipy.signal import lfilter
+
+        samples = np.asarray(chunk, dtype=np.float64).reshape(-1)
+        if not samples.size:
+            return np.empty((0, 2), dtype=np.float32)
+        delayed = np.concatenate((self._i_state, samples))
+        i = delayed[: len(samples)]
+        self._i_state = delayed[len(samples) :]
+        filtered, self._q_state = lfilter(
+            self._taps, [1.0], samples, zi=self._q_state
+        )
+        # remez(type="hilbert") uses -j for positive frequencies. Negation
+        # makes the emitted complex signal I+jQ analytic at +frequency.
+        q = -filtered
+        channels = (i, q) if self.mapping == "iq_lr" else (q, i)
+        return np.column_stack(channels).astype(np.float32)
+
+    def flush(self) -> np.ndarray:
+        """Drain the complete FIR tail after the final source sample."""
+        return self.process(np.zeros(self.NUM_TAPS - 1, dtype=np.float64))
+
+
+class StreamingIQToMono:
+    """Project analytic stereo I/Q back onto the real AETV waveform.
+
+    Both inputs contribute: I is delayed by the Hilbert FIR group delay while
+    Q passes through the same Hilbert transformer. For valid analytic input,
+    ``0.5 * (I - H(Q))`` reconstructs the real component and averages the two
+    independent channel observations.
+    """
+
+    NUM_TAPS = HILBERT_NUM_TAPS
+
+    def __init__(self, mapping: str = "iq_lr"):
+        if mapping not in {"iq_lr", "iq_rl"}:
+            raise ValueError(f"unknown I/Q channel mapping {mapping!r}")
+        self.mapping = mapping
+        self.delay = (self.NUM_TAPS - 1) // 2
+        self._taps = _hilbert_taps()
+        self._q_state = np.zeros(self.NUM_TAPS - 1, dtype=np.float64)
+        self._i_state = np.zeros(self.delay, dtype=np.float64)
+
+    def process(self, frames: np.ndarray) -> np.ndarray:
+        """Return reconstructed float32 mono samples for stereo IQ frames."""
+        from scipy.signal import lfilter
+
+        stereo = np.asarray(frames, dtype=np.float64).reshape(-1, 2)
+        if not stereo.size:
+            return np.empty(0, dtype=np.float32)
+        if self.mapping == "iq_lr":
+            i, q = stereo[:, 0], stereo[:, 1]
+        else:
+            q, i = stereo[:, 0], stereo[:, 1]
+        delayed = np.concatenate((self._i_state, i))
+        delayed_i = delayed[: len(i)]
+        self._i_state = delayed[len(i) :]
+        raw_q, self._q_state = lfilter(
+            self._taps, [1.0], q, zi=self._q_state
+        )
+        h_q = -raw_q
+        return (0.5 * (delayed_i - h_q)).astype(np.float32)
+
+
+def iq_chunk_stream(chunks, mapping: str = "iq_lr", peak: float | None = None):
+    """Yield a continuous analytic stereo stream, including its FIR tail."""
+    converter = StreamingHilbertIQ(mapping)
+
+    def limited(frames: np.ndarray) -> np.ndarray:
+        if peak is not None and frames.size:
+            maximum = float(np.max(np.abs(frames)))
+            if maximum > peak:
+                frames = frames * (float(peak) / maximum)
+        return frames.astype(np.float32, copy=False)
+
+    for chunk in chunks:
+        yield limited(converter.process(chunk))
+    yield limited(converter.flush())
+
+
 
 def play_audio(audio: np.ndarray, rate: int, device: str | int | None = None) -> None:
     """Play mono audio, resampling to the device rate when needed."""
@@ -339,6 +454,7 @@ def play_chunk_stream(
     device: str | int | None = None,
     should_stop=None,
     on_chunk=None,
+    channels: int = 1,
 ) -> bool:
     """Write a lazy sequence of waveform chunks to one PortAudio stream."""
     if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
@@ -348,6 +464,7 @@ def play_chunk_stream(
             device=device,
             should_stop=should_stop,
             on_chunk=on_chunk,
+            channels=channels,
         )
     return _play_chunk_stream_direct(
         chunks,
@@ -355,6 +472,7 @@ def play_chunk_stream(
         device=device,
         should_stop=should_stop,
         on_chunk=on_chunk,
+        channels=channels,
     )
 
 
@@ -364,24 +482,33 @@ def _play_chunk_stream_direct(
     device: str | int | None = None,
     should_stop=None,
     on_chunk=None,
+    channels: int = 1,
 ) -> bool:
+    if channels not in {1, 2}:
+        raise ValueError("output channels must be 1 or 2")
     sd = _sd()
     device = resolve_device(device, "output")
     target_rate = _native_device_rate(sd, device, "output", rate)
-    resampler = (
-        None if target_rate == rate else StreamResampler(*resample_ratio(rate, target_rate))
-    )
+    resamplers = None
+    if target_rate != rate:
+        ratio = resample_ratio(rate, target_rate)
+        resamplers = [StreamResampler(*ratio) for _ in range(channels)]
     with sd.OutputStream(
-        samplerate=target_rate, channels=1, dtype="float32", device=device
+        samplerate=target_rate, channels=channels, dtype="float32", device=device
     ) as stream:
         for index, chunk in enumerate(chunks):
             if should_stop is not None and should_stop():
                 return False
-            samples = np.asarray(chunk, dtype=np.float32).reshape(-1)
-            if resampler is not None:
-                samples = resampler(samples).astype(np.float32)
+            samples = np.asarray(chunk, dtype=np.float32).reshape(-1, channels)
+            if resamplers is not None:
+                samples = np.column_stack(
+                    [
+                        resampler(samples[:, channel])
+                        for channel, resampler in enumerate(resamplers)
+                    ]
+                ).astype(np.float32)
             if samples.size:
-                stream.write(samples.reshape(-1, 1))
+                stream.write(samples)
             if on_chunk is not None:
                 on_chunk(index + 1)
     return not (should_stop is not None and should_stop())
@@ -398,22 +525,25 @@ def _audio_helper_command() -> list[str]:
     return [sys.executable, "-m", "aetv.audio_io"]
 
 
-def _audio_worker_args(operation: str, rate: int, device) -> list[str]:
+def _audio_worker_args(
+    operation: str, rate: int, device, channels: int = 1
+) -> list[str]:
     return [
         *_audio_helper_command(),
         "--audio-worker",
         operation,
         str(int(rate)),
         json.dumps(device),
+        str(int(channels)),
     ]
 
 
-def _start_audio_worker(operation: str, rate: int, device):
+def _start_audio_worker(operation: str, rate: int, device, channels: int = 1):
     env = os.environ.copy()
     env["AETV_AUDIO_WORKER_CHILD"] = "1"
     env["AETV_AUDIO_PROBE_CHILD"] = "1"
     return subprocess.Popen(
-        _audio_worker_args(operation, rate, device),
+        _audio_worker_args(operation, rate, device, channels),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -510,9 +640,12 @@ def _play_chunk_stream_isolated(
     device: str | int | None = None,
     should_stop=None,
     on_chunk=None,
+    channels: int = 1,
 ) -> bool:
     """Stream via a child so a faulty native Windows driver cannot kill Qt."""
-    proc = _start_audio_worker("play", rate, device)
+    if channels not in {1, 2}:
+        raise ValueError("output channels must be 1 or 2")
+    proc = _start_audio_worker("play", rate, device, channels)
     assert proc.stdin is not None and proc.stdout is not None
     signals: queue.Queue = queue.Queue()
     reader = threading.Thread(
@@ -532,7 +665,7 @@ def _play_chunk_stream_isolated(
             if should_stop is not None and should_stop():
                 cancelled = True
                 return False
-            samples = np.asarray(chunk, dtype=np.float32).reshape(-1)
+            samples = np.asarray(chunk, dtype=np.float32).reshape(-1, channels)
             payload = samples.astype("<f4", copy=False).tobytes()
             try:
                 proc.stdin.write(struct.pack("<I", len(payload)))
@@ -668,33 +801,54 @@ class AudioPlaybackStream:
 
 
 def open_input_stream(
-    device, ring, samplerate: int, on_error=None, on_discontinuity=None
+    device,
+    ring,
+    samplerate: int,
+    on_error=None,
+    on_discontinuity=None,
+    iq_mapping: str | None = None,
 ):
     """Open a capture stream that writes resampled mono float audio into `ring`."""
     if os.name == "nt" and os.environ.get("AETV_AUDIO_WORKER_CHILD") != "1":
         return _open_input_stream_isolated(
-            device, ring, samplerate, on_error, on_discontinuity
+            device, ring, samplerate, on_error, on_discontinuity, iq_mapping
         )
     return _open_input_stream_direct(
-        device, ring, samplerate, on_error, on_discontinuity
+        device, ring, samplerate, on_error, on_discontinuity, iq_mapping
     )
 
 
 def _open_input_stream_direct(
-    device, ring, samplerate: int, on_error=None, on_discontinuity=None
+    device,
+    ring,
+    samplerate: int,
+    on_error=None,
+    on_discontinuity=None,
+    iq_mapping: str | None = None,
 ):
     sd = _sd()
     device = resolve_device(device, "input")
     report = on_error or (lambda _msg: None)
     report_gap = on_discontinuity or (lambda: None)
 
-    def make_callback(resample_fn=None):
+    channels = 2 if iq_mapping is not None else 1
+    iq_decoder = StreamingIQToMono(iq_mapping) if iq_mapping is not None else None
+
+    def make_callback(resamplers=None):
         def callback(indata, _frames, _time, status):
             if status:
                 report(f"audio in: {status}")
                 report_gap()
-            mono = indata[:, 0] if indata.ndim > 1 else indata
-            ring.write(resample_fn(mono) if resample_fn else mono)
+            samples = np.asarray(indata, dtype=np.float32).reshape(-1, channels)
+            if resamplers is not None:
+                samples = np.column_stack(
+                    [
+                        resampler(samples[:, channel])
+                        for channel, resampler in enumerate(resamplers)
+                    ]
+                ).astype(np.float32)
+            mono = iq_decoder.process(samples) if iq_decoder else samples[:, 0]
+            ring.write(mono)
 
         return callback
 
@@ -703,13 +857,16 @@ def _open_input_stream_direct(
     except Exception as error:
         report(f"audio in: could not query device rate ({error})")
         native = samplerate
-    resampler = None if native == samplerate else StreamResampler(*resample_ratio(native, samplerate))
+    resamplers = None
+    if native != samplerate:
+        ratio = resample_ratio(native, samplerate)
+        resamplers = [StreamResampler(*ratio) for _ in range(channels)]
     stream = sd.InputStream(
         samplerate=native,
-        channels=1,
+        channels=channels,
         dtype="float32",
         device=device,
-        callback=make_callback(resampler),
+        callback=make_callback(resamplers),
     )
     stream.start()
     return stream, native
@@ -728,11 +885,15 @@ def _read_exact(pipe, size: int) -> bytes:
 
 
 class _InputProcessStream:
-    def __init__(self, proc, ring, report, report_gap):
+    def __init__(self, proc, ring, report, report_gap, iq_mapping=None):
         self._proc = proc
         self._ring = ring
         self._report = report
         self._report_gap = report_gap
+        self._channels = 2 if iq_mapping is not None else 1
+        self._iq_decoder = (
+            StreamingIQToMono(iq_mapping) if iq_mapping is not None else None
+        )
         self._stopping = threading.Event()
         self._thread = threading.Thread(
             target=self._read,
@@ -753,13 +914,21 @@ class _InputProcessStream:
                 self._report("audio in: helper buffer overrun; reacquiring")
                 self._report_gap()
                 continue
-            if size % 4 or size > 16 * 1024 * 1024:
+            if size % (4 * self._channels) or size > 16 * 1024 * 1024:
                 self._report("audio in: invalid helper frame")
                 break
             payload = _read_exact(pipe, size)
             if len(payload) != size:
                 break
-            self._ring.write(np.frombuffer(payload, dtype="<f4").copy())
+            samples = np.frombuffer(payload, dtype="<f4").reshape(
+                -1, self._channels
+            )
+            mono = (
+                self._iq_decoder.process(samples)
+                if self._iq_decoder is not None
+                else samples[:, 0].copy()
+            )
+            self._ring.write(mono)
         if not self._stopping.is_set():
             try:
                 self._proc.wait(timeout=2)
@@ -779,11 +948,17 @@ class _InputProcessStream:
 
 
 def _open_input_stream_isolated(
-    device, ring, samplerate: int, on_error=None, on_discontinuity=None
+    device,
+    ring,
+    samplerate: int,
+    on_error=None,
+    on_discontinuity=None,
+    iq_mapping: str | None = None,
 ):
     report = on_error or (lambda _msg: None)
     report_gap = on_discontinuity or (lambda: None)
-    proc = _start_audio_worker("capture", samplerate, device)
+    channels = 2 if iq_mapping is not None else 1
+    proc = _start_audio_worker("capture", samplerate, device, channels)
     assert proc.stdout is not None
     ready: queue.Queue = queue.Queue()
 
@@ -801,22 +976,23 @@ def _open_input_stream_isolated(
         _terminate_worker(proc)
         raise _worker_error(proc, "input")
     native = struct.unpack("<I", header[1:])[0]
-    return _InputProcessStream(proc, ring, report, report_gap), native
+    return _InputProcessStream(proc, ring, report, report_gap, iq_mapping), native
 
 
-def _audio_play_worker(rate: int, device) -> int:
+def _audio_play_worker(rate: int, device, channels: int = 1) -> int:
     if os.name == "nt":
-        return _wasapi_play_worker(rate, device)
+        return _wasapi_play_worker(rate, device, channels)
     sd = _sd()
     device = resolve_device(device, "output")
     target_rate = _native_device_rate(sd, device, "output", rate)
-    resampler = (
-        None if target_rate == rate else StreamResampler(*resample_ratio(rate, target_rate))
-    )
+    resamplers = None
+    if target_rate != rate:
+        ratio = resample_ratio(rate, target_rate)
+        resamplers = [StreamResampler(*ratio) for _ in range(channels)]
     source = sys.stdin.buffer
     target = sys.stdout.buffer
     with sd.OutputStream(
-        samplerate=target_rate, channels=1, dtype="float32", device=device
+        samplerate=target_rate, channels=channels, dtype="float32", device=device
     ) as stream:
         target.write(b"R")
         target.flush()
@@ -832,31 +1008,45 @@ def _audio_play_worker(rate: int, device) -> int:
             payload = _read_exact(source, size)
             if len(payload) != size:
                 raise AudioUnavailable("truncated audio output samples")
-            samples = np.frombuffer(payload, dtype="<f4")
-            if resampler is not None:
-                samples = resampler(samples).astype(np.float32)
+            samples = np.frombuffer(payload, dtype="<f4").reshape(-1, channels)
+            if resamplers is not None:
+                samples = np.column_stack(
+                    [
+                        resampler(samples[:, channel])
+                        for channel, resampler in enumerate(resamplers)
+                    ]
+                ).astype(np.float32)
             if samples.size:
-                stream.write(samples.reshape(-1, 1))
+                stream.write(samples)
             target.write(b"A")
             target.flush()
     return 0
 
 
-def _audio_capture_worker(rate: int, device) -> int:
+def _audio_capture_worker(rate: int, device, channels: int = 1) -> int:
     if os.name == "nt":
-        return _wasapi_capture_worker(rate, device)
+        return _wasapi_capture_worker(rate, device, channels)
     sd = _sd()
     device = resolve_device(device, "input")
     native = _native_device_rate(sd, device, "input", rate)
-    resampler = None if native == rate else StreamResampler(*resample_ratio(native, rate))
+    resamplers = None
+    if native != rate:
+        ratio = resample_ratio(native, rate)
+        resamplers = [StreamResampler(*ratio) for _ in range(channels)]
     blocks: queue.Queue = queue.Queue(maxsize=32)
     overflow = threading.Event()
 
     def callback(indata, _frames, _time, status):
         if status:
             overflow.set()
-        mono = indata[:, 0] if indata.ndim > 1 else indata
-        samples = resampler(mono) if resampler is not None else mono
+        samples = np.asarray(indata, dtype=np.float32).reshape(-1, channels)
+        if resamplers is not None:
+            samples = np.column_stack(
+                [
+                    resampler(samples[:, channel])
+                    for channel, resampler in enumerate(resamplers)
+                ]
+            )
         if len(samples):
             try:
                 blocks.put_nowait(np.asarray(samples, dtype="<f4").tobytes())
@@ -865,7 +1055,7 @@ def _audio_capture_worker(rate: int, device) -> int:
 
     stream = sd.InputStream(
         samplerate=native,
-        channels=1,
+        channels=channels,
         dtype="float32",
         device=device,
         callback=callback,
@@ -913,7 +1103,7 @@ def _wasapi_device(device, kind: str):
     return selected
 
 
-def _wasapi_play_worker(rate: int, device) -> int:
+def _wasapi_play_worker(rate: int, device, channels: int = 1) -> int:
     speaker = _wasapi_device(device, "output")
     source = sys.stdin.buffer
     target = sys.stdout.buffer
@@ -936,15 +1126,17 @@ def _wasapi_play_worker(rate: int, device) -> int:
             payload = _read_exact(source, size)
             if len(payload) != size:
                 raise AudioUnavailable("truncated audio output samples")
-            samples = np.frombuffer(payload, dtype="<f4")
+            samples = np.frombuffer(payload, dtype="<f4").reshape(-1, channels)
             if samples.size:
-                _play_wasapi_exact(player, samples)
+                _play_wasapi_exact(player, samples, channels=channels)
             target.write(b"A")
             target.flush()
     return 0
 
 
-def _play_wasapi_exact(player, samples: np.ndarray, memmove=None) -> None:
+def _play_wasapi_exact(
+    player, samples: np.ndarray, memmove=None, channels: int = 1
+) -> None:
     """Submit exactly the initialized frames to SoundCard's WASAPI client.
 
     SoundCard 0.4.x requests every currently available render frame inside
@@ -961,8 +1153,8 @@ def _play_wasapi_exact(player, samples: np.ndarray, memmove=None) -> None:
         from soundcard import mediafoundation
 
         memmove = mediafoundation._ffi.memmove
-    mono = np.asarray(samples, dtype=np.float32).reshape(-1)
-    stereo = np.repeat(mono[:, None], 2, axis=1)
+    frames = np.asarray(samples, dtype=np.float32).reshape(-1, channels)
+    stereo = np.repeat(frames, 2, axis=1) if channels == 1 else frames
     cursor = 0
     while cursor < len(stereo):
         available = int(player._render_available_frames())
@@ -977,7 +1169,7 @@ def _play_wasapi_exact(player, samples: np.ndarray, memmove=None) -> None:
         cursor += count
 
 
-def _wasapi_capture_worker(rate: int, device) -> int:
+def _wasapi_capture_worker(rate: int, device, channels: int = 1) -> int:
     microphone = _wasapi_device(device, "input")
     target = sys.stdout.buffer
     blocksize = wasapi_blocksize(rate)
@@ -989,9 +1181,11 @@ def _wasapi_capture_worker(rate: int, device) -> int:
             target.flush()
             while True:
                 samples = recorder.record(numframes=blocksize)
-                payload = _downmix_wasapi_capture(samples).astype(
-                    "<f4", copy=False
-                ).tobytes()
+                if channels == 2:
+                    output = np.asarray(samples, dtype=np.float32).reshape(-1, 2)
+                else:
+                    output = _downmix_wasapi_capture(samples)
+                payload = output.astype("<f4", copy=False).tobytes()
                 target.write(struct.pack("<I", len(payload)))
                 target.write(payload)
                 target.flush()
@@ -1018,16 +1212,17 @@ def _audio_worker_main(args: list[str]) -> int:
         except Exception as error:
             print(f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)
             return 1
-    if len(args) != 4 or args[0] != "--audio-worker":
+    if len(args) not in {4, 5} or args[0] != "--audio-worker":
         return 2
-    operation, rate_text, device_text = args[1:]
+    operation, rate_text, device_text = args[1:4]
     try:
         rate = int(rate_text)
         device = json.loads(device_text)
+        channels = int(args[4]) if len(args) == 5 else 1
         if operation == "play":
-            return _audio_play_worker(rate, device)
+            return _audio_play_worker(rate, device, channels)
         if operation == "capture":
-            return _audio_capture_worker(rate, device)
+            return _audio_capture_worker(rate, device, channels)
         raise ValueError(f"unknown audio operation {operation!r}")
     except Exception as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr, flush=True)

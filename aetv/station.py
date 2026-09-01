@@ -23,6 +23,7 @@ import numpy as np
 from .audio_io import (
     AudioPlaybackStream,
     StreamResampler,
+    iq_chunk_stream,
     open_input_stream,
     play_cancellable,
     play_chunk_stream,
@@ -1103,12 +1104,21 @@ class TxEngine:
                     ),
                 )
             else:
+                output_channels = 1
+                if settings.tx_audio_mode == "iq":
+                    chunks = iq_chunk_stream(
+                        chunks, settings.tx_iq_mapping, peak=settings.tx_level
+                    )
+                    output_channels = 2
                 completed = play_chunk_stream(
                     chunks,
                     fs,
                     device=settings.audio_output or None,
                     should_stop=self._cancel.is_set,
-                    on_chunk=lambda count: self._report_progress(count / max(1, n_gops)),
+                    on_chunk=lambda count: self._report_progress(
+                        min(count, n_gops) / max(1, n_gops)
+                    ),
+                    channels=output_channels,
                 )
             if not completed:
                 self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
@@ -1493,6 +1503,11 @@ class RxEngine:
                 capture_rate,
                 on_error=self._on_error,
                 on_discontinuity=self._on_soundcard_discontinuity,
+                iq_mapping=(
+                    settings.rx_iq_mapping
+                    if settings.rx_audio_mode == "iq"
+                    else None
+                ),
             )
         self._thread = threading.Thread(target=self._loop, name="aetv-rx", daemon=True)
         self._thread.start()
