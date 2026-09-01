@@ -209,6 +209,27 @@ def test_live_source_selection_updates_during_transmit():
     assert panel._active_live_source == screen
 
 
+def test_audio_level_update_routes_independent_channel_peaks():
+    class Meter:
+        def set_level(self, peak, clipping):
+            self.reading = (peak, clipping)
+
+    panel = SimpleNamespace(mic_meter=Meter(), clip_meter=Meter())
+
+    TransmitPanel._apply_audio_levels(
+        panel,
+        {
+            "microphone_peak": 0.4,
+            "microphone_clipping": False,
+            "clip_peak": 1.1,
+            "clip_clipping": True,
+        },
+    )
+
+    assert panel.mic_meter.reading == (0.4, False)
+    assert panel.clip_meter.reading == (1.1, True)
+
+
 def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
     class Preview:
         def enqueue_rgb(self, *_args, **_kwargs):

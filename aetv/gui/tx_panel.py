@@ -93,6 +93,52 @@ class _RegionSelector(QDialog):
         self.accept()
 
 
+class _AudioLevelMeter(QProgressBar):
+    """Compact peak meter with a persistent, unambiguous clipping state."""
+
+    FLOOR_DB = -60.0
+
+    def __init__(self, channel: str, parent=None):
+        super().__init__(parent)
+        self.channel = channel
+        self.setRange(0, 600)
+        self.setTextVisible(True)
+        self.setMinimumWidth(150)
+        self.setToolTip(
+            f"{channel} peak level after its audio fader; CLIP detects overload "
+            "before the fader"
+        )
+        self.reset_level()
+
+    def set_level(self, peak: float, clipping: bool = False) -> None:
+        peak = max(0.0, float(peak))
+        db = 20.0 * math.log10(peak) if peak > 0.0 else float("-inf")
+        shown_db = max(self.FLOOR_DB, min(0.0, db))
+        self.setValue(int(round((shown_db - self.FLOOR_DB) * 10.0)))
+        self._clipped = self._clipped or bool(clipping)
+        if self._clipped:
+            color = "#d93025"
+            text = f"CLIP · {db:.1f} dBFS" if math.isfinite(db) else "CLIP"
+        elif db >= -6.0:
+            color = "#e0a000"
+            text = f"{db:.1f} dBFS"
+        elif math.isfinite(db):
+            color = "#2e9d50"
+            text = f"{db:.1f} dBFS"
+        else:
+            color = "#687078"
+            text = "−∞ dBFS"
+        self.setFormat(text)
+        self.setStyleSheet(
+            "QProgressBar { text-align: center; } "
+            f"QProgressBar::chunk {{ background-color: {color}; }}"
+        )
+
+    def reset_level(self) -> None:
+        self._clipped = False
+        self.set_level(0.0, False)
+
+
 class TransmitPanel(QWidget):
     transmitStarted = Signal()
     transmitFinished = Signal()
@@ -111,6 +157,7 @@ class TransmitPanel(QWidget):
     _clipReady = Signal(int, object, int)
     _clipFailed = Signal(int, str, int)
     _inputsArrived = Signal(object)
+    _audioLevelsArrived = Signal(object)
     loopbackVideo = Signal(object, object)
 
     def __init__(self, station, parent=None):
@@ -127,6 +174,7 @@ class TransmitPanel(QWidget):
             camera_frames=self._camera_frames.frames,
             on_loopback=lambda video, state: self.loopbackVideo.emit(video, state),
             live_source=self._live_source_for_tx,
+            on_audio_levels=self._audioLevelsArrived.emit,
         )
         self._thread: threading.Thread | None = None
         self._start_gate = threading.Event()
@@ -157,6 +205,9 @@ class TransmitPanel(QWidget):
         self._clipReady.connect(self._apply_clip_ready, Qt.ConnectionType.QueuedConnection)
         self._clipFailed.connect(self._apply_clip_failed, Qt.ConnectionType.QueuedConnection)
         self._inputsArrived.connect(self._apply_inputs, Qt.ConnectionType.QueuedConnection)
+        self._audioLevelsArrived.connect(
+            self._apply_audio_levels, Qt.ConnectionType.QueuedConnection
+        )
         self._file_path = ""
         self._build()
 
@@ -242,6 +293,7 @@ class TransmitPanel(QWidget):
         self.output.setEnabled(False)
         for button in self.channel_buttons.buttons():
             button.setEnabled(False)
+        self._reset_audio_levels()
         self.progress.setValue(0)
         self.status.setText("preparing transmit…")
         self._start_gate.clear()
@@ -321,6 +373,8 @@ class TransmitPanel(QWidget):
         self.mic_mix = QSlider(Qt.Orientation.Horizontal)
         self.mic_mix.setRange(0, 100)
         self.mic_mix_label = QLabel()
+        self.mic_meter = _AudioLevelMeter("Microphone")
+        self.clip_meter = _AudioLevelMeter("Clip audio")
         self.send_button = QPushButton("Send")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
@@ -371,6 +425,11 @@ class TransmitPanel(QWidget):
         self.mix_row.addWidget(self.mic_mix, 1)
         self.mix_row.addWidget(QLabel("Microphone"))
         self.mix_row.addWidget(self.mic_mix_label)
+        self.audio_meter_row = QHBoxLayout()
+        self.audio_meter_row.addWidget(QLabel("Mic level"))
+        self.audio_meter_row.addWidget(self.mic_meter, 1)
+        self.audio_meter_row.addWidget(QLabel("Clip level"))
+        self.audio_meter_row.addWidget(self.clip_meter, 1)
         channel_row = QHBoxLayout()
         channel_row.addWidget(QLabel("Route"))
         self.channel_keys = ["radio", *CHANNEL_PROFILES]
@@ -400,6 +459,7 @@ class TransmitPanel(QWidget):
         strip.addLayout(out_row)
         strip.addLayout(self.av_row)
         strip.addLayout(self.mix_row)
+        strip.addLayout(self.audio_meter_row)
         strip.addLayout(channel_row)
         strip.addWidget(self.progress)
         strip.addLayout(buttons)
@@ -921,6 +981,10 @@ class TransmitPanel(QWidget):
             widget = self.mix_row.itemAt(index).widget()
             if widget is not None:
                 widget.setVisible(visible)
+        for index in range(self.audio_meter_row.count()):
+            widget = self.audio_meter_row.itemAt(index).widget()
+            if widget is not None:
+                widget.setVisible(visible)
         self._on_av_power_changed(self.av_power.value())
         self._on_mic_mix_changed(self.mic_mix.value())
 
@@ -931,6 +995,20 @@ class TransmitPanel(QWidget):
     def _on_mic_mix_changed(self, value: int) -> None:
         self.station.settings.av_microphone_mix = value / 100.0
         self.mic_mix_label.setText(f"{value}% mic")
+
+    def _apply_audio_levels(self, levels: dict) -> None:
+        self.mic_meter.set_level(
+            levels.get("microphone_peak", 0.0),
+            levels.get("microphone_clipping", False),
+        )
+        self.clip_meter.set_level(
+            levels.get("clip_peak", 0.0),
+            levels.get("clip_clipping", False),
+        )
+
+    def _reset_audio_levels(self) -> None:
+        self.mic_meter.reset_level()
+        self.clip_meter.reset_level()
 
     def _apply_state(self, state: TxState) -> None:
         self.status.setText(state.message or state.phase.value)

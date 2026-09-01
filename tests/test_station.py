@@ -443,6 +443,47 @@ def test_live_composite_uses_microphone_when_clip_fader_is_at_zero(monkeypatch):
     assert np.mean(captured_voice[1]) > 0.8
 
 
+def test_composite_reports_post_fader_levels_and_pre_fader_clipping(monkeypatch):
+    levels = []
+
+    class InputStream:
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    def open_input(_device, sink, rate, **_kwargs):
+        sink.write(np.full(rate, 0.8, dtype=np.float32))
+        return InputStream(), rate
+
+    monkeypatch.setattr("aetv.station.open_input_stream", open_input)
+    monkeypatch.setattr(
+        "aetv.station.mix_composite_chunk",
+        lambda video, _voice, **_kwargs: np.asarray(video),
+    )
+    settings = StationSettings(
+        mode="V8",
+        waveform_mode="analog_av",
+        av_microphone_mix=0.25,
+    )
+    engine = TxEngine(Station(settings), on_audio_levels=levels.append)
+
+    list(
+        engine._composite_chunks(
+            iter((np.zeros(8000, dtype=np.float32),)),
+            np.full(8000, 1.2, dtype=np.float32),
+            1,
+        )
+    )
+
+    assert len(levels) == 1
+    assert levels[0]["microphone_peak"] == pytest.approx(0.2)
+    assert levels[0]["clip_peak"] == pytest.approx(0.9)
+    assert levels[0]["microphone_clipping"] is False
+    assert levels[0]["clip_clipping"] is True
+
+
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):
     captured = {}
 

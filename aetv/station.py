@@ -388,6 +388,7 @@ class TxEngine:
         camera_frames=None,
         on_loopback=None,
         live_source=None,
+        on_audio_levels=None,
     ):
         self.station = station
         self._on_state = on_state or (lambda _state: None)
@@ -398,6 +399,7 @@ class TxEngine:
         self._camera_frames = camera_frames
         self._on_loopback = on_loopback or (lambda _video, _state: None)
         self._live_source = live_source
+        self._on_audio_levels = on_audio_levels or (lambda _levels: None)
         self._cancel = threading.Event()
         self.state = TxState()
         self.last_wav: np.ndarray | None = None
@@ -687,15 +689,35 @@ class TxEngine:
                     self._cancel.is_set,
                     timeout_s=1.25 if input_stream is not None and mic_mix > 0.0 else 0.0,
                 )
-                voice_gop = mic_mix * mic + (1.0 - mic_mix) * clip
+                microphone_component = mic_mix * mic
+                clip_component = (1.0 - mic_mix) * clip
+                voice_gop = microphone_component + clip_component
+                mic_input_peak = float(np.max(np.abs(mic))) if mic.size else 0.0
+                clip_input_peak = float(np.max(np.abs(clip))) if clip.size else 0.0
+                self._on_audio_levels(
+                    {
+                        "microphone_peak": (
+                            float(np.max(np.abs(microphone_component)))
+                            if microphone_component.size
+                            else 0.0
+                        ),
+                        "clip_peak": (
+                            float(np.max(np.abs(clip_component)))
+                            if clip_component.size
+                            else 0.0
+                        ),
+                        "microphone_clipping": mic_input_peak >= 0.99,
+                        "clip_clipping": has_clip_audio and clip_input_peak >= 0.99,
+                    }
+                )
                 if index == 0:
-                    mic_peak = float(np.max(np.abs(mic))) if mic.size else 0.0
-                    clip_peak = float(np.max(np.abs(clip))) if clip.size else 0.0
                     self.station.log(
-                        f"TX A/V sources: microphone peak {mic_peak:.4f}, "
-                        f"clip peak {clip_peak:.4f}, mic mix {mic_mix * 100:.0f}%"
+                        f"TX A/V sources: microphone peak {mic_input_peak:.4f}, "
+                        f"clip peak {clip_input_peak:.4f}, mic mix {mic_mix * 100:.0f}%"
                     )
-                    if mic_peak <= 1e-6 and (not has_clip_audio or clip_peak <= 1e-6):
+                    if mic_input_peak <= 1e-6 and (
+                        not has_clip_audio or clip_input_peak <= 1e-6
+                    ):
                         self.station.log(
                             "TX A/V warning: selected program-audio sources are silent"
                         )
