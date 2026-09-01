@@ -401,6 +401,48 @@ def test_composite_tx_polls_power_and_microphone_faders_per_gop(monkeypatch):
     assert opened[0].stopped and opened[0].closed
 
 
+def test_live_composite_uses_microphone_when_clip_fader_is_at_zero(monkeypatch):
+    """A webcam/screen TX has no clip track, so its mic must remain audible."""
+    captured_voice = []
+
+    class InputStream:
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    def open_input(_device, sink, rate, **_kwargs):
+        sink.write(np.ones(rate, dtype=np.float32))
+        return InputStream(), rate
+
+    def mix(video, voice, *, video_power):
+        captured_voice.append(np.asarray(voice).copy())
+        return np.zeros(round(len(video) * 1.5), dtype=np.float32)
+
+    monkeypatch.setattr("aetv.station.open_input_stream", open_input)
+    monkeypatch.setattr("aetv.station.mix_composite_chunk", mix)
+    settings = StationSettings(
+        mode="V8",
+        waveform_mode="analog_av",
+        av_video_power=0.0,
+        av_microphone_mix=0.0,
+    )
+    engine = TxEngine(Station(settings))
+
+    chunks = list(
+        engine._composite_chunks(
+            iter((np.zeros(8000, dtype=np.float32),)),
+            None,
+            1,
+        )
+    )
+
+    assert len(chunks) == 2
+    assert np.max(np.abs(captured_voice[0])) == 0.0
+    assert np.mean(captured_voice[1]) > 0.8
+
+
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):
     captured = {}
 

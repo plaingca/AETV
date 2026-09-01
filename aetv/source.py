@@ -130,28 +130,87 @@ def iter_screen_capture(
     spec: ScreenCaptureSpec,
     duration_s: float | None = None,
 ) -> Iterator[np.ndarray]:
-    """Capture a monitor/window/region on the mode-rate monotonic clock."""
+    """Sample the newest desktop image on the mode-rate monotonic clock.
+
+    Desktop grabs can be slower than the video frame rate on large monitors.
+    Keep grabbing on a background thread and repeat its newest image when
+    necessary, so a slow ImageGrab call cannot starve the TX audio stream.
+    """
     try:
         from PIL import ImageGrab
     except ImportError as error:
         raise RuntimeError("Pillow ImageGrab is required for screen capture") from error
 
-    limit = None if duration_s is None else int(round(duration_s * mode.fps))
+    condition = threading.Condition()
+    stop = threading.Event()
+    state: dict = {"frame": None, "error": None}
     period = 1.0 / mode.fps
-    next_frame_at = time.monotonic()
-    produced = 0
-    while limit is None or produced < limit:
-        delay = next_frame_at - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
-        bbox = _current_screen_bbox(spec)
-        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-            raise RuntimeError(f"invalid screen capture area: {bbox}")
-        image = ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
-        frame = np.asarray(image, dtype=np.uint8).copy()
-        yield resize_frame(frame, mode.width, mode.height)
-        produced += 1
-        next_frame_at = max(next_frame_at + period, time.monotonic())
+
+    def grab_desktop() -> None:
+        next_grab_at = time.monotonic()
+        try:
+            while not stop.is_set():
+                delay = next_grab_at - time.monotonic()
+                if delay > 0 and stop.wait(delay):
+                    return
+                grab_started = time.monotonic()
+                bbox = _current_screen_bbox(spec)
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    raise RuntimeError(f"invalid screen capture area: {bbox}")
+                image = ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
+                frame = resize_frame(
+                    np.asarray(image, dtype=np.uint8).copy(),
+                    mode.width,
+                    mode.height,
+                )
+                with condition:
+                    state["frame"] = frame
+                    condition.notify_all()
+                grab_time = time.monotonic() - grab_started
+                # A very large desktop grab can otherwise occupy a CPU core
+                # continuously and slow neural encoding. Fast targets retain
+                # the mode frame rate; slow targets use at most 50% duty cycle
+                # and the sampler repeats their latest completed image.
+                next_grab_at = grab_started + max(period, 2.0 * grab_time)
+        except Exception as error:
+            with condition:
+                state["error"] = error
+                condition.notify_all()
+
+    worker = threading.Thread(
+        target=grab_desktop,
+        daemon=True,
+        name="aetv-screen-grabber",
+    )
+    worker.start()
+    try:
+        with condition:
+            ready_until = time.monotonic() + 10.0
+            while state["frame"] is None and state["error"] is None:
+                remaining = ready_until - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"screen capture did not start: {spec.name}")
+                condition.wait(remaining)
+            if state["error"] is not None:
+                raise state["error"]
+
+        limit = None if duration_s is None else int(round(duration_s * mode.fps))
+        next_frame_at = time.monotonic()
+        produced = 0
+        while limit is None or produced < limit:
+            delay = next_frame_at - time.monotonic()
+            if delay > 0 and stop.wait(delay):
+                return
+            with condition:
+                if state["error"] is not None:
+                    raise state["error"]
+                frame = state["frame"]
+            yield frame
+            produced += 1
+            next_frame_at = max(next_frame_at + period, time.monotonic())
+    finally:
+        stop.set()
+        worker.join(timeout=2.0)
 
 
 class CameraFrameBuffer:

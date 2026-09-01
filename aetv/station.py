@@ -141,6 +141,69 @@ class _LiveMicrophoneBuffer:
         return result
 
 
+class _PrefetchedFrames:
+    """Keep a clocked live source capturing while the neural encoder runs."""
+
+    def __init__(self, source, capacity: int, should_stop=None):
+        self._source = iter(source)
+        self._queue: queue.Queue = queue.Queue(maxsize=max(2, int(capacity)))
+        self._stop = threading.Event()
+        self._should_stop = should_stop or (lambda: False)
+        self._sentinel = object()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="aetv-screen-buffer",
+        )
+        self._thread.start()
+
+    def _offer(self, item) -> None:
+        while not self._stop.is_set():
+            try:
+                self._queue.put_nowait(item)
+                return
+            except queue.Full:
+                # A screen source must remain live while another source is
+                # selected or the encoder is busy. Drop its oldest picture.
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+    def _run(self) -> None:
+        try:
+            for frame in self._source:
+                if self._stop.is_set() or self._should_stop():
+                    break
+                self._offer(frame)
+        except Exception as error:
+            self._offer(error)
+        finally:
+            self._offer(self._sentinel)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while not self._stop.is_set() and not self._should_stop():
+            try:
+                item = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                if not self._thread.is_alive():
+                    raise StopIteration
+                continue
+            if item is self._sentinel:
+                raise StopIteration
+            if isinstance(item, Exception):
+                raise item
+            return item
+        raise StopIteration
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+
+
 class _RecordingSink:
     """Tee live mono samples into the receiver ring and a debug WAV."""
 
@@ -497,7 +560,11 @@ class TxEngine:
                 }:
                     clip_audio = read_video_audio(source, n_gops, NATIVE_AETV_FS)
                 else:
-                    clip_audio = np.zeros(n_gops * NATIVE_AETV_FS, dtype=np.float32)
+                    # Webcam and screen sources have no program track. Passing
+                    # None lets the compositor use the microphone at unity
+                    # instead of multiplying it by the clip/mic fader. That
+                    # fader only has meaning when a clip track exists.
+                    clip_audio = None
                 chunks = self._composite_chunks(chunks, clip_audio, n_gops)
                 transmit_rate = COMPOSITE_FS
             else:
@@ -522,6 +589,9 @@ class TxEngine:
                         1.65 if settings.waveform_mode == "analog_av" else 0.65
                     ),
                     "tx_level": settings.tx_level,
+                    "av_video_power": settings.av_video_power,
+                    "av_microphone_mix": settings.av_microphone_mix,
+                    "microphone_input": settings.microphone_input,
                     "frequency_mhz": settings.freq_mhz,
                     "flex_host": settings.flex_host,
                     "waveform": str(tx_recorder.path),
@@ -572,7 +642,12 @@ class TxEngine:
                     encoding="utf-8",
                 )
 
-    def _composite_chunks(self, video_chunks, clip_audio: np.ndarray, n_gops: int):
+    def _composite_chunks(
+        self,
+        video_chunks,
+        clip_audio: np.ndarray | None,
+        n_gops: int,
+    ):
         """Add delayed microphone/program audio while polling the live faders."""
         delay = np.zeros(NATIVE_AETV_FS, dtype=np.float32)
         microphone = _LiveMicrophoneBuffer(NATIVE_AETV_FS)
@@ -589,10 +664,21 @@ class TxEngine:
         try:
             for index, video in enumerate(video_chunks):
                 settings = self.station.settings
-                mic_mix = float(np.clip(settings.av_microphone_mix, 0.0, 1.0))
-                clip = np.asarray(
-                    clip_audio[index * NATIVE_AETV_FS : (index + 1) * NATIVE_AETV_FS],
-                    dtype=np.float32,
+                has_clip_audio = clip_audio is not None
+                mic_mix = (
+                    float(np.clip(settings.av_microphone_mix, 0.0, 1.0))
+                    if has_clip_audio
+                    else 1.0
+                )
+                clip = (
+                    np.asarray(
+                        clip_audio[
+                            index * NATIVE_AETV_FS : (index + 1) * NATIVE_AETV_FS
+                        ],
+                        dtype=np.float32,
+                    )
+                    if has_clip_audio
+                    else np.zeros(NATIVE_AETV_FS, dtype=np.float32)
                 )
                 if len(clip) < NATIVE_AETV_FS:
                     clip = np.pad(clip, (0, NATIVE_AETV_FS - len(clip)))
@@ -602,6 +688,17 @@ class TxEngine:
                     timeout_s=1.25 if input_stream is not None and mic_mix > 0.0 else 0.0,
                 )
                 voice_gop = mic_mix * mic + (1.0 - mic_mix) * clip
+                if index == 0:
+                    mic_peak = float(np.max(np.abs(mic))) if mic.size else 0.0
+                    clip_peak = float(np.max(np.abs(clip))) if clip.size else 0.0
+                    self.station.log(
+                        f"TX A/V sources: microphone peak {mic_peak:.4f}, "
+                        f"clip peak {clip_peak:.4f}, mic mix {mic_mix * 100:.0f}%"
+                    )
+                    if mic_peak <= 1e-6 and (not has_clip_audio or clip_peak <= 1e-6):
+                        self.station.log(
+                            "TX A/V warning: selected program-audio sources are silent"
+                        )
 
                 native_video = np.asarray(video, dtype=np.float32).reshape(-1)
                 source_voice = np.zeros(len(native_video), dtype=np.float32)
@@ -1063,6 +1160,7 @@ class TxEngine:
         camera_frames = None
         screen_frames = None
         screen_spec = None
+        screen_bootstrap = False
         try:
             for index in range(n_gops):
                 selected = self._live_source() if self._live_source is not None else initial
@@ -1073,8 +1171,15 @@ class TxEngine:
                 capture_started = time.perf_counter()
                 if isinstance(selected, ScreenCaptureSpec):
                     if screen_frames is None or selected != screen_spec:
-                        screen_frames = iter_screen_capture(mode, selected)
+                        if screen_frames is not None:
+                            screen_frames.close()
+                        screen_frames = _PrefetchedFrames(
+                            iter_screen_capture(mode, selected),
+                            capacity=mode.gop_frames * 2,
+                            should_stop=self._cancel.is_set,
+                        )
                         screen_spec = selected
+                        screen_bootstrap = True
                     source_frames = screen_frames
                     source_label = "screen"
                 else:
@@ -1091,11 +1196,19 @@ class TxEngine:
                             )
                     source_frames = camera_frames
                     source_label = "webcam"
-                frames = []
-                for _ in range(mode.gop_frames):
-                    if self._cancel.is_set():
-                        return
-                    frames.append(next(source_frames))
+                if source_label == "screen" and screen_bootstrap:
+                    # A first screen GOP made from one current snapshot avoids
+                    # keying into a one-second capture delay. The background
+                    # producer fills a normally clocked GOP for the next block.
+                    frame = next(source_frames)
+                    frames = [frame] * mode.gop_frames
+                    screen_bootstrap = False
+                else:
+                    frames = []
+                    for _ in range(mode.gop_frames):
+                        if self._cancel.is_set():
+                            return
+                        frames.append(next(source_frames))
                 gop = np.stack(frames, axis=0)
                 self.last_frames = gop
                 self._on_preview(gop)
@@ -1123,6 +1236,8 @@ class TxEngine:
             close = getattr(camera_frames, "close", None)
             if close is not None:
                 close()
+            if screen_frames is not None:
+                screen_frames.close()
 
     def _live_screen_gops(self, codec, n_gops: int, spec: ScreenCaptureSpec):
         """Capture and encode desktop GOPs incrementally like a webcam."""
