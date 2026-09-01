@@ -111,6 +111,7 @@ def test_av_clip_preparation_uses_loaded_v8_codec(monkeypatch):
     edit = SimpleNamespace()
     panel = SimpleNamespace(
         _clip_generation=0,
+        _clip_tokens={},
         _selected_clip=3,
         _prepared_clips={3: object()},
         _clip_edits={3: edit},
@@ -119,11 +120,78 @@ def test_av_clip_preparation_uses_loaded_v8_codec(monkeypatch):
         _selected_mode_name=lambda: "V8",
         _prepare_clip_batch=lambda *_args: None,
     )
+    panel._invalidate_clip_slots = lambda indices: TransmitPanel._invalidate_clip_slots(
+        panel, indices
+    )
 
     TransmitPanel._queue_clip_preparation(panel)
 
     assert cell.progress == 0.0
     assert started == [([(3, edit)], "V8", 1)]
+
+
+def test_adding_clip_only_queues_changed_slot(monkeypatch):
+    started = []
+
+    class Thread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.args = args
+
+        def start(self):
+            started.append(self.args)
+
+    monkeypatch.setattr("aetv.gui.tx_panel.threading.Thread", Thread)
+    existing = object()
+    old_edit = SimpleNamespace(path="old.mp4")
+    new_edit = SimpleNamespace(path="new.mp4")
+    cells = [SimpleNamespace(set_progress=lambda value: None) for _ in range(4)]
+    progress = []
+    cells[3].set_progress = progress.append
+    panel = SimpleNamespace(
+        _clip_generation=7,
+        _clip_tokens={0: 4},
+        _selected_clip=0,
+        _prepared_clips={0: existing},
+        _clip_edits={0: old_edit, 3: new_edit},
+        clip_grid=SimpleNamespace(cells=cells),
+        station=SimpleNamespace(codec=SimpleNamespace(mode=SimpleNamespace(name="V8"))),
+        _selected_mode_name=lambda: "V8",
+        _prepare_clip_batch=lambda *_args: None,
+    )
+    panel._invalidate_clip_slots = lambda indices: TransmitPanel._invalidate_clip_slots(
+        panel, indices
+    )
+
+    TransmitPanel._queue_clip_preparation(panel, [3])
+
+    assert panel._prepared_clips == {0: existing}
+    assert panel._selected_clip == 0
+    assert panel._clip_tokens == {0: 4, 3: 8}
+    assert progress == [0.0]
+    assert started == [([(3, new_edit)], "V8", 8)]
+
+
+def test_invalidated_batch_slot_does_not_cancel_other_slots():
+    prepared_indices = []
+    panel = SimpleNamespace(
+        _clip_tokens={0: 2, 1: 1},
+        engine=SimpleNamespace(
+            prepare_clip=lambda path, *_args, **_kwargs: f"prepared:{path}"
+        ),
+        _clipProgress=SimpleNamespace(emit=lambda *_args: None),
+        _clipReady=SimpleNamespace(
+            emit=lambda index, _prepared, _generation: prepared_indices.append(index)
+        ),
+        _clipFailed=SimpleNamespace(emit=lambda *_args: None),
+    )
+    edits = [
+        (0, SimpleNamespace(path="changed.mp4", duration_s=1, start_s=0, framing="crop")),
+        (1, SimpleNamespace(path="keep.mp4", duration_s=1, start_s=0, framing="crop")),
+    ]
+
+    TransmitPanel._prepare_clip_batch(panel, edits, "V8", 1)
+
+    assert prepared_indices == [1]
 
 
 def test_live_source_selection_updates_during_transmit():

@@ -142,6 +142,7 @@ class TransmitPanel(QWidget):
         self._clip_edits: dict[int, ClipEdit] = {}
         self._selected_clip: int | None = None
         self._clip_generation = 0
+        self._clip_tokens: dict[int, int] = {}
         self._stateArrived.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._previewArrived.connect(self._show_preview, Qt.ConnectionType.QueuedConnection)
@@ -592,9 +593,10 @@ class TransmitPanel(QWidget):
         self._clip_edits[index] = edit
         self._show_clip_edit(index, edit)
         self._prepared_clips.pop(index, None)
-        self._selected_clip = None
+        if self._selected_clip == index:
+            self._selected_clip = None
         self._save_clip_paths()
-        self._queue_clip_preparation()
+        self._queue_clip_preparation([index])
 
     def _show_clip_edit(self, index: int, edit: ClipEdit) -> None:
         cell = self.clip_grid.cells[index]
@@ -633,6 +635,7 @@ class TransmitPanel(QWidget):
         self.clip_grid.cells[index].clear()
         self._prepared_clips.pop(index, None)
         self._clip_edits.pop(index, None)
+        self._invalidate_clip_slots([index])
         if self._selected_clip == index:
             self._selected_clip = None
         self._save_clip_paths()
@@ -648,16 +651,35 @@ class TransmitPanel(QWidget):
         """Refresh prepared clips after the requested codec becomes available."""
         self._queue_clip_preparation()
 
-    def _queue_clip_preparation(self) -> None:
+    def _invalidate_clip_slots(self, indices) -> int:
         self._clip_generation += 1
         generation = self._clip_generation
-        self._selected_clip = None
-        self._prepared_clips.clear()
+        for index in indices:
+            self._clip_tokens[int(index)] = generation
+        return generation
+
+    def _queue_clip_preparation(self, indices=None) -> None:
+        if indices is None:
+            requested = list(range(len(self.clip_grid.cells)))
+            edits = list(self._clip_edits.items())
+            self._selected_clip = None
+            self._prepared_clips.clear()
+        else:
+            requested = list(dict.fromkeys(int(index) for index in indices))
+            edits = [
+                (index, self._clip_edits[index])
+                for index in requested
+                if index in self._clip_edits
+            ]
+            for index in requested:
+                self._prepared_clips.pop(index, None)
+            if self._selected_clip in requested:
+                self._selected_clip = None
+        generation = self._invalidate_clip_slots(requested)
         codec = self.station.codec
         mode_name = self._selected_mode_name()
         if codec is None or codec.mode.name != mode_name:
             return
-        edits = list(self._clip_edits.items())
         if not edits:
             return
         for index, _edit in edits:
@@ -676,8 +698,8 @@ class TransmitPanel(QWidget):
         generation: int,
     ) -> None:
         for index, edit in edits:
-            if generation != self._clip_generation:
-                return
+            if self._clip_tokens.get(index) != generation:
+                continue
             try:
                 n_gops = max(1, int(edit.duration_s))
                 prepared = self.engine.prepare_clip(
@@ -696,18 +718,18 @@ class TransmitPanel(QWidget):
                 self._clipReady.emit(index, prepared, generation)
 
     def _apply_clip_progress(self, index: int, progress: float, generation: int) -> None:
-        if generation == self._clip_generation:
+        if self._clip_tokens.get(index) == generation:
             self.clip_grid.cells[index].set_progress(progress)
 
     def _apply_clip_ready(self, index: int, prepared: PreparedClip, generation: int) -> None:
-        if generation != self._clip_generation:
+        if self._clip_tokens.get(index) != generation:
             return
         self._prepared_clips[index] = prepared
         self.clip_grid.cells[index].set_ready(prepared.preview_frames)
         self.status.setText(f"{self.clip_grid.cells[index].name.text()} ready")
 
     def _apply_clip_failed(self, index: int, message: str, generation: int) -> None:
-        if generation == self._clip_generation:
+        if self._clip_tokens.get(index) == generation:
             self.clip_grid.cells[index].set_error(message)
 
     def _fill_screen_targets(self) -> None:
@@ -882,6 +904,8 @@ class TransmitPanel(QWidget):
             self._selected_clip = None
         if hasattr(self, "_prepared_clips"):
             self._prepared_clips.clear()
+        if hasattr(self, "_clip_tokens"):
+            self._invalidate_clip_slots(range(len(self.clip_grid.cells)))
         if base_mode != self.station.settings.mode:
             self.send_button.setEnabled(False)
             self.status.setText(f"loading {base_mode} model…")
