@@ -1,19 +1,155 @@
-"""Webcam and file sources that emit AETV-sized RGB frames."""
+"""Webcam, desktop, and file sources that emit AETV-sized RGB frames."""
 
 from __future__ import annotations
 
 import queue
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from .config import AETVModeSpec
 from .ffmpeg import ffmpeg_executable
+
+
+@dataclass(frozen=True)
+class ScreenCaptureSpec:
+    """A desktop capture target in virtual-desktop coordinates."""
+
+    name: str
+    bbox: tuple[int, int, int, int]
+    window_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PreparedClip:
+    """A file whose neural GOPs are ready for immediate modulation."""
+
+    path: str
+    mode_name: str
+    latents: tuple[np.ndarray, ...]
+    preview_frames: np.ndarray
+
+    @property
+    def gops(self) -> int:
+        return len(self.latents)
+
+
+@dataclass(frozen=True)
+class ClipEdit:
+    """Non-destructive edit settings stored with a clip-bank slot."""
+
+    path: str
+    start_s: float
+    end_s: float
+    framing: str = "crop"
+
+    @property
+    def duration_s(self) -> float:
+        return max(0.0, self.end_s - self.start_s)
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "start_s": self.start_s,
+            "end_s": self.end_s,
+            "framing": self.framing,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "ClipEdit":
+        return cls(
+            path=str(value.get("path", "")),
+            start_s=max(0.0, float(value.get("start_s", 0.0))),
+            end_s=max(0.0, float(value.get("end_s", 0.0))),
+            framing=str(value.get("framing", "crop")),
+        )
+
+
+def list_windows() -> list[ScreenCaptureSpec]:
+    """Return visible top-level windows where the platform exposes them."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    results: list[ScreenCaptureSpec] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        title = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, title, length + 1)
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return True
+        if rect.right - rect.left < 32 or rect.bottom - rect.top < 32:
+            return True
+        results.append(
+            ScreenCaptureSpec(
+                title.value,
+                (rect.left, rect.top, rect.right, rect.bottom),
+                int(hwnd),
+            )
+        )
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return sorted(results, key=lambda item: item.name.casefold())
+
+
+def _current_screen_bbox(spec: ScreenCaptureSpec) -> tuple[int, int, int, int]:
+    if spec.window_id is None or sys.platform != "win32":
+        return spec.bbox
+    import ctypes
+    from ctypes import wintypes
+
+    rect = wintypes.RECT()
+    if not ctypes.windll.user32.GetWindowRect(spec.window_id, ctypes.byref(rect)):
+        raise RuntimeError(f"capture window is no longer available: {spec.name}")
+    if ctypes.windll.user32.IsIconic(spec.window_id):
+        raise RuntimeError(f"capture window is minimized: {spec.name}")
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def iter_screen_capture(
+    mode: AETVModeSpec,
+    spec: ScreenCaptureSpec,
+    duration_s: float | None = None,
+) -> Iterator[np.ndarray]:
+    """Capture a monitor/window/region on the mode-rate monotonic clock."""
+    try:
+        from PIL import ImageGrab
+    except ImportError as error:
+        raise RuntimeError("Pillow ImageGrab is required for screen capture") from error
+
+    limit = None if duration_s is None else int(round(duration_s * mode.fps))
+    period = 1.0 / mode.fps
+    next_frame_at = time.monotonic()
+    produced = 0
+    while limit is None or produced < limit:
+        delay = next_frame_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        bbox = _current_screen_bbox(spec)
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            raise RuntimeError(f"invalid screen capture area: {bbox}")
+        image = ImageGrab.grab(bbox=bbox, all_screens=True).convert("RGB")
+        frame = np.asarray(image, dtype=np.uint8).copy()
+        yield resize_frame(frame, mode.width, mode.height)
+        produced += 1
+        next_frame_at = max(next_frame_at + period, time.monotonic())
 
 
 class CameraFrameBuffer:
@@ -175,6 +311,32 @@ def resize_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
     return resized[top : top + height, left : left + width]
 
 
+def frame_for_output(
+    frame: np.ndarray, width: int, height: int, framing: str = "crop"
+) -> np.ndarray:
+    """Resize an RGB frame using the clip editor's chosen framing policy."""
+    if framing == "crop":
+        return resize_frame(frame, width, height)
+    try:
+        import cv2
+    except ImportError as error:
+        raise RuntimeError("opencv-python is required for video resize") from error
+    if framing == "stretch":
+        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+    if framing != "fit":
+        raise ValueError(f"unknown clip framing mode {framing!r}")
+    src_h, src_w = frame.shape[:2]
+    scale = min(height / src_h, width / src_w)
+    new_w = max(1, int(round(src_w * scale)))
+    new_h = max(1, int(round(src_h * scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    output = np.zeros((height, width, 3), dtype=np.uint8)
+    top = (height - new_h) // 2
+    left = (width - new_w) // 2
+    output[top : top + new_h, left : left + new_w] = resized
+    return output
+
+
 def iter_webcam(
     mode: AETVModeSpec,
     camera: int = 0,
@@ -315,15 +477,26 @@ def iter_video_file(
     mode: AETVModeSpec,
     start_s: float = 0.0,
     frames: int | None = None,
+    framing: str = "crop",
 ) -> np.ndarray:
     """Decode a video file into (T, H, W, 3) uint8 at the mode geometry."""
     if frames is None:
         raise ValueError("iter_video_file requires an exact frame count")
-    video_filter = (
-        f"fps={mode.fps},"
-        f"scale={mode.width}:{mode.height}:force_original_aspect_ratio=increase,"
-        f"crop={mode.width}:{mode.height}"
-    )
+    if framing == "crop":
+        resize_filter = (
+            f"scale={mode.width}:{mode.height}:force_original_aspect_ratio=increase,"
+            f"crop={mode.width}:{mode.height}"
+        )
+    elif framing == "fit":
+        resize_filter = (
+            f"scale={mode.width}:{mode.height}:force_original_aspect_ratio=decrease,"
+            f"pad={mode.width}:{mode.height}:(ow-iw)/2:(oh-ih)/2:black"
+        )
+    elif framing == "stretch":
+        resize_filter = f"scale={mode.width}:{mode.height}"
+    else:
+        raise ValueError(f"unknown clip framing mode {framing!r}")
+    video_filter = f"fps={mode.fps},{resize_filter}"
     command = [
         # The duration control describes the transmission length, not a
         # maximum imposed by the selected clip. Repeat a short file so ffmpeg

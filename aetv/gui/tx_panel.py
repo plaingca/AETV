@@ -1,21 +1,25 @@
-"""Transmit pane: webcam / file source, preview, send with CAT PTT."""
+"""Transmit pane: webcam, desktop, and prepared clip sources."""
 
 from __future__ import annotations
 
 import math
 import threading
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QRubberBand,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -24,9 +28,68 @@ from PySide6.QtWidgets import (
 from aetv.audio_io import AudioUnavailable, list_audio_devices
 from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.hfchannel import CHANNEL_PROFILES
-from aetv.source import CameraFrameBuffer, list_cameras
+from aetv.source import (
+    CameraFrameBuffer,
+    ClipEdit,
+    PreparedClip,
+    ScreenCaptureSpec,
+    iter_screen_capture,
+    list_cameras,
+    list_windows,
+)
 from aetv.station import TxEngine, TxPhase, TxState
+from aetv.gui.clip_editor import ClipEditorDialog
+from aetv.gui.clip_grid import ClipGrid
 from aetv.gui.widgets import ElidingLabel, VideoView
+
+
+class _RegionSelector(QDialog):
+    """A translucent virtual-desktop overlay used to drag a capture region."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.origin = QPoint()
+        self.selection: QRect | None = None
+        self.band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setGeometry(QGuiApplication.primaryScreen().virtualGeometry())
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 105))
+        painter.setPen(QColor("white"))
+        painter.drawText(
+            self.rect().adjusted(20, 20, -20, -20),
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+            "Drag around the area to capture · Esc cancels",
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.origin = event.position().toPoint()
+            self.band.setGeometry(QRect(self.origin, self.origin))
+            self.band.show()
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.band.setGeometry(QRect(self.origin, event.position().toPoint()).normalized())
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        local = self.band.geometry().normalized()
+        if local.width() < 2 or local.height() < 2:
+            self.reject()
+            return
+        top_left = self.mapToGlobal(local.topLeft())
+        self.selection = QRect(top_left, local.size())
+        self.accept()
 
 
 class TransmitPanel(QWidget):
@@ -43,6 +106,9 @@ class TransmitPanel(QWidget):
     _workerFinished = Signal()
     _camerasArrived = Signal(object)
     _outputsArrived = Signal(object)
+    _clipProgress = Signal(int, float, int)
+    _clipReady = Signal(int, object, int)
+    _clipFailed = Signal(int, str, int)
     loopbackVideo = Signal(object, object)
 
     def __init__(self, station, parent=None):
@@ -67,6 +133,10 @@ class TransmitPanel(QWidget):
         self._camera_preview_queued = threading.Event()
         self._camera_load_active = False
         self._output_load_active = False
+        self._prepared_clips: dict[int, PreparedClip] = {}
+        self._clip_edits: dict[int, ClipEdit] = {}
+        self._selected_clip: int | None = None
+        self._clip_generation = 0
         self._stateArrived.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._errorArrived.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         self._previewArrived.connect(self._show_preview, Qt.ConnectionType.QueuedConnection)
@@ -77,6 +147,9 @@ class TransmitPanel(QWidget):
         self._workerFinished.connect(self._on_worker_finished, Qt.ConnectionType.QueuedConnection)
         self._camerasArrived.connect(self._apply_cameras, Qt.ConnectionType.QueuedConnection)
         self._outputsArrived.connect(self._apply_outputs, Qt.ConnectionType.QueuedConnection)
+        self._clipProgress.connect(self._apply_clip_progress, Qt.ConnectionType.QueuedConnection)
+        self._clipReady.connect(self._apply_clip_ready, Qt.ConnectionType.QueuedConnection)
+        self._clipFailed.connect(self._apply_clip_failed, Qt.ConnectionType.QueuedConnection)
         self._file_path = ""
         self._build()
 
@@ -124,8 +197,18 @@ class TransmitPanel(QWidget):
         if problems:
             self.status.setText(problems[0])
             return
-        source = "webcam" if self.cam_radio.isChecked() else self._file_path
-        if source == "webcam":
+        if self.cam_radio.isChecked():
+            source = "webcam"
+        elif self.screen_radio.isChecked():
+            source = self.screen_target.currentData()
+            if not isinstance(source, ScreenCaptureSpec):
+                self.status.setText("choose a screen capture target")
+                return
+        elif self._selected_clip is not None and self._selected_clip in self._prepared_clips:
+            source = self._prepared_clips[self._selected_clip]
+        else:
+            source = self._file_path
+        if source == "webcam" or isinstance(source, ScreenCaptureSpec):
             # Hand the camera from the Qt preview subscriber to TX before the
             # encoder/CUDA worker starts.  Leaving queued QImage paints active
             # during this transition has caused native Qt/Media Foundation
@@ -134,7 +217,7 @@ class TransmitPanel(QWidget):
             self._preview_restart_pending = False
             if not self._stop_preview_blocking():
                 self._webcam_tx_active = False
-                self.status.setText("Webcam preview did not stop; transmit was not started")
+                self.status.setText("Live preview did not stop; transmit was not started")
                 return
             self._camera_preview_queued.clear()
         self.send_button.setEnabled(False)
@@ -156,7 +239,7 @@ class TransmitPanel(QWidget):
         self.engine.cancel()
         self.status.setText("cancelling…")
 
-    def _run_send(self, source: str) -> None:
+    def _run_send(self, source: str | ScreenCaptureSpec | PreparedClip) -> None:
         try:
             self._start_gate.wait()
             if self._cancel_requested.is_set():
@@ -174,7 +257,7 @@ class TransmitPanel(QWidget):
 
     def _on_worker_finished(self) -> None:
         self._webcam_tx_active = False
-        if self.cam_radio.isChecked():
+        if self.cam_radio.isChecked() or self.screen_radio.isChecked():
             self._start_preview()
 
     def allow_transmit(self) -> None:
@@ -184,6 +267,7 @@ class TransmitPanel(QWidget):
     def _build(self) -> None:
         self.preview = VideoView("Choose a webcam or a video file")
         self.cam_radio = QRadioButton("Webcam")
+        self.screen_radio = QRadioButton("Screen")
         self.file_radio = QRadioButton("Video file")
         self.cam_radio.setChecked(True)
         self.camera = QComboBox()
@@ -192,6 +276,11 @@ class TransmitPanel(QWidget):
         self.file_button = QPushButton("File…")
         self.file_button.clicked.connect(self._choose_file)
         self.file_label = ElidingLabel("No file selected")
+        self.screen_target = QComboBox()
+        refresh_screen = QPushButton("Refresh")
+        refresh_screen.clicked.connect(self._fill_screen_targets)
+        region_button = QPushButton("Region…")
+        region_button.clicked.connect(self._choose_region)
         self.mode = QComboBox()
         for name in RELEASE_MODES:
             self.mode.addItem(RELEASE_MODE_LABELS[name], name)
@@ -213,6 +302,8 @@ class TransmitPanel(QWidget):
         self.status = ElidingLabel("Ready")
 
         self.cam_radio.toggled.connect(self._on_source_toggled)
+        self.screen_radio.toggled.connect(self._on_source_toggled)
+        self.file_radio.toggled.connect(self._on_source_toggled)
 
         self._strip = QWidget()
         strip = QVBoxLayout(self._strip)
@@ -221,6 +312,11 @@ class TransmitPanel(QWidget):
         src.addWidget(self.cam_radio)
         src.addWidget(self.camera, 1)
         src.addWidget(refresh_cam)
+        screen_row = QHBoxLayout()
+        screen_row.addWidget(self.screen_radio)
+        screen_row.addWidget(self.screen_target, 1)
+        screen_row.addWidget(region_button)
+        screen_row.addWidget(refresh_screen)
         file_row = QHBoxLayout()
         file_row.addWidget(self.file_radio)
         file_row.addWidget(self.file_button)
@@ -258,6 +354,7 @@ class TransmitPanel(QWidget):
         buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
         strip.addLayout(src)
+        strip.addLayout(screen_row)
         strip.addLayout(file_row)
         strip.addLayout(mode_row)
         strip.addLayout(out_row)
@@ -266,21 +363,48 @@ class TransmitPanel(QWidget):
         strip.addLayout(buttons)
         strip.addWidget(self.status)
 
+        self.clip_grid = ClipGrid()
+        self.clip_grid.fileChosen.connect(self._set_clip)
+        self.clip_grid.activated.connect(self._activate_clip)
+        self.clip_grid.hovered.connect(self._preview_clip)
+        self.clip_grid.editRequested.connect(self._edit_clip)
+        self.clip_grid.removeRequested.connect(self._remove_clip)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.preview, 1)
+        layout.addWidget(QLabel("Prepared clips — drop files; hover to preview; click to transmit"))
+        layout.addWidget(self.clip_grid, 0)
         layout.addWidget(self._strip, 0)
+        self._fill_screen_targets()
+        stored_bank = self.station.settings.clip_bank
+        if stored_bank:
+            for index, value in enumerate(stored_bank[: len(self.clip_grid.cells)]):
+                if not value or not value.get("path"):
+                    continue
+                edit = ClipEdit.from_dict(value)
+                self._clip_edits[index] = edit
+                self._show_clip_edit(index, edit)
+        else:
+            for index, path in enumerate(
+                (self.station.settings.clip_paths or [])[: len(self.clip_grid.cells)]
+            ):
+                if path:
+                    edit = ClipEdit(str(path), 0.0, float(self.gops.value()), "crop")
+                    self._clip_edits[index] = edit
+                    self._show_clip_edit(index, edit)
         self.sync_from_config()
         self.camera.currentIndexChanged.connect(self._restart_preview)
+        self.screen_target.currentIndexChanged.connect(self._restart_preview)
         self.mode.currentIndexChanged.connect(self._on_mode_changed)
         self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
         if (
-            self.cam_radio.isChecked()
+            (self.cam_radio.isChecked() or self.screen_radio.isChecked())
             and not self.transmitting()
             and not self._webcam_tx_active
         ):
-            self._start_preview()
+            self._restart_preview(0)
         else:
             self._stop_preview()
 
@@ -293,29 +417,39 @@ class TransmitPanel(QWidget):
             self._on_preview_stopped()
 
     def _start_preview(self) -> None:
-        if self.transmitting() or self._webcam_tx_active or not self.cam_radio.isChecked():
+        live_source = self.cam_radio.isChecked() or self.screen_radio.isChecked()
+        if self.transmitting() or self._webcam_tx_active or not live_source:
             return
         if self._preview_thread is not None and self._preview_thread.is_alive():
             return
         self._preview_stop.clear()
         mode_name = self.mode.currentData() or self.station.settings.mode
         camera = int(self.camera.currentData() or 0)
+        screen = self.screen_target.currentData() if self.screen_radio.isChecked() else None
         self._preview_thread = threading.Thread(
             target=self._preview_loop,
-            args=(mode_name, camera),
+            args=(mode_name, camera, screen),
             daemon=True,
             name="webcam-preview",
         )
         self._preview_thread.start()
 
-    def _preview_loop(self, mode_name: str, camera: int) -> None:
+    def _preview_loop(
+        self, mode_name: str, camera: int, screen: ScreenCaptureSpec | None
+    ) -> None:
         try:
-            for frame in self._camera_frames.frames(
-                AETV_MODES[mode_name],
-                camera=camera,
-                should_stop=self._preview_stop.is_set,
-                latest=True,
-            ):
+            if screen is not None:
+                frames = iter_screen_capture(AETV_MODES[mode_name], screen)
+            else:
+                frames = self._camera_frames.frames(
+                    AETV_MODES[mode_name],
+                    camera=camera,
+                    should_stop=self._preview_stop.is_set,
+                    latest=True,
+                )
+            for frame in frames:
+                if self._preview_stop.is_set():
+                    break
                 # At most one camera paint may wait in Qt's event queue. The
                 # next delivery always comes from the newest buffered frame.
                 if not self._camera_preview_queued.is_set():
@@ -323,7 +457,8 @@ class TransmitPanel(QWidget):
                     self._cameraPreviewArrived.emit(frame)
         except Exception as error:
             if not self._preview_stop.is_set():
-                self._errorArrived.emit(f"Webcam preview unavailable: {error}")
+                label = "Screen" if screen is not None else "Webcam"
+                self._errorArrived.emit(f"{label} preview unavailable: {error}")
         finally:
             self._previewStopped.emit()
 
@@ -335,6 +470,9 @@ class TransmitPanel(QWidget):
 
     def _on_mode_changed(self, index: int) -> None:
         self._restart_preview(index)
+        self._selected_clip = None
+        if hasattr(self, "_prepared_clips"):
+            self._prepared_clips.clear()
         mode = self.mode.currentData()
         if mode and mode != self.station.settings.mode:
             self.send_button.setEnabled(False)
@@ -364,8 +502,198 @@ class TransmitPanel(QWidget):
         if not path:
             return
         self._file_path = path
+        self._selected_clip = None
         self.file_label.setText(path)
         self.file_radio.setChecked(True)
+
+    def _set_clip(self, index: int, path: str) -> None:
+        if not path:
+            return
+        self._open_clip_editor(index, path, None)
+
+    def _edit_clip(self, index: int) -> None:
+        edit = self._clip_edits.get(index)
+        if edit is not None:
+            self._open_clip_editor(index, edit.path, edit)
+
+    def _open_clip_editor(
+        self, index: int, path: str, initial: ClipEdit | None
+    ) -> None:
+        mode_name = str(self.mode.currentData() or self.station.settings.mode)
+        try:
+            dialog = ClipEditorDialog(
+                path,
+                AETV_MODES[mode_name],
+                initial=initial,
+                default_duration_s=float(self.gops.value()),
+                parent=self,
+            )
+        except Exception as error:
+            self.status.setText(f"Clip editor could not open the video: {error}")
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        edit = dialog.edit()
+        self._clip_edits[index] = edit
+        self._show_clip_edit(index, edit)
+        self._prepared_clips.pop(index, None)
+        self._selected_clip = None
+        self._save_clip_paths()
+        self._queue_clip_preparation()
+
+    def _show_clip_edit(self, index: int, edit: ClipEdit) -> None:
+        cell = self.clip_grid.cells[index]
+        cell.set_path(edit.path)
+        seconds = max(1, int(edit.duration_s))
+        cell.name.setText(f"{Path(edit.path).stem} · {seconds}s")
+
+    def _activate_clip(self, index: int) -> None:
+        cell = self.clip_grid.cells[index]
+        if not cell.path:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Choose clip {index + 1}",
+                "",
+                "Video (*.mp4 *.mkv *.mov *.avi *.webm);;All files (*)",
+            )
+            if path:
+                self._set_clip(index, path)
+            return
+        prepared = self._prepared_clips.get(index)
+        if prepared is None:
+            self.status.setText(f"{cell.name.text()} is still being prepared")
+            return
+        self._selected_clip = index
+        self._file_path = prepared.path
+        self.file_label.setText(f"Prepared: {prepared.path}")
+        self.file_radio.setChecked(True)
+        self.send()
+
+    def _preview_clip(self, index: int) -> None:
+        prepared = self._prepared_clips.get(index)
+        if prepared is not None and not self.transmitting():
+            self.preview.set_rgb(prepared.preview_frames, fps=2.0)
+
+    def _remove_clip(self, index: int) -> None:
+        self.clip_grid.cells[index].clear()
+        self._prepared_clips.pop(index, None)
+        self._clip_edits.pop(index, None)
+        if self._selected_clip == index:
+            self._selected_clip = None
+        self._save_clip_paths()
+
+    def _save_clip_paths(self) -> None:
+        self.station.settings.clip_paths = [cell.path for cell in self.clip_grid.cells]
+        self.station.settings.clip_bank = [
+            self._clip_edits[index].to_dict() if index in self._clip_edits else {}
+            for index in range(len(self.clip_grid.cells))
+        ]
+
+    def model_ready(self) -> None:
+        """Refresh prepared clips after the requested codec becomes available."""
+        self._queue_clip_preparation()
+
+    def _queue_clip_preparation(self) -> None:
+        self._clip_generation += 1
+        generation = self._clip_generation
+        self._selected_clip = None
+        self._prepared_clips.clear()
+        codec = self.station.codec
+        mode_name = str(self.mode.currentData() or self.station.settings.mode)
+        if codec is None or codec.mode.name != mode_name:
+            return
+        edits = list(self._clip_edits.items())
+        if not edits:
+            return
+        for index, _edit in edits:
+            self.clip_grid.cells[index].set_progress(0.0)
+        threading.Thread(
+            target=self._prepare_clip_batch,
+            args=(edits, mode_name, generation),
+            daemon=True,
+            name="aetv-clip-preparer",
+        ).start()
+
+    def _prepare_clip_batch(
+        self,
+        edits: list[tuple[int, ClipEdit]],
+        mode_name: str,
+        generation: int,
+    ) -> None:
+        for index, edit in edits:
+            if generation != self._clip_generation:
+                return
+            try:
+                n_gops = max(1, int(edit.duration_s))
+                prepared = self.engine.prepare_clip(
+                    edit.path,
+                    mode_name,
+                    n_gops,
+                    on_progress=lambda progress, slot=index: self._clipProgress.emit(
+                        slot, progress, generation
+                    ),
+                    start_s=edit.start_s,
+                    framing=edit.framing,
+                )
+            except Exception as error:
+                self._clipFailed.emit(index, str(error), generation)
+            else:
+                self._clipReady.emit(index, prepared, generation)
+
+    def _apply_clip_progress(self, index: int, progress: float, generation: int) -> None:
+        if generation == self._clip_generation:
+            self.clip_grid.cells[index].set_progress(progress)
+
+    def _apply_clip_ready(self, index: int, prepared: PreparedClip, generation: int) -> None:
+        if generation != self._clip_generation:
+            return
+        self._prepared_clips[index] = prepared
+        self.clip_grid.cells[index].set_ready(prepared.preview_frames)
+        self.status.setText(f"{self.clip_grid.cells[index].name.text()} ready")
+
+    def _apply_clip_failed(self, index: int, message: str, generation: int) -> None:
+        if generation == self._clip_generation:
+            self.clip_grid.cells[index].set_error(message)
+
+    def _fill_screen_targets(self) -> None:
+        current = self.screen_target.currentData() if hasattr(self, "screen_target") else None
+        self.screen_target.blockSignals(True)
+        self.screen_target.clear()
+        for index, screen in enumerate(QGuiApplication.screens()):
+            rect = screen.geometry()
+            spec = ScreenCaptureSpec(
+                f"Monitor {index + 1}: {screen.name()}",
+                (rect.x(), rect.y(), rect.x() + rect.width(), rect.y() + rect.height()),
+            )
+            self.screen_target.addItem(spec.name, spec)
+        for window in list_windows():
+            self.screen_target.addItem(f"Window: {window.name}", window)
+        if isinstance(current, ScreenCaptureSpec):
+            match = next(
+                (
+                    index
+                    for index in range(self.screen_target.count())
+                    if self.screen_target.itemData(index) == current
+                ),
+                -1,
+            )
+            if match >= 0:
+                self.screen_target.setCurrentIndex(match)
+        self.screen_target.blockSignals(False)
+
+    def _choose_region(self) -> None:
+        selector = _RegionSelector(self)
+        if selector.exec() != QDialog.DialogCode.Accepted or selector.selection is None:
+            return
+        rect = selector.selection
+        x, y, width, height = rect.x(), rect.y(), rect.width(), rect.height()
+        spec = ScreenCaptureSpec(
+            f"Region {x},{y} {width}×{height}",
+            (x, y, x + width, y + height),
+        )
+        self.screen_target.addItem(spec.name, spec)
+        self.screen_target.setCurrentIndex(self.screen_target.count() - 1)
+        self.screen_radio.setChecked(True)
 
     def _fill_cameras(self) -> None:
         if self._camera_load_active:
@@ -480,7 +808,11 @@ class TransmitPanel(QWidget):
         # preview remains live while the decoded result plays in the RX pane.
         # Keep radio TX unchanged: painting there has previously destabilized
         # some Windows webcam/CUDA driver combinations.
-        if self.transmitting() and self.cam_radio.isChecked() and not self.emulating():
+        if (
+            self.transmitting()
+            and (self.cam_radio.isChecked() or self.screen_radio.isChecked())
+            and not self.emulating()
+        ):
             return
         self.preview.set_rgb(frames)
 

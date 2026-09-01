@@ -41,7 +41,15 @@ from .modem import (
 )
 from .ringbuffer import RingBuffer
 from .settings import StationSettings
-from .source import collect_gops, iter_video_file, iter_webcam, write_mp4
+from .source import (
+    PreparedClip,
+    ScreenCaptureSpec,
+    collect_gops,
+    iter_screen_capture,
+    iter_video_file,
+    iter_webcam,
+    write_mp4,
+)
 from .sync import SyncError
 
 WATCHDOG_MARGIN_S = 15.0
@@ -291,7 +299,48 @@ class TxEngine:
         )
         self._on_state(self.state)
 
-    def transmit(self, source: str) -> bool:
+    def prepare_clip(
+        self,
+        path: str,
+        mode_name: str,
+        n_gops: int,
+        on_progress=None,
+        *,
+        start_s: float = 0.0,
+        framing: str = "crop",
+    ) -> PreparedClip:
+        """Decode and neural-encode a clip before it is selected for transmit."""
+        codec = self.station.require_codec()
+        if codec.mode.name != mode_name:
+            raise RuntimeError(f"{mode_name} checkpoint is not loaded")
+        count = max(1, int(n_gops))
+        frames = collect_gops(
+            iter_video_file(
+                path,
+                codec.mode,
+                start_s=start_s,
+                frames=count * codec.mode.gop_frames,
+                framing=framing,
+            ),
+            codec.mode,
+        )
+        latents: list[np.ndarray] = []
+        for index in range(count):
+            start = index * codec.mode.gop_frames
+            with self.station.codec_lock:
+                latents.append(codec.encode_gop(frames[start : start + codec.mode.gop_frames]))
+            if on_progress is not None:
+                on_progress((index + 1) / count)
+        preview_count = min(8, len(frames))
+        preview_indices = np.linspace(0, len(frames) - 1, preview_count, dtype=int)
+        return PreparedClip(
+            path=str(path),
+            mode_name=mode_name,
+            latents=tuple(latents),
+            preview_frames=np.ascontiguousarray(frames[preview_indices]),
+        )
+
+    def transmit(self, source: str | ScreenCaptureSpec | PreparedClip) -> bool:
         self._cancel.clear()
         self.gop_timings = []
         settings = self.station.settings
@@ -301,8 +350,31 @@ class TxEngine:
         try:
             codec = self.station.require_codec()
             n_gops = settings.gops
-            if source.lower() in {"webcam", "cam", "camera"}:
+            if isinstance(source, PreparedClip):
+                if source.mode_name != codec.mode.name:
+                    raise RuntimeError(
+                        f"prepared clip uses {source.mode_name}, but {codec.mode.name} is loaded"
+                    )
+                n_gops = source.gops
+                self.last_frames = source.preview_frames
+                self._on_preview(source.preview_frames)
+
+                def prepared_gops():
+                    for index, latent in enumerate(source.latents):
+                        if self._cancel.is_set():
+                            return
+                        self._set(
+                            TxPhase.MODULATING,
+                            index / max(1, n_gops),
+                            f"prepared GOP {index + 1}/{n_gops}",
+                        )
+                        yield latent
+
+                encoded_gops = prepared_gops()
+            elif isinstance(source, (str,)) and source.lower() in {"webcam", "cam", "camera"}:
                 encoded_gops = self._live_webcam_gops(codec, n_gops)
+            elif isinstance(source, ScreenCaptureSpec):
+                encoded_gops = self._live_screen_gops(codec, n_gops, source)
             else:
                 frames = self._capture(source, codec)
                 if frames is None:
@@ -358,7 +430,7 @@ class TxEngine:
                 )
                 tx_metadata = {
                     "started_at": time.time(),
-                    "source": source,
+                    "source": source.path if isinstance(source, PreparedClip) else str(source),
                     "mode": codec.mode.name,
                     "callsign": settings.callsign,
                     "sample_rate": codec.mode.geometry.fs,
@@ -810,6 +882,38 @@ class TxEngine:
             close = getattr(camera_frames, "close", None)
             if close is not None:
                 close()
+
+    def _live_screen_gops(self, codec, n_gops: int, spec: ScreenCaptureSpec):
+        """Capture and encode desktop GOPs incrementally like a webcam."""
+        mode = codec.mode
+        frames = iter_screen_capture(mode, spec)
+        for index in range(n_gops):
+            started = time.perf_counter()
+            gop_frames = []
+            for _ in range(mode.gop_frames):
+                if self._cancel.is_set():
+                    return
+                gop_frames.append(next(frames))
+            gop = np.stack(gop_frames, axis=0)
+            self.last_frames = gop
+            self._on_preview(gop)
+            self._set(
+                TxPhase.CAPTURING,
+                index / max(1, n_gops),
+                f"screen GOP {index + 1}/{n_gops}: encoding",
+            )
+            with self.station.codec_lock:
+                encode_started = time.perf_counter()
+                latent = codec.encode_gop(gop)
+            self.gop_timings.append(
+                {
+                    "gop": index + 1,
+                    "device": str(getattr(codec, "device", "unknown")),
+                    "capture_s": encode_started - started,
+                    "encode_s": time.perf_counter() - encode_started,
+                }
+            )
+            yield latent
 
     def _key(self, ptt, on: bool) -> bool:
         try:

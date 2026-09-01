@@ -18,6 +18,7 @@ from aetv.config import AETV_MODES
 from aetv.kiwi import IqToPassband, iq_to_passband, kiwi_center_khz
 from aetv.ringbuffer import RingBuffer
 from aetv.settings import StationSettings, load_settings, normalize_callsign, save_settings
+from aetv.source import PreparedClip
 from aetv.station import (
     RxState,
     RxEngine,
@@ -628,3 +629,72 @@ def test_ptt_watchdog_fires(monkeypatch):
     assert fired == [True]
     dog.cancel()
     assert WATCHDOG_MARGIN_S == 15.0
+
+
+def test_prepare_clip_encodes_each_gop_in_background_format(monkeypatch):
+    mode = SimpleNamespace(name="V8", gop_frames=2)
+    frames = np.arange(4 * 2 * 3 * 3, dtype=np.uint8).reshape(4, 2, 3, 3)
+
+    class Codec:
+        def __init__(self):
+            self.mode = mode
+            self.encoded = []
+
+        def encode_gop(self, gop):
+            self.encoded.append(gop.copy())
+            return np.array([len(self.encoded)], dtype=np.float32)
+
+    codec = Codec()
+    station = SimpleNamespace(
+        codec_lock=threading.Lock(),
+        require_codec=lambda: codec,
+    )
+    monkeypatch.setattr("aetv.station.iter_video_file", lambda *_args, **_kwargs: frames)
+    progress = []
+
+    prepared = TxEngine(station).prepare_clip("show.mp4", "V8", 2, progress.append)
+
+    assert prepared.gops == 2
+    assert len(codec.encoded) == 2
+    assert prepared.preview_frames.shape == frames.shape
+    assert progress == [0.5, 1.0]
+
+
+def test_prepared_clip_transmit_bypasses_neural_encoder(monkeypatch):
+    mode = SimpleNamespace(
+        name="V8",
+        gop_frames=2,
+        geometry=SimpleNamespace(fs=8000),
+    )
+
+    class Codec:
+        def __init__(self):
+            self.mode = mode
+
+        def encode_gop(self, _gop):
+            raise AssertionError("prepared transmission must not encode again")
+
+    settings = StationSettings(mode="V8", tx_channel_profile="clean", debug_capture=False)
+    station = Station(settings)
+    station.codec = Codec()
+    prepared = PreparedClip(
+        "show.mp4",
+        "V8",
+        (np.array([1.0]), np.array([2.0])),
+        np.zeros((2, 2, 3, 3), dtype=np.uint8),
+    )
+    received = []
+    monkeypatch.setattr(
+        "aetv.station.modulate_continuous_chunks",
+        lambda encoded, **_kwargs: encoded,
+    )
+    engine = TxEngine(station)
+
+    def send(chunks, *_args):
+        received.extend(np.asarray(chunk).copy() for chunk in chunks)
+        return True
+
+    engine._emulated_send_stream = send
+
+    assert engine.transmit(prepared)
+    assert [item.tolist() for item in received] == [[0.7], [0.7]]

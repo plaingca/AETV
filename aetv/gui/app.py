@@ -282,6 +282,7 @@ class MainWindow(QMainWindow):
             "Install or inspect release models with File > Model Manager."
         )
         self.tx.send_button.setEnabled(True)
+        self.tx.model_ready()
         self.rx.start_button.setEnabled(True)
         self.waterfall.set_mode(self.settings.mode)
         self._log(f"codec ready: {text}")

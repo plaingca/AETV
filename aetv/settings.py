@@ -86,6 +86,8 @@ class StationSettings:
     audio_only: bool = False
 
     camera_index: int = 0
+    clip_paths: list[str] | None = None
+    clip_bank: list[dict] | None = None
     gops: int = 10
     receive_dir: str = ""
     autosave: bool = True
