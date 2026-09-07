@@ -67,7 +67,7 @@ def test_linux_folder_launch_passes_arguments_and_child_environment(monkeypatch,
             captured["environment"] = value
 
         def startDetached(self):
-            return started, 123
+            return started
 
     monkeypatch.setattr(desktop, "QProcess", Process)
     folder = tmp_path / "received clips & samples"
@@ -76,6 +76,22 @@ def test_linux_folder_launch_passes_arguments_and_child_environment(monkeypatch,
     assert captured["arguments"] == [str(folder.resolve())]
     assert not captured["environment"].contains("LD_LIBRARY_PATH")
     assert os.environ["LD_LIBRARY_PATH"] == "/aetv/_internal"
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_linux_folder_launch_uses_real_qprocess_result(monkeypatch, tmp_path, exists):
+    executable = sys.executable if exists else str(tmp_path / "missing-desktop-opener")
+
+    class Process(desktop.QProcess):
+        def setProgram(self, value):
+            super().setProgram(executable)
+
+        def setArguments(self, value):
+            super().setArguments(["-c", "pass"])
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(desktop, "QProcess", Process)
+    assert desktop.open_directory(tmp_path) is exists
 
 
 def test_other_platforms_keep_native_desktop_opening(monkeypatch, tmp_path):

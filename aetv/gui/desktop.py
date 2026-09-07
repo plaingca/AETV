@@ -40,5 +40,4 @@ def open_directory(folder: Path) -> bool:
     process.setProgram("xdg-open")
     process.setArguments([str(folder)])
     process.setProcessEnvironment(environment)
-    started, _pid = process.startDetached()
-    return started
+    return process.startDetached()
