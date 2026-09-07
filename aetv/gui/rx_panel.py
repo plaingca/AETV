@@ -10,8 +10,7 @@ import time
 
 import numpy as np
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -39,6 +38,7 @@ from aetv.propagation import (
 )
 from aetv.settings import normalize_callsign
 from aetv.station import RxEngine, RxState
+from aetv.gui.desktop import open_directory
 from aetv.gui.widgets import AudioLevelMeter, ElidingLabel, VideoView
 
 
@@ -434,12 +434,10 @@ class ReceivePanel(QWidget):
         self.status.setText(f"saved {path.name}")
 
     def open_saved_video_directory(self) -> None:
-        folder = self.station.settings.receive_path()
         try:
+            folder = self.station.settings.receive_path()
             folder.mkdir(parents=True, exist_ok=True)
-            opened = QDesktopServices.openUrl(
-                QUrl.fromLocalFile(str(folder.resolve()))
-            )
+            opened = open_directory(folder)
         except Exception as error:
             self.status.setText(f"could not open saved video directory: {error}")
             return

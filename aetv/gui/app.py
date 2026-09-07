@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -591,7 +591,9 @@ class MainWindow(QMainWindow):
         self._tx_finished_while_stopping_rx = False
         self._emulation_active = False
 
+    @Slot(str)
     def _log(self, message: str) -> None:
+        # Station callbacks can run on workers; LogPane queues the widget write.
         stamp = time.strftime("%H:%M:%S")
         self.log.append_line(f"{stamp}  {message}")
 

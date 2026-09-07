@@ -7,7 +7,7 @@ import math
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -285,8 +285,11 @@ class PttLamp(QLabel):
 
 
 class LogPane(QPlainTextEdit):
+    _lineArrived = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._lineArrived.connect(self._append_line, Qt.ConnectionType.QueuedConnection)
         self.setReadOnly(True)
         self.setMaximumBlockCount(2000)
         self.setPlaceholderText("Station log")
@@ -294,6 +297,11 @@ class LogPane(QPlainTextEdit):
         self.setMinimumHeight(metrics.lineSpacing() * 6 + 8)
 
     def append_line(self, text: str) -> None:
+        """Accept logs from any thread; only the GUI thread may lay out text."""
+        self._lineArrived.emit(text)
+
+    @Slot(str)
+    def _append_line(self, text: str) -> None:
         self.appendPlainText(text)
         self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
