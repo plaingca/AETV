@@ -1589,8 +1589,10 @@ class RxEngine:
             mode_name=mode.name,
             # Virtual audio cables may servo their independent endpoint clocks.
             # Let the modem separate that harmless timing slope from EVM/SNR;
-            # Kiwi already has an exact-rate I/Q resampler upstream.
+            # Kiwi already has an exact-rate I/Q resampler upstream. Both
+            # sources still need guarded correction of waveform timing jumps.
             timing_tracking=self.station.settings.rx_source == "soundcard",
+            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard"},
         )
 
     def _loop(self) -> None:

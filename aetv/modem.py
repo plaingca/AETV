@@ -16,11 +16,13 @@ import time
 
 import numpy as np
 from scipy import signal
+from scipy.ndimage import convolve1d
 
 from . import golay
 from . import beacon, framing, ofdm
 from .beacon import AETVBeaconResult, find_beacon_superframe, generate_beacon_chips
 from .config import (
+    ACQUIRE_MAX_BINS,
     AETV_MODES,
     AETV_MODES_BY_INDEX,
     AETVModeSpec,
@@ -76,6 +78,9 @@ class AETVDemodResult:
     # bridge can move its sampling instant without adding RF-like noise.
     pilot_evm_pct: float = float("nan")
     pilot_timing_ppm: float = float("nan")
+    # Detection evidence remains based on raw pilots when equalization denoises
+    # them; shrinking noise must not make a genuine weak signal fail acquisition.
+    pilot_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,8 @@ def _payload_presence_rejection(
     result: AETVDemodResult, payload_confidence: float
 ) -> str | None:
     """Reject energy that lacks joint OFDM structure and usable payload."""
+    if result.pilot_confidence is not None:
+        payload_confidence = result.pilot_confidence
     if result.pilot_coherence < 0.09:
         return "payload pilot structure below 0.09 presence floor"
     if payload_confidence < 0.20:
@@ -302,6 +309,24 @@ class _ContinuousTxConditioner:
         return y.astype(np.float32)
 
 
+def _supported_timing_slopes(cross: np.ndarray, centered: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Accept timing fits only when a coherent linear phase ramp supports them."""
+    phase = np.unwrap(np.angle(cross), axis=-1)
+    slopes = np.sum(phase * centered, axis=-1) / max(float(np.sum(centered**2)), 1e-18)
+    total = np.maximum(np.sum(np.abs(cross), axis=-1), 1e-18)
+    uncorrected = np.abs(np.sum(cross, axis=-1)) / total
+    aligned = cross * np.exp(-1j * slopes[..., None] * centered)
+    coherence = np.abs(np.sum(aligned, axis=-1)) / total
+    # Eight pilots/second and the existing +/-2500 ppm tracking range.
+    max_slope = 2 * np.pi * 0.125 * 2500 / 1e6
+    supported = (
+        (coherence >= 0.80)
+        & (coherence >= uncorrected)
+        & (np.abs(slopes) <= max_slope)
+    )
+    return np.where(supported, slopes, 0.0), supported
+
+
 def _payload_noise_variances(
     h_pilots: np.ndarray,
     latent_carriers: int,
@@ -339,9 +364,9 @@ def _payload_noise_variances(
         geom = BANDS[band]
         frequencies = geom.carrier0_hz + RS * np.arange(latent_carriers)
         centered = frequencies - float(np.mean(frequencies))
-        denominator = float(np.sum(centered**2))
-        phase = np.unwrap(np.angle(following * np.conj(previous)), axis=2)
-        slopes = np.sum(phase * centered, axis=2) / max(denominator, 1e-18)
+        slopes, _supported = _supported_timing_slopes(
+            following * np.conj(previous), centered
+        )
         aligned_following *= np.exp(-1j * slopes[..., None] * centered)
     differences = aligned_following - previous
     noise = 0.5 * np.mean(np.abs(differences) ** 2, axis=(1, 2))
@@ -385,6 +410,78 @@ def _interpolate_channel_phase_aware(
     return magnitude * np.exp(1j * phase)
 
 
+def _denoise_pilot_channels(h_pilots: np.ndarray, noise_variance: float) -> np.ndarray:
+    """Reduce pilot noise without imposing a flat or short-delay channel.
+
+    Remove the bulk frequency phase slope before averaging nearby carriers.
+    Select a small smoothing kernel and its shrinkage from the observed
+    residual and the *raw* pilot noise estimate. Large channel curvature or
+    low noise therefore reduces smoothing rather than erasing multipath.
+    These estimates are only for equalization; sync/presence diagnostics must
+    continue to use the unfiltered pilots.
+    """
+    pilots = np.asarray(h_pilots)
+    if pilots.ndim != 2 or pilots.shape[1] < 3:
+        return pilots
+    power = float(np.mean(np.abs(pilots) ** 2))
+    if noise_variance <= max(power, 1e-18) * 1e-8:
+        return pilots
+    slopes = np.angle(np.sum(pilots[:, 1:] * np.conj(pilots[:, :-1]), axis=1))
+    rotation = np.exp(1j * slopes[:, None] * np.arange(pilots.shape[1]))
+    aligned = pilots / rotation
+    best_risk = 0.0
+    best = aligned
+    for kernel in (
+        np.array([0.25, 0.5, 0.25]),
+        np.array([1, 4, 6, 4, 1]) / 16.0,
+        np.ones(7) / 7.0,
+    ):
+        smoothed = convolve1d(aligned, kernel, axis=1, mode="nearest")
+        residual = float(np.mean(np.abs(smoothed - aligned) ** 2))
+        center = float(kernel[len(kernel) // 2])
+        # Nearest-value padding adds diagonal weight at the two endpoints.
+        trace = center + (1.0 - center) / pilots.shape[1]
+        reduction = float(noise_variance) * (1.0 - trace)
+        strength = float(np.clip(reduction / max(residual, 1e-18), 0.0, 1.0))
+        risk = strength**2 * residual - 2.0 * strength * reduction
+        if risk < best_risk:
+            best_risk = risk
+            best = aligned + strength * (smoothed - aligned)
+    return best * rotation
+
+
+def _raw_pilot_confidence(
+    pilots: np.ndarray, noise_variance: float, latent_carriers: int
+) -> float:
+    """Keep the established presence test independent of channel denoising."""
+    values = np.asarray(pilots)[:FRAMES_PER_GOP, :latent_carriers]
+    magnitudes = np.abs(values)
+    following = np.concatenate([magnitudes[1:], magnitudes[-1:]])
+    fractions = np.arange(1, DATA_SYMS_PER_FRAME + 1) / SYMS_PER_FRAME
+    power = (
+        (1 - fractions[None, :, None]) * magnitudes[:, None, :]
+        + fractions[None, :, None] * following[:, None, :]
+    ) ** 2
+    return float(np.mean(power / np.maximum(power + noise_variance, 1e-18)))
+
+
+def _interpolate_payload_channel(
+    before: np.ndarray, after: np.ndarray, fraction: float
+) -> np.ndarray:
+    """Interpolate complex fading after separating common carrier rotation.
+
+    Interpolating each carrier's magnitude and phase independently bridges
+    deep fades with an unrealistically strong channel. Complex interpolation
+    permits cancellation; removing common rotation first still preserves gain
+    when the whole carrier bank rotates together.
+    """
+    common_phase = float(np.angle(np.vdot(before, after)))
+    aligned_after = after * np.exp(-1j * common_phase)
+    return ((1.0 - fraction) * before + fraction * aligned_after) * np.exp(
+        1j * fraction * common_phase
+    )
+
+
 def _equalize_payload_symbol(
     received: np.ndarray,
     channel: np.ndarray,
@@ -403,6 +500,18 @@ def _equalize_payload_symbol(
     equalized = received * np.conj(channel) / np.maximum(power, floor)
     weights = np.clip(power / (power + float(noise_variance)), 0.0, 1.0)
     return equalized, weights
+
+
+def _cp_frequency_offset(
+    audio: np.ndarray, starts: np.ndarray, m: int, ncp: int, fs: int
+) -> float:
+    """Estimate fractional CFO from analytic cyclic-prefix repetitions."""
+    if len(starts) == 0:
+        return 0.0
+    analytic = signal.hilbert(audio)
+    indices = np.asarray(starts)[:, None] + np.arange(ncp)
+    cross = np.sum(analytic[indices + m] * np.conj(analytic[indices]))
+    return float(np.angle(cross) / (2 * np.pi * m / fs))
 
 
 def _header_aided_acquisitions(
@@ -443,11 +552,8 @@ def _header_aided_acquisitions(
     # 0.11.
     if timing_metric < 0.20:
         return []
-    cp_samples = correlation[symbol_offset::nsym]
-    fractional_cfo = (
-        float(np.angle(np.mean(cp_samples)) / (2.0 * np.pi * (m / fs)))
-        if cp_samples.size
-        else 0.0
+    fractional_cfo = _cp_frequency_offset(
+        values / peak, np.arange(symbol_offset, len(correlation), nsym), m, ncp, fs
     )
 
     pilot = ofdm.pilot_sequence(band)
@@ -806,7 +912,11 @@ def modulate_continuous_chunks(
 
 
 class StreamingDemodulator:
-    """Incremental GOP receiver with late-entry acquisition."""
+    """Incremental GOP receiver with late-entry acquisition.
+
+    ``boundary_tracking`` repairs small timing jumps using CP and pilot
+    evidence, independently of ``timing_tracking``'s sample-clock estimator.
+    """
 
     def __init__(
         self,
@@ -816,6 +926,7 @@ class StreamingDemodulator:
         continuous: bool = False,
         mode_name: str | None = None,
         timing_tracking: bool = False,
+        boundary_tracking: bool = False,
     ):
         self.band = band
         self.interleave = interleave
@@ -828,6 +939,7 @@ class StreamingDemodulator:
         self._last_accepted_preamble: int | None = None
         self.continuous = bool(continuous)
         self.timing_tracking = bool(timing_tracking)
+        self.boundary_tracking = bool(boundary_tracking)
         self._tracking_mode: AETVModeSpec | None = None
         self._tracking_freq_offset = 0.0
         self._tracking_bad_gops = 0
@@ -855,6 +967,20 @@ class StreamingDemodulator:
         self._tracking_pending.clear()
         self._tracking_expected_offset = 0
         self._tracking_rate_adjustment = 0.0
+
+    def _clear_beacon(self) -> None:
+        self.beacon_chips = np.zeros(0, dtype=np.float64)
+        self.beacon_repeated_chips = np.zeros(0, dtype=np.float64)
+        self.last_beacon = None
+        self._last_accepted_preamble = None
+
+    def _lose_tracking(self) -> None:
+        self._tracking_mode = None
+        self._header_aided_allowed = False
+        self._tracking_pending.clear()
+        self._tracking_expected_offset = 0
+        self._tracking_rate_adjustment = 0.0
+        self._clear_beacon()
 
     def _tracked_candidate(
         self,
@@ -907,14 +1033,15 @@ class StreamingDemodulator:
         payload_samples: int,
     ) -> int:
         """Advance to one CP before the next predicted payload boundary."""
-        if not self.timing_tracking:
+        if not (self.timing_tracking or self.boundary_tracking):
             consumed = payload_offset + payload_samples
             self._tracking_expected_offset = 0
         else:
             _geom, _fs, _m, ncp, _nsym, *_rest = _band_params(self.band)
             adjustment = 0.0
             if (
-                result is not None
+                self.timing_tracking
+                and result is not None
                 and result.pilot_coherence >= 0.20
                 and np.isfinite(result.pilot_timing_ppm)
             ):
@@ -968,8 +1095,8 @@ class StreamingDemodulator:
             self.beacon_chips = np.concatenate([self.beacon_chips, chips])[
                 -(3 * beacon.SUPERFRAME_LEN) :
             ]
-            found = find_beacon_superframe(self.beacon_chips)
-            if found is not None:
+            found = find_beacon_superframe(self.beacon_chips, expected_mode=result.mode.index)
+            if found is not None and found.mode_index == result.mode.index:
                 self.last_beacon = found
         if repeated_chips is not None and repeated_chips.size:
             if missing_gops:
@@ -982,8 +1109,8 @@ class StreamingDemodulator:
             self.beacon_repeated_chips = np.concatenate(
                 [self.beacon_repeated_chips, repeated_chips]
             )[-(3 * beacon.SUPERFRAME_LEN) :]
-            found = find_beacon_superframe(self.beacon_repeated_chips)
-            if found is not None:
+            found = find_beacon_superframe(self.beacon_repeated_chips, expected_mode=result.mode.index)
+            if found is not None and found.mode_index == result.mode.index:
                 self.last_beacon = found
         if self.last_beacon is not None:
             result.beacon = self.last_beacon
@@ -1007,15 +1134,22 @@ class StreamingDemodulator:
             return False
         window_start = len(self.buffer) - blind_minimum
         discard = window_start + blind.payload_start
+        retained = (
+            min(discard, _band_params(self.band)[3])
+            if self.boundary_tracking else 0
+        )
+        discard -= retained
         self.buffer = self.buffer[discard:]
         self.samples_consumed += discard
         self._start_tracking(self.expected_mode, blind.freq_offset)
+        self._tracking_expected_offset = retained
+        self._clear_beacon()
         self.last_beacon = blind.beacon
         self._last_accepted_preamble = None
         self._awaiting_blind = False
         self._debug(
             "blind_acquired",
-            stream_sample=int(self.samples_consumed),
+            stream_sample=int(self.samples_consumed + retained),
             metric=float(blind.metric),
             freq_offset_hz=float(blind.freq_offset),
             callsign=blind.beacon.callsign,
@@ -1055,6 +1189,59 @@ class StreamingDemodulator:
                     failure_reason = str(error)
 
                 realigned = False
+                if self.boundary_tracking:
+                    # Resampling cannot repair a timing jump elsewhere in the
+                    # RF/audio path. Keep a CP of history and
+                    # check nearby symbol timing even while pilots remain good
+                    # enough to pass presence detection. This check is separate
+                    # from the soundcard's supported sample-clock estimates.
+                    if len(self.buffer) < expected_offset + payload_samples + _ncp:
+                        break
+                    phase, cp_metric = _cp_timing_phase(
+                        self.buffer[: expected_offset + payload_samples + _ncp],
+                        tracking_mode.band,
+                    )
+                    shift = (
+                        (phase - expected_offset + _nsym // 2) % _nsym - _nsym // 2
+                    )
+                    candidate_offset = expected_offset + shift
+                    if (
+                        cp_metric >= 0.50
+                        and 4 <= abs(shift) <= _ncp
+                        and candidate_offset >= 0
+                    ):
+                        try:
+                            candidate = demodulate_tracked_gop(
+                                self.buffer[
+                                    candidate_offset : candidate_offset + payload_samples
+                                ],
+                                tracking_mode,
+                                self._tracking_freq_offset,
+                                interleave=self.interleave,
+                                timing_tracking=self.timing_tracking,
+                            )
+                        except SyncError:
+                            candidate = None
+                        if (
+                            candidate is not None
+                            and candidate.pilot_coherence >= 0.20
+                            and candidate.pilot_coherence >= (
+                                result.pilot_coherence + 0.05
+                                if result is not None else 0.20
+                            )
+                        ):
+                            result = candidate
+                            payload_offset = candidate_offset
+                            stream_sample = self.samples_consumed + payload_offset
+                            realigned = True
+                            self._debug(
+                                "tracking_realign",
+                                stream_sample=int(stream_sample),
+                                shift_samples=int(shift),
+                                cp_metric=float(cp_metric),
+                                pilot_coherence=float(result.pilot_coherence),
+                                timing_only=False,
+                            )
                 if (
                     self.timing_tracking
                     and (result is None or result.pilot_coherence < 0.09)
@@ -1118,11 +1305,7 @@ class StreamingDemodulator:
                                 f"{failure_reason}"
                             ),
                         )
-                        self._tracking_mode = None
-                        self._header_aided_allowed = False
-                        self._tracking_pending.clear()
-                        self._tracking_expected_offset = 0
-                        self._tracking_rate_adjustment = 0.0
+                        self._lose_tracking()
                     continue
 
                 self._consume_tracked(result, payload_offset, payload_samples)
@@ -1155,11 +1338,7 @@ class StreamingDemodulator:
                             stream_sample=int(stream_sample),
                             reason="three weak GOP intervals",
                         )
-                        self._tracking_mode = None
-                        self._header_aided_allowed = False
-                        self._tracking_pending.clear()
-                        self._tracking_expected_offset = 0
-                        self._tracking_rate_adjustment = 0.0
+                        self._lose_tracking()
                     continue
                 self._tracking_freq_offset = result.freq_offset
                 self._tracking_bad_gops = 0
@@ -1460,16 +1639,20 @@ class StreamingDemodulator:
                 self._awaiting_search_offset = 0
                 self._header_aided_allowed = False
                 break
-            self.buffer = self.buffer[needed:]
-            self.samples_consumed += needed
+            retained = _ncp if self.continuous and self.boundary_tracking else 0
+            consumed = needed - retained
+            self.buffer = self.buffer[consumed:]
+            self.samples_consumed += consumed
             missing_gops = self._accumulate_beacon(
                 result, candidate_sample, minimum + 2 * int(0.1 * fs)
             )
             if self.continuous:
                 self._start_tracking(result.mode, result.freq_offset)
+                self._tracking_expected_offset = retained
                 self._awaiting_blind = False
             self._debug(
                 "gop_accepted",
+                stream_sample=int(candidate_sample + preamble_samples + header_samples),
                 metric=float(result.sync_metric),
                 freq_offset_hz=float(result.freq_offset),
                 header_score=float(result.header_score),
@@ -1519,15 +1702,14 @@ def _pilot_temporal_diagnostics(
     if remove_timing:
         frequencies = geom.carrier0_hz + RS * np.arange(geom.latent_carriers)
         centered = frequencies - float(np.mean(frequencies))
-        denom = float(np.sum(centered**2))
-        phase = np.unwrap(np.angle(cross), axis=1)
-        slopes = phase @ centered / max(denom, 1e-18)  # radians / Hz
+        slopes, supported = _supported_timing_slopes(cross, centered)
         # A phase slope of 2*pi*f*dt corresponds to an FFT timing movement
         # dt.  Pilots are one 1,000-sample frame apart in every current band.
         sample_steps = slopes * geom.fs / (2.0 * np.pi)
-        timing_ppm = float(
-            np.median(sample_steps / (geom.fs / 8.0) * 1e6)
-        )
+        if np.count_nonzero(supported) > len(supported) // 2:
+            timing_ppm = float(
+                np.median(sample_steps[supported] / (geom.fs / 8.0) * 1e6)
+            )
         timing_phase = slopes[:, None] * centered[None, :]
         aligned_following *= np.exp(-1j * timing_phase)
     noise_var = 0.5 * float(
@@ -1614,6 +1796,10 @@ def blind_acquire_continuous_payload(
     frame_samples = SYMS_PER_FRAME * nsym
     if len(values) < 12 * fs:
         raise SyncError("blind acquisition needs 12 seconds of continuous payload")
+    peak = float(np.max(np.abs(values)))
+    if not np.isfinite(peak) or peak <= 1e-12:
+        raise SyncError("blind acquisition has no finite signal energy")
+    values = values / peak
 
     z = to_baseband(values, mode.geometry.fcenter_hz, fs)
     product = z[m:] * np.conj(z[:-m])
@@ -1633,30 +1819,63 @@ def blind_acquire_continuous_payload(
         raise SyncError(f"blind CP timing confidence too low ({timing_metric:.2f})")
 
     starts = list(range(symbol_offset, len(values) - nsym + 1, nsym))
-    symbols = np.array(
-        [ofdm.demod_window(z, start + ncp, band=mode.band) for start in starts]
-    )
+    # Real audio retains a conjugate image: lag-M correlation of it has no
+    # useful CFO phase when the center frequency is an integer multiple of RS.
+    # Use analytic audio for this estimate, then resolve whole-carrier offsets
+    # against the known pilot. Temporal coherent averaging before CFO removal
+    # cancels even a fraction-of-a-hertz offset over this twelve-second window.
+    fractional_cfo = _cp_frequency_offset(values, np.asarray(starts), m, ncp, fs)
+    useful_starts = np.asarray(starts) + ncp - DEMOD_BACKOFF
+    window_indices = useful_starts[:, None] + np.arange(m)
+    corrected = freq_correct(z, fractional_cfo, fs)
+    spectra = (2.0 / m) * np.fft.fft(corrected[window_indices], axis=1)
+    bins = np.rint(ofdm.baseband_frequencies(mode.band) / RS).astype(int)
     pilot = ofdm.pilot_sequence(mode.band)
-    pilot_scores = []
-    for phase in range(SYMS_PER_FRAME):
-        estimates = symbols[phase::SYMS_PER_FRAME] / pilot
-        coherent = np.sum(np.abs(np.mean(estimates, axis=0)) ** 2)
-        total = np.sum(np.mean(np.abs(estimates) ** 2, axis=0)) + 1e-12
-        pilot_scores.append(float(coherent / total))
-    pilot_phase = int(np.argmax(pilot_scores))
-    if pilot_scores[pilot_phase] < 0.20:
+    candidates = []
+    for carrier_offset in range(-ACQUIRE_MAX_BINS, ACQUIRE_MAX_BINS + 1):
+        candidate_symbols = spectra[:, (bins + carrier_offset) % m]
+        for phase in range(SYMS_PER_FRAME):
+            estimates = candidate_symbols[phase::SYMS_PER_FRAME] / pilot
+            candidates.append((_pilot_coherence(estimates), carrier_offset, phase))
+    pilot_score, carrier_offset, pilot_phase = max(candidates)
+    if pilot_score < 0.12:
         raise SyncError(
-            f"blind pilot confidence too low ({pilot_scores[pilot_phase]:.2f})"
+            f"blind pilot confidence too low ({pilot_score:.2f})"
         )
+    freq_offset = fractional_cfo + carrier_offset * RS
+    corrected = freq_correct(z, freq_offset, fs)
+    symbols = (2.0 / m) * np.fft.fft(corrected[window_indices], axis=1)[:, bins % m]
+    pilots = symbols[pilot_phase::SYMS_PER_FRAME] / pilot
+    freq_offset += _pilot_residual_cfo_hz(
+        pilots, mode.geometry.latent_carriers, frame_samples / fs
+    )
+    corrected = freq_correct(z, freq_offset, fs)
+    symbols = (2.0 / m) * np.fft.fft(corrected[window_indices], axis=1)[:, bins % m]
+    pilots = symbols[pilot_phase::SYMS_PER_FRAME] / pilot
+    complete = len(pilots) // FRAMES_PER_GOP * FRAMES_PER_GOP
+    noise_variance = float(np.median(_payload_noise_variances(
+        pilots[:complete], mode.geometry.latent_carriers, band=mode.band
+    )))
+    channels = _denoise_pilot_channels(pilots, noise_variance)
 
     logical_chips = []
     frame_starts = []
-    for index in range(pilot_phase, len(symbols) - DATA_SYMS_PER_FRAME, SYMS_PER_FRAME):
-        h_pilot = symbols[index] / pilot
-        denominator = np.abs(h_pilot) ** 2 + 1e-4
+    for frame, index in enumerate(range(
+        pilot_phase, len(symbols) - DATA_SYMS_PER_FRAME, SYMS_PER_FRAME
+    )):
+        h_pilot = channels[frame]
         frame_starts.append(starts[index])
         for data_index in range(1, 1 + DATA_SYMS_PER_FRAME):
-            equalized = symbols[index + data_index] * np.conj(h_pilot) / denominator
+            h_data = (
+                _interpolate_payload_channel(
+                    h_pilot, channels[frame + 1], data_index / SYMS_PER_FRAME
+                )
+                if frame + 1 < len(channels) else h_pilot
+            )
+            equalized, weights = _equalize_payload_symbol(
+                symbols[index + data_index], h_data, noise_variance
+            )
+            equalized = equalized * weights
             if mode.band == "U":
                 logical_chips.append(
                     0.25
@@ -1671,7 +1890,7 @@ def blind_acquire_continuous_payload(
                 logical_chips.append(
                     np.real(equalized[mode.geometry.beacon_carrier])
                 )
-    found = find_beacon_superframe(np.asarray(logical_chips), threshold=0.4)
+    found = find_beacon_superframe(np.asarray(logical_chips), threshold=0.4, expected_mode=mode.index)
     if found is None or found.mode_index != mode.index:
         raise SyncError("blind acquisition has not decoded a matching beacon yet")
 
@@ -1686,9 +1905,6 @@ def blind_acquire_continuous_payload(
     # Start from the newest complete GOP so late join catches up immediately.
     payload_start += ((len(values) - fs - payload_start) // fs) * fs
 
-    cp_samples = correlation[symbol_offset::nsym]
-    phase = float(np.angle(np.mean(cp_samples))) if cp_samples.size else 0.0
-    freq_offset = phase / (2.0 * np.pi * (m / fs))
     return BlindPayloadAcquisition(
         payload_start=int(payload_start),
         freq_offset=float(freq_offset),
@@ -1771,11 +1987,7 @@ def demodulate_gop_stream(
     # noncoherent across header time, so residual sub-hertz CFO cannot rotate
     # repeated observations into cancellation. It also uses all 160 carriers
     # directly instead of hard-decoding a prematurely averaged Golay word.
-    candidate_modes = (
-        (expected_mode,)
-        if expected_mode is not None
-        else tuple(AETV_MODES.values())
-    )
+    candidate_modes = tuple(AETV_MODES.values())
     for mode in candidate_modes:
         if mode.band != band:
             continue
@@ -1794,6 +2006,19 @@ def demodulate_gop_stream(
     if not valid_headers:
         raise SyncError("mode header rejected")
     header_score, mode = max(valid_headers, key=lambda item: item[0])
+    if expected_mode is not None:
+        expected_score = next(
+            (score for score, candidate in valid_headers if candidate == expected_mode),
+            None,
+        )
+        if expected_score is None:
+            raise SyncError(f"expected mode {expected_mode.name} does not use band {band}")
+        # Weak headers can use the operator's selected model as a prior. A
+        # strong contradictory header must not feed another mode's symbols to
+        # that model merely because its Golay word has a nonzero correlation.
+        if mode != expected_mode and header_score >= max(0.45, expected_score + 0.15):
+            raise SyncError(f"mode header identifies {mode.name}, expected {expected_mode.name}")
+        header_score, mode = expected_score, expected_mode
     header_floor = 0.045 if expected_mode is not None else 0.075
     if header_score < header_floor:
         raise SyncError(f"mode header confidence too low ({header_score:.2f})")
@@ -1865,6 +2090,12 @@ def demodulate_gop_stream(
         band=band,
         remove_timing=timing_tracking,
     )
+    equalizer_pilots = np.concatenate([
+        _denoise_pilot_channels(
+            h_pilot_arr[g * FRAMES_PER_GOP : (g + 1) * FRAMES_PER_GOP], noise
+        )
+        for g, noise in enumerate(noise_variances)
+    ])
 
     # Demodulate all data frames.
     for f in range(total_frames):
@@ -1878,7 +2109,7 @@ def demodulate_gop_stream(
             carrier_phase += alpha * phase_err + carrier_freq
 
         # Channel estimate H on pilot
-        h_f = h_pilot_arr[f]
+        h_f = equalizer_pilots[f]
         noise_variance = noise_variances[f // FRAMES_PER_GOP]
 
         # Equalize 4 data symbols in this frame
@@ -1894,8 +2125,8 @@ def demodulate_gop_stream(
             # This removes up to 100 ms of avoidable pilot age on fading paths.
             if f + 1 < total_frames and (f + 1) % FRAMES_PER_GOP:
                 fraction = (s + 1) / SYMS_PER_FRAME
-                h_data = _interpolate_channel_phase_aware(
-                    h_f, h_pilot_arr[f + 1], fraction
+                h_data = _interpolate_payload_channel(
+                    h_f, equalizer_pilots[f + 1], fraction
                 )
             else:
                 h_data = h_f
@@ -1907,22 +2138,23 @@ def demodulate_gop_stream(
 
             all_data_syms.append(eq_sym)
             all_data_weights.append(weight)
+            soft_symbol = eq_sym * weight
             if band == "U":
-                all_beacon_chips.append(np.real(eq_sym[geom.latent_carriers]))
-                all_beacon_chips.append(np.imag(eq_sym[geom.latent_carriers]))
-                all_beacon_chips.append(np.real(eq_sym[geom.beacon_carrier]))
-                all_beacon_chips.append(np.imag(eq_sym[geom.beacon_carrier]))
+                all_beacon_chips.append(np.real(soft_symbol[geom.latent_carriers]))
+                all_beacon_chips.append(np.imag(soft_symbol[geom.latent_carriers]))
+                all_beacon_chips.append(np.real(soft_symbol[geom.beacon_carrier]))
+                all_beacon_chips.append(np.imag(soft_symbol[geom.beacon_carrier]))
                 all_beacon_repeated_chips.append(
                     0.25
                     * (
-                        np.real(eq_sym[geom.latent_carriers])
-                        + np.imag(eq_sym[geom.latent_carriers])
-                        + np.real(eq_sym[geom.beacon_carrier])
-                        + np.imag(eq_sym[geom.beacon_carrier])
+                        np.real(soft_symbol[geom.latent_carriers])
+                        + np.imag(soft_symbol[geom.latent_carriers])
+                        + np.real(soft_symbol[geom.beacon_carrier])
+                        + np.imag(soft_symbol[geom.beacon_carrier])
                     )
                 )
             else:
-                all_beacon_chips.append(np.real(eq_sym[geom.beacon_carrier]))
+                all_beacon_chips.append(np.real(soft_symbol[geom.beacon_carrier]))
 
     snr_est, pilot_evm_pct, pilot_timing_ppm = _pilot_temporal_diagnostics(
         h_pilot_arr, band=band, remove_timing=timing_tracking
@@ -1932,7 +2164,7 @@ def demodulate_gop_stream(
     # Beacon decode
     soft_beacon = np.array(all_beacon_chips)
     soft_repeated_beacon = np.array(all_beacon_repeated_chips)
-    beacon_res = find_beacon_superframe(soft_beacon)
+    beacon_res = find_beacon_superframe(soft_beacon, expected_mode=mode.index)
 
     # Unpack GOPs
     gops_latents = []
@@ -1973,6 +2205,9 @@ def demodulate_gop_stream(
         ),
         pilot_evm_pct=pilot_evm_pct,
         pilot_timing_ppm=pilot_timing_ppm,
+        pilot_confidence=_raw_pilot_confidence(
+            h_pilot_arr, noise_variances[0], geom.latent_carriers
+        ),
     )
 
 
@@ -2050,10 +2285,11 @@ def demodulate_tracked_gop(
         band=mode.band,
         remove_timing=timing_tracking,
     )[0]
+    equalizer_pilots = _denoise_pilot_channels(pilot_array, noise_variance)
 
     for frame in range(FRAMES_PER_GOP):
         frame_sample = frame * frame_samples
-        h_f = pilot_array[frame]
+        h_f = equalizer_pilots[frame]
         for data_index in range(DATA_SYMS_PER_FRAME):
             symbol_sample = frame_sample + (1 + data_index) * nsym + ncp
             received = ofdm.demod_window(
@@ -2061,8 +2297,8 @@ def demodulate_tracked_gop(
             )
             if frame + 1 < FRAMES_PER_GOP:
                 fraction = (data_index + 1) / SYMS_PER_FRAME
-                h_data = _interpolate_channel_phase_aware(
-                    h_f, pilot_array[frame + 1], fraction
+                h_data = _interpolate_payload_channel(
+                    h_f, equalizer_pilots[frame + 1], fraction
                 )
             else:
                 h_data = h_f
@@ -2071,26 +2307,27 @@ def demodulate_tracked_gop(
             )
             all_data_syms.append(equalized)
             all_data_weights.append(weight)
+            soft_symbol = equalized * weight
             if mode.band == "U":
                 all_beacon_chips.extend(
                     (
-                        np.real(equalized[geom.latent_carriers]),
-                        np.imag(equalized[geom.latent_carriers]),
-                        np.real(equalized[geom.beacon_carrier]),
-                        np.imag(equalized[geom.beacon_carrier]),
+                        np.real(soft_symbol[geom.latent_carriers]),
+                        np.imag(soft_symbol[geom.latent_carriers]),
+                        np.real(soft_symbol[geom.beacon_carrier]),
+                        np.imag(soft_symbol[geom.beacon_carrier]),
                     )
                 )
                 all_beacon_repeated_chips.append(
                     0.25
                     * (
-                        np.real(equalized[geom.latent_carriers])
-                        + np.imag(equalized[geom.latent_carriers])
-                        + np.real(equalized[geom.beacon_carrier])
-                        + np.imag(equalized[geom.beacon_carrier])
+                        np.real(soft_symbol[geom.latent_carriers])
+                        + np.imag(soft_symbol[geom.latent_carriers])
+                        + np.real(soft_symbol[geom.beacon_carrier])
+                        + np.imag(soft_symbol[geom.beacon_carrier])
                     )
                 )
             else:
-                all_beacon_chips.append(np.real(equalized[geom.beacon_carrier]))
+                all_beacon_chips.append(np.real(soft_symbol[geom.beacon_carrier]))
 
     latents, weights = framing.unpack_gop_symbols(
         np.asarray(all_data_syms),
@@ -2100,7 +2337,7 @@ def demodulate_tracked_gop(
     )
     beacon_chips = np.asarray(all_beacon_chips)
     repeated_chips = np.asarray(all_beacon_repeated_chips)
-    beacon_result = find_beacon_superframe(beacon_chips)
+    beacon_result = find_beacon_superframe(beacon_chips, expected_mode=mode.index)
     snr_db, pilot_evm_pct, pilot_timing_ppm = _pilot_temporal_diagnostics(
         pilot_array, band=mode.band, remove_timing=timing_tracking
     )
@@ -2124,4 +2361,7 @@ def demodulate_tracked_gop(
         ),
         pilot_evm_pct=pilot_evm_pct,
         pilot_timing_ppm=pilot_timing_ppm,
+        pilot_confidence=_raw_pilot_confidence(
+            pilot_array, noise_variance, geom.latent_carriers
+        ),
     )

@@ -33,6 +33,7 @@ from aetv import (
     modulate_gop_stream,
 )
 from aetv import beacon, framing, ofdm
+from aetv.sync import SyncError
 from aetv.audio_io import StreamingIQToMono, iq_chunk_stream
 from aetv.config import PROTOCOL_VERSION, reference_noise_bandwidth_scale
 from aetv.hfchannel import (
@@ -50,6 +51,9 @@ from aetv.modem import (
 )
 from aetv.modem import (
     _interpolate_channel_phase_aware,
+    _interpolate_payload_channel,
+    _denoise_pilot_channels,
+    blind_acquire_continuous_payload,
     _payload_wave,
     _payload_noise_variances,
     _equalize_payload_symbol,
@@ -346,6 +350,7 @@ def test_soundcard_tracking_realigns_after_endpoint_buffer_insertion():
         continuous=True,
         mode_name="V8",
         timing_tracking=True,
+        boundary_tracking=True,
         on_debug=events.append,
     )
     recovered = []
@@ -382,6 +387,86 @@ def test_continuous_tx_clipping_matches_checkpoint_batch_contract():
     # Causal filtering shifts the preamble by its group delay; after acquisition
     # the payload distortion should be numerically the same as centered batch TX.
     assert np.mean((live_latents - batch_latents) ** 2) < 1e-8
+
+
+@pytest.mark.parametrize("shift", [-32, 32])
+@pytest.mark.parametrize("jump_after", [1, 4])
+@pytest.mark.parametrize("timing_tracking", [False, True])
+def test_boundary_tracking_repairs_small_timing_jump(shift, jump_after, timing_tracking):
+    """A partial-CP jump can corrupt video without losing pilot presence."""
+    mode = AETV_MODES["V8"]
+    rng = np.random.default_rng(20260906)
+    originals = [
+        rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+        for _ in range(12)
+    ]
+    chunks = list(modulate_continuous_chunks(originals, "V8", "VE7TEST"))
+    before = np.concatenate(chunks[:jump_after])
+    after = np.concatenate(chunks[jump_after:])
+    if shift < 0:
+        audio = np.concatenate([before, after[-shift:]])
+    else:
+        audio = np.concatenate([before, np.zeros(shift, dtype=np.float32), after])
+    events = []
+    receiver = StreamingDemodulator(
+        "W", continuous=True, mode_name="V8", boundary_tracking=True,
+        timing_tracking=timing_tracking,
+        on_debug=events.append,
+    )
+    decoded = []
+    for start in range(0, len(audio), 800):
+        decoded.extend(receiver.feed(audio[start:start + 800]))
+    assert len(decoded) == len(originals)
+    assert all(
+        np.corrcoef(original, result.gops_latents[0])[0, 1] > 0.90
+        for original, result in zip(originals[jump_after + 1:], decoded[jump_after + 1:])
+    )
+    assert decoded[-1].callsign == "VE7TEST"
+    if not timing_tracking:
+        assert all(np.isnan(result.pilot_timing_ppm) for result in decoded)
+    if shift < 0:
+        assert any(event["event"] == "tracking_realign" and
+                   abs(event["shift_samples"] - shift) <= 2 for event in events)
+    else:
+        # An earlier FFT window remains inside the CP; don't move a healthy
+        # boundary just because another correlation peak exists nearby.
+        assert not any(event["event"] == "tracking_realign" for event in events)
+    assert not any(event["event"] == "tracking_lost" for event in events)
+
+
+@pytest.mark.parametrize("ppm", [-500, 500])
+@pytest.mark.parametrize("mode_name", ["V0", "V8", "V7"])
+def test_soundcard_clock_tracking_and_boundary_correction_work_together(ppm, mode_name):
+    from scipy.signal import resample_poly
+
+    mode = AETV_MODES[mode_name]
+    rng = np.random.default_rng(519)
+    originals = [rng.standard_normal(mode.latents_per_gop).astype(np.float32) for _ in range(16)]
+    chunks = list(modulate_continuous_chunks(originals, mode_name, "VE7TEST"))
+    up, down = (2001, 2000) if ppm > 0 else (1999, 2000)
+    audio = resample_poly(np.concatenate(chunks), up, down)
+    jump_after = 6
+    jump_sample = round(sum(len(chunk) for chunk in chunks[:jump_after]) * up / down)
+    jump_samples = round(0.004 * mode.geometry.fs)
+    audio = np.concatenate([audio[:jump_sample], audio[jump_sample + jump_samples:]])
+    events = []
+    receiver = StreamingDemodulator(
+        mode.band, continuous=True, mode_name=mode_name, timing_tracking=True,
+        boundary_tracking=True, on_debug=events.append,
+    )
+    decoded = []
+    for start in range(0, len(audio), 733):
+        decoded.extend(receiver.feed(audio[start:start + 733]))
+    assert len(decoded) == len(originals)
+    assert all(
+        np.corrcoef(original, result.gops_latents[0])[0, 1] > 0.90
+        for original, result in zip(originals[jump_after + 1:], decoded[jump_after + 1:])
+    )
+    assert decoded[-1].callsign == "VE7TEST"
+    estimates = [result.pilot_timing_ppm for result in decoded if np.isfinite(result.pilot_timing_ppm)]
+    assert len(estimates) >= 8
+    assert np.median(estimates) == pytest.approx(-ppm, abs=80)
+    assert not any(event["event"] == "tracking_lost" for event in events)
 
 
 def test_payload_equalization_is_invariant_to_receive_level():
@@ -454,6 +539,7 @@ def test_continuous_soundcard_tail_does_not_emit_idle_hum_gops():
         continuous=True,
         mode_name="V8",
         timing_tracking=True,
+        boundary_tracking=True,
         on_debug=events.append,
     )
     decoded = []
@@ -544,6 +630,96 @@ def test_phase_aware_channel_interpolation_preserves_rotating_gain():
     assert np.angle(midpoint) == pytest.approx(np.full(16, 1.4), abs=1e-12)
 
 
+def test_payload_interpolation_preserves_common_rotation_and_selective_fades():
+    before = np.ones(45, dtype=np.complex128)
+    after = np.exp(2.8j) * before
+    midpoint = _interpolate_payload_channel(before, after, 0.5)
+    assert np.allclose(midpoint, np.exp(1.4j), atol=1e-12)
+    # One carrier crosses a multipath null while the rest of the bank is stable.
+    after = before.copy()
+    after[20] = -1.0
+    midpoint = _interpolate_payload_channel(before, after, 0.5)
+    assert abs(midpoint[20]) < 1e-12
+    assert np.allclose(midpoint[:20], 1.0)
+
+
+@pytest.mark.parametrize("delay_ms", [0.0, 0.6, 4.0])
+def test_pilot_denoising_reduces_noise_without_erasing_multipath(delay_ms):
+    rng = np.random.default_rng(731)
+    carriers = np.arange(45) * 50.0
+    h = 1.0 + 0.7 * np.exp(-2j * np.pi * carriers * delay_ms / 1000.0)
+    # Add an FFT-window phase slope, which must not cause carrier cancellation.
+    h *= np.exp(0.65j * np.arange(45))
+    clean = np.broadcast_to(h, (96, 45)).copy()
+    noise = 0.08
+    observed = clean + np.sqrt(noise / 2) * (
+        rng.standard_normal(clean.shape) + 1j * rng.standard_normal(clean.shape)
+    )
+    estimate = _denoise_pilot_channels(observed, noise)
+    assert np.mean(abs(estimate - clean) ** 2) < np.mean(abs(observed - clean) ** 2)
+    assert np.array_equal(_denoise_pilot_channels(clean, 1e-12), clean)
+
+
+@pytest.mark.parametrize("mode_name", ["V0", "V8", "V7"])
+@pytest.mark.parametrize("offset", [0.4, -75.0, 120.0])
+def test_blind_acquisition_corrects_cfo_on_quiet_late_entry(mode_name, offset):
+    mode = AETV_MODES[mode_name]
+    rng = np.random.default_rng(906)
+    originals = [
+        rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+        for _ in range(17)
+    ]
+    tx = np.concatenate(list(modulate_continuous_chunks(originals, mode_name, "VE7TEST")))
+    shifted = freq_shift(tx, offset, fs=mode.geometry.fs)
+    start = int(3.125 * mode.geometry.fs)
+    audio = shifted[start:start + 12 * mode.geometry.fs] * 1e-4
+    acquired = blind_acquire_continuous_payload(audio, mode)
+    assert acquired.freq_offset == pytest.approx(offset, abs=0.1)
+    assert acquired.beacon.callsign == "VE7TEST"
+    result = demodulate_tracked_gop(
+        audio[acquired.payload_start:acquired.payload_start + mode.geometry.fs],
+        mode, acquired.freq_offset,
+    )
+    recovered = result.gops_latents[0] * result.gops_weights[0]
+    assert max(np.corrcoef(recovered, original)[0, 1] for original in originals) > 0.90
+
+
+def test_new_transmission_does_not_inherit_previous_beacon_identity():
+    mode = AETV_MODES["V8"]
+    rng = np.random.default_rng(862)
+    gops = [rng.standard_normal(mode.latents_per_gop).astype(np.float32) for _ in range(7)]
+    first = np.concatenate(list(modulate_continuous_chunks(gops, "V8", "VE7OLD")))
+    second = np.concatenate(list(modulate_continuous_chunks(gops[:2], "V8", "VE7NEW")))
+    rx = StreamingDemodulator("W", continuous=True, mode_name="V8", boundary_tracking=True)
+    identified = rx.feed(first)
+    assert identified[-1].callsign == "VE7OLD"
+    rx.feed(np.zeros(4 * mode.geometry.fs, dtype=np.float32))
+    received = []
+    for start in range(0, len(second), 800):
+        received.extend(rx.feed(second[start:start + 800]))
+    assert len(received) == 2
+    assert all(result.callsign == "" and result.beacon is None for result in received)
+
+
+def test_strong_wrong_mode_header_cannot_feed_selected_model():
+    mode = AETV_MODES["V1"]
+    rng = np.random.default_rng(18)
+    latents = rng.standard_normal(mode.latents_per_gop).astype(np.float32)
+    tx = np.concatenate(list(modulate_continuous_chunks([latents], "V1", "VE7TEST")))
+    with pytest.raises(SyncError, match="mode header identifies V1, expected V8"):
+        demodulate_gop_stream(tx, band="W", expected_mode=AETV_MODES["V8"])
+
+
+def test_noisy_pilots_do_not_report_a_spurious_sample_clock():
+    rng = np.random.default_rng(612)
+    pilots = np.ones((8, BAND_W.carriers), dtype=complex)
+    pilots += 1.5 * (rng.standard_normal(pilots.shape) + 1j * rng.standard_normal(pilots.shape))
+    raw_snr, _, _ = _pilot_temporal_diagnostics(pilots, band="W")
+    corrected_snr, _, ppm = _pilot_temporal_diagnostics(pilots, band="W", remove_timing=True)
+    assert np.isnan(ppm)
+    assert corrected_snr == pytest.approx(raw_snr)
+
+
 def test_tracked_gop_refines_stale_frequency_offset_from_pilots():
     rng = np.random.default_rng(20260825)
     mode = AETV_MODES["V8"]
@@ -596,7 +772,10 @@ def test_continuous_v7_receiver_can_join_after_initial_header():
     )
 
 
-def test_continuous_v8_receiver_defers_false_preamble_and_blind_joins_with_audio():
+@pytest.mark.parametrize("boundary_tracking", [False, True])
+def test_continuous_v8_receiver_defers_false_preamble_and_blind_joins_with_audio(
+    boundary_tracking,
+):
     """A late V8 join must not let background audio pin a weak payload peak."""
     mode = AETV_MODES["V8"]
     rng = np.random.default_rng(20260827)
@@ -628,7 +807,8 @@ def test_continuous_v8_receiver_defers_false_preamble_and_blind_joins_with_audio
         "W",
         continuous=True,
         mode_name="V8",
-        timing_tracking=True,
+        timing_tracking=not boundary_tracking,
+        boundary_tracking=boundary_tracking,
         on_debug=events.append,
     )
     decoded = []
@@ -678,7 +858,8 @@ def test_continuous_v7_receiver_keeps_looking_when_started_before_tx():
     assert not any(event["event"] == "blind_acquired" for event in events)
 
 
-def test_continuous_v7_tracking_stops_at_post_transmission_noise():
+@pytest.mark.parametrize("boundary_tracking", [False, True])
+def test_continuous_v7_tracking_stops_at_post_transmission_noise(boundary_tracking):
     mode = AETV_MODES["V7"]
     gops = [np.zeros(mode.latents_per_gop, dtype=np.float32) for _ in range(7)]
     transmission = np.concatenate(
@@ -689,7 +870,8 @@ def test_continuous_v7_tracking_stops_at_post_transmission_noise():
     ).astype(np.float32)
     events = []
     receiver = StreamingDemodulator(
-        mode.band, continuous=True, on_debug=events.append
+        mode.band, continuous=True, on_debug=events.append,
+        boundary_tracking=boundary_tracking,
     )
     decoded = []
     audio = np.concatenate([transmission, noise])

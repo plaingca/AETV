@@ -43,8 +43,13 @@ def codeword_bits(data12: int) -> np.ndarray:
 
 def decode_soft(soft: np.ndarray) -> int:
     """ML-decode 24 soft values (positive => bit 0) to the 12 info bits."""
-    scores = _SIGNS @ soft
+    scores = soft_scores(soft)
     return int(np.argmax(scores))
+
+
+def soft_scores(soft: np.ndarray) -> np.ndarray:
+    """Return correlations with all 4096 codewords along the last axis."""
+    return np.asarray(soft) @ _SIGNS.T
 
 
 def min_distance() -> int:

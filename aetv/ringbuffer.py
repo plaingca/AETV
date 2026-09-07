@@ -1,8 +1,8 @@
 """Thread-safe circular audio buffer shared by capture, decode, and the waterfall.
 
-The audio callback must never block on a full-buffer copy. `snapshot` publishes
-two integers under the lock and copies outside it. The waterfall uses `tail` so
-a 20 fps display does not clone tens of seconds of history every frame.
+Readers copy samples and their cursor under the same lock used by writers,
+so a wrap cannot splice different generations of audio into one decode. The
+waterfall uses `tail` rather than copying the full history every frame.
 """
 
 from __future__ import annotations
@@ -28,20 +28,20 @@ class RingBuffer:
         n = len(chunk)
         if n == 0:
             return
-        pos = self.write_pos
-        if n >= self.n:
-            self.buf[:] = chunk[-self.n :]
-            new_pos = 0
-        else:
-            end = pos + n
-            if end <= self.n:
-                self.buf[pos:end] = chunk
-            else:
-                k = self.n - pos
-                self.buf[pos:] = chunk[:k]
-                self.buf[: end - self.n] = chunk[k:]
-            new_pos = end % self.n
         with self.lock:
+            pos = self.write_pos
+            if n >= self.n:
+                self.buf[:] = chunk[-self.n :]
+                new_pos = 0
+            else:
+                end = pos + n
+                if end <= self.n:
+                    self.buf[pos:end] = chunk
+                else:
+                    k = self.n - pos
+                    self.buf[pos:] = chunk[:k]
+                    self.buf[: end - self.n] = chunk[k:]
+                new_pos = end % self.n
             self.write_pos = new_pos
             self.total_written += n
 
@@ -49,9 +49,9 @@ class RingBuffer:
         with self.lock:
             write_pos = self.write_pos
             total = self.total_written
-        if total < self.n:
-            return self.buf[:total].copy(), total
-        return np.concatenate([self.buf[write_pos:], self.buf[:write_pos]]), total
+            if total < self.n:
+                return self.buf[:total].copy(), total
+            return np.concatenate([self.buf[write_pos:], self.buf[:write_pos]]), total
 
     def tail(self, n: int) -> np.ndarray:
         n = min(int(n), self.n)

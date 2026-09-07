@@ -41,6 +41,14 @@ def test_rx_demodulator_uses_loaded_mode_as_one_atomic_configuration():
     assert demodulator.expected_mode.name == "V8"
 
 
+@pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex"])
+def test_rx_timing_policy_matches_source(source):
+    engine = RxEngine(Station(StationSettings(mode="V8", rx_source=source)))
+    demodulator = engine._new_demodulator(AETV_MODES["V8"])
+    assert demodulator.boundary_tracking == (source in {"kiwi", "soundcard"})
+    assert demodulator.timing_tracking == (source == "soundcard")
+
+
 def test_stale_codec_cannot_start_a_new_mode_receive():
     station = Station(StationSettings(mode="V8"))
     station.codec = SimpleNamespace(mode=AETV_MODES["V7"])
@@ -72,6 +80,45 @@ def test_ringbuffer_incremental_reader_reports_overrun():
     old, _, overrun = ring.read_since(0)
     assert overrun
     assert np.array_equal(old, [3.0, 4.0, 5.0, 6.0, 7.0])
+
+
+def test_ringbuffer_wrap_cannot_publish_partly_overwritten_audio():
+    ring = RingBuffer(seconds=1, fs=8)
+    ring.write(np.arange(8, dtype=float))
+    written = threading.Event()
+    resume = threading.Event()
+    read_done = threading.Event()
+
+    class PausedWrite(np.ndarray):
+        def __setitem__(self, key, values):
+            super().__setitem__(key, values)
+            written.set()
+            assert resume.wait(2)
+
+    ring.buf = ring.buf.view(PausedWrite)
+    reader_result = []
+
+    def read():
+        reader_result.append(ring.read_since(0))
+        read_done.set()
+
+    writer = threading.Thread(target=lambda: ring.write(np.arange(8, 12)))
+    reader = threading.Thread(target=read)
+    writer.start()
+    try:
+        assert written.wait(2)
+        reader.start()
+        # The sample storage has changed, but the new cursor is not published
+        # yet. A reader must wait rather than return new audio with an old cursor.
+        assert not read_done.wait(0.05)
+    finally:
+        resume.set()
+        writer.join(2)
+        if reader.ident is not None:
+            reader.join(2)
+    samples, cursor, overrun = reader_result[0]
+    assert np.array_equal(samples, np.arange(4, 12))
+    assert cursor == 12 and overrun
 
 
 def test_stream_resampler_matches_oneshot():
