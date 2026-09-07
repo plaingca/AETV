@@ -8,6 +8,7 @@ from aetv.kiwi import (
     IQ_GPS_HEADER,
     IqToPassband,
     _decode_snd_iq,
+    _FractionalResampler,
     normalize_kiwi_host,
     parse_directory,
     probe_receiver,
@@ -168,6 +169,21 @@ def test_fractional_kiwi_clock_is_streamed_without_second_long_batches():
     spectrum = np.abs(np.fft.rfft(audio[-24000:] * np.hanning(24000)))
     peak_hz = int(np.argmax(spectrum))
     assert abs(peak_hz - 1000) <= 1
+
+
+def test_fractional_resampler_is_independent_of_tiny_chunk_boundaries():
+    samples = np.random.default_rng(47).standard_normal(12000)
+    whole = _FractionalResampler(7999.272, 8000)(samples)
+    resampler = _FractionalResampler(7999.272, 8000)
+    pieces = []
+    start = 0
+    for size in [1, 0, 2, 1, 7, 512] * 24:
+        pieces.append(resampler(samples[start:start + size]))
+        start += size
+    pieces.append(resampler(samples[start:]))
+    split = np.concatenate(pieces)
+    assert len(split) == len(whole)
+    assert np.allclose(split, whole, atol=1e-10)
 
 
 def test_kiwi_tune_finishes_with_keepalive_without_deprecated_override():

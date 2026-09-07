@@ -7,6 +7,8 @@ at BEACON_CHIPS_PER_FRAME (4 chips/frame) on every data symbol.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import heapq
 
 import numpy as np
 
@@ -120,17 +122,11 @@ def generate_beacon_chips(
     return chips
 
 
-def decode_superframe(soft_chips: np.ndarray) -> tuple[int, str, int] | None:
-    """Decode a 168-chip Golay payload; returns (frame_counter, callsign, mode_index) or None."""
-    if len(soft_chips) != CODED_LEN:
+def _decode_payload_values(values: np.ndarray) -> tuple[int, str, int] | None:
+    padded = ((values[:, None] >> np.arange(11, -1, -1)) & 1).reshape(-1)
+    if np.any(padded[_PAYLOAD_BITS:]):
         return None
-    decoded_bits = []
-    for i in range(N_CHUNKS):
-        chunk_soft = soft_chips[i * 24 : (i + 1) * 24]
-        decoded_val = golay.decode_soft(chunk_soft)
-        chunk_bits = _int_to_bits(decoded_val, 12)
-        decoded_bits.append(chunk_bits)
-    payload = np.concatenate(decoded_bits)[:_PAYLOAD_BITS]
+    payload = padded[:_PAYLOAD_BITS]
 
     counter_bits = payload[:BEACON_COUNTER_BITS]
     callsign_bits = payload[
@@ -165,32 +161,165 @@ def decode_superframe(soft_chips: np.ndarray) -> tuple[int, str, int] | None:
     return counter, callsign, mode_idx
 
 
+def _payload_scores(soft_chips: np.ndarray, expected_mode: int | None) -> np.ndarray:
+    scores = golay.soft_scores(np.asarray(soft_chips).reshape(N_CHUNKS, 24))
+    messages = np.arange(4096)
+    padding = PADDED_PAYLOAD_BITS - _PAYLOAD_BITS
+    # These bits are transmitted as zeros, so they are useful coding evidence.
+    scores[-1, (messages & ((1 << padding) - 1)) != 0] = -np.inf
+    if expected_mode is not None:
+        if not 0 <= expected_mode < (1 << BEACON_MODE_BITS):
+            raise ValueError("expected beacon mode is outside the wire format")
+        mode_start = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS
+        for bit in range(BEACON_MODE_BITS):
+            word, position = divmod(mode_start + bit, 12)
+            required = (expected_mode >> (BEACON_MODE_BITS - bit - 1)) & 1
+            scores[word, ((messages >> (11 - position)) & 1) != required] = -np.inf
+    return scores
+
+
+def decode_superframe(
+    soft_chips: np.ndarray, *, expected_mode: int | None = None
+) -> tuple[int, str, int] | None:
+    """Decode a Golay payload using its padding, then check the optional mode.
+
+    Returns (frame_counter, callsign, mode_index) only when its CRC passes.
+    The wire format and CRC are unchanged.
+    """
+    if len(soft_chips) != CODED_LEN or not np.all(np.isfinite(soft_chips)):
+        return None
+    # For a single observation, keep mode bits as independent evidence. Forcing
+    # them before the CRC check increases false identification on random noise.
+    # Mode-assisted soft candidates are reserved for the two-frame fallback.
+    decoded = _decode_payload_values(np.argmax(_payload_scores(soft_chips, None), axis=1))
+    if decoded is not None and expected_mode is not None and decoded[2] != expected_mode:
+        return None
+    return decoded
+
+
+@lru_cache(maxsize=1)
+def _crc_syndromes() -> tuple[np.ndarray, int]:
+    """Tabulate the affine CRC check for bounded soft-list decoding."""
+    data_len = _PAYLOAD_BITS - BEACON_CRC_BITS
+    affine = crc16(np.zeros(data_len, dtype=int))
+    table = np.zeros((N_CHUNKS, 4096), dtype=np.int64)
+    messages = np.arange(4096)
+    for bit in range(_PAYLOAD_BITS):
+        basis = np.zeros(_PAYLOAD_BITS, dtype=int)
+        basis[bit] = 1
+        syndrome = crc16(basis[:data_len]) ^ _bits_to_int(basis[data_len:]) ^ affine
+        word, position = divmod(bit, 12)
+        table[word] ^= ((messages >> (11 - position)) & 1) * syndrome
+    return table, affine
+
+
+def _payload_candidates(
+    soft_chips: np.ndarray, expected_mode: int | None, budget: int = 256
+) -> list[tuple[int, str, int]]:
+    """Find CRC-valid candidates among a bounded list of soft decisions.
+
+    These candidates MUST NOT identify a station by themselves: searching more
+    hypotheses weakens a single CRC check. The caller requires a second frame
+    with its own observed counter/CRC, matching identity and counter spacing.
+    """
+    scores = _payload_scores(soft_chips, expected_mode)
+    order = np.argsort(-scores, axis=1)[:, :64]
+    costs = scores.max(axis=1)[:, None] - np.take_along_axis(scores, order, axis=1)
+    syndromes, affine = _crc_syndromes()
+    rows = np.arange(N_CHUNKS)
+    initial = (0,) * N_CHUNKS
+    heap = [(0.0, initial)]
+    seen = {initial}
+    found = []
+    for _ in range(budget):
+        if not heap:
+            break
+        cost, indices = heapq.heappop(heap)
+        values = order[rows, indices]
+        if np.bitwise_xor.reduce(syndromes[rows, values]) == affine:
+            decoded = _decode_payload_values(values)
+            if decoded is not None:
+                found.append(decoded)
+        for word in range(N_CHUNKS):
+            next_indices = list(indices)
+            next_indices[word] += 1
+            following = tuple(next_indices)
+            if following[word] >= order.shape[1] or following in seen:
+                continue
+            next_cost = cost - costs[word, indices[word]] + costs[word, following[word]]
+            if np.isfinite(next_cost):
+                heapq.heappush(heap, (float(next_cost), following))
+                seen.add(following)
+    return found
+
+
+def _beacon_result(offset: int, decoded: tuple[int, str, int]) -> AETVBeaconResult:
+    counter, callsign, mode_idx = decoded
+    return AETVBeaconResult(
+        chip_offset=int(offset), frame_index=counter, callsign=callsign,
+        mode_index=mode_idx, gop_index=counter // 8, gop_phase=counter % 8,
+    )
+
+
 def find_beacon_superframe(
-    soft_stream: np.ndarray, threshold: float = 0.5
+    soft_stream: np.ndarray, threshold: float = 0.5, *,
+    expected_mode: int | None = None,
 ) -> AETVBeaconResult | None:
-    """Scan a soft chip stream for Barker-13 sync and decode the superframe."""
+    """Scan for a CRC-valid beacon, then try corroborated repeated frames.
+
+    The fallback combines only invariant whole Golay words (callsign/mode).
+    Counter and CRC words remain separate observations in each frame.
+    """
     if len(soft_stream) < SUPERFRAME_LEN:
         return None
     stream = np.asarray(soft_stream, dtype=np.float64)
+    if not np.all(np.isfinite(stream)):
+        return None
     windows = np.lib.stride_tricks.sliding_window_view(stream, SYNC_LEN)
     sync_norm = np.linalg.norm(SYNC)
     window_norms = np.linalg.norm(windows, axis=1)
     corr = (windows @ SYNC) / np.maximum(window_norms * sync_norm, 1e-12)
-    peaks = np.where(np.abs(corr) > threshold)[0]
+    peaks = np.where(np.abs(corr[:len(stream) - SUPERFRAME_LEN + 1]) > threshold)[0]
     peaks = peaks[np.argsort(np.abs(corr[peaks]))[::-1]]
     for peak_idx in peaks:
         if peak_idx + SUPERFRAME_LEN <= len(soft_stream):
             polarity = 1.0 if corr[peak_idx] >= 0 else -1.0
             payload_soft = polarity * stream[peak_idx + SYNC_LEN : peak_idx + SUPERFRAME_LEN]
-            decoded = decode_superframe(payload_soft)
+            decoded = decode_superframe(payload_soft, expected_mode=expected_mode)
             if decoded is not None:
-                counter, callsign, mode_idx = decoded
-                return AETVBeaconResult(
-                    chip_offset=int(peak_idx),
-                    frame_index=counter,
-                    callsign=callsign,
-                    mode_index=mode_idx,
-                    gop_index=counter // 8,
-                    gop_phase=counter % 8,
-                )
+                return _beacon_result(peak_idx, decoded)
+
+    # Bound the work even when a long or noisy stream has many sync peaks.
+    # At most three superframes of history are useful to the streaming RX.
+    peak_set = set(int(p) for p in peaks)
+    pairs = [
+        (min(abs(corr[a]), abs(corr[a + distance])), a, a + distance)
+        for a in peak_set
+        for distance in (SUPERFRAME_LEN, 2 * SUPERFRAME_LEN)
+        if a + distance in peak_set
+    ]
+    # Whole words 1..4 contain only callsign and mode bits. Derive these bounds
+    # so a future layout change cannot accidentally combine counters or CRCs.
+    fixed_start = -(-BEACON_COUNTER_BITS // 12) * 24
+    fixed_end = ((_PAYLOAD_BITS - BEACON_CRC_BITS) // 12) * 24
+    for _strength, first, second in sorted(pairs, reverse=True)[:8]:
+        left = stream[first + SYNC_LEN:first + SUPERFRAME_LEN] * np.sign(corr[first])
+        right = stream[second + SYNC_LEN:second + SUPERFRAME_LEN] * np.sign(corr[second])
+        combined = left[fixed_start:fixed_end] + right[fixed_start:fixed_end]
+        left[fixed_start:fixed_end] = combined
+        right[fixed_start:fixed_end] = combined
+        earlier = _payload_candidates(left, expected_mode)
+        if not earlier:
+            continue
+        later = _payload_candidates(right, expected_mode)
+        distance = second - first
+        steps = {distance // BEACON_CHIPS_PER_FRAME,
+                 -(-distance // BEACON_CHIPS_PER_FRAME)}
+        matches = {
+            b for a in earlier for b in later
+            if a[1:] == b[1:]
+            and ((b[0] - a[0]) & MAX_FRAME_COUNTER) in steps
+        }
+        if len(matches) == 1:
+            return _beacon_result(second, matches.pop())
     return None

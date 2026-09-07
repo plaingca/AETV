@@ -133,6 +133,10 @@ Detailed methodology and current machine results live in
 - Enter your callsign in **Settings**.
 - Pick **Standard channel** unless both ends have an 8 kHz audio path.
 - Select the radio input/output devices and configure CAT/PTT if desired.
+- Audio settings can optionally emit or receive an analytic stereo I/Q signal
+  with independent I/Q↔L/R or I/Q↔R/L mappings. Mono remains the default in
+  both directions. Matching TX and RX modes support a direct stereo audio
+  loopback test without RF hardware.
 - Use **Local loopback** first. It exercises the complete modem without keying a radio.
 - Confirm your licence, regional band plan, occupied bandwidth, frequency, and power before transmitting.
 
@@ -151,6 +155,15 @@ Voice is delayed by one GOP so it plays alongside decoded video.
 
 V8 A/V uses 12 kHz audio and requires an approximately 5 kHz transmit and
 receive passband. A normal 2.7 kHz SSB filter will remove the video branch.
+
+### Prepared clips
+
+Clip-bank slots, trim points, and framing choices are saved as you edit them.
+Prepared clips return after restarting AETV once the selected model loads.
+Unchanged clips reuse cached encoding and previews; changes to the source file,
+edit, or model trigger preparation again. Keep the original media files available,
+including for program audio. Clearing the per-user cache rebuilds preparation
+without removing the saved clip bank.
 
 ## Run from source
 

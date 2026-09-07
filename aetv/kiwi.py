@@ -327,8 +327,8 @@ class _FractionalResampler:
 
     The preceding polyphase stage does the anti-alias filtering and nearly all
     of the rate conversion. This stage only corrects the Kiwi's fractional
-    crystal-rate error (normally tens of ppm), so linear interpolation has
-    negligible passband loss while avoiding multi-second FIR buffering.
+    crystal-rate error (normally tens of ppm). Linear interpolation avoids
+    multi-second FIR buffering; its band-edge loss is tracked by the pilots.
     """
 
     def __init__(self, src_rate: float, dst_rate: float):

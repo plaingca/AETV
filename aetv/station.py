@@ -23,6 +23,7 @@ import numpy as np
 from .audio_io import (
     AudioPlaybackStream,
     StreamResampler,
+    iq_chunk_stream,
     open_input_stream,
     play_cancellable,
     play_chunk_stream,
@@ -37,6 +38,7 @@ from .analog_av import (
 )
 from .cat import CatConfig, NullPtt, open_ptt
 from .codec import AETVCodec, resolve_checkpoint
+from .clip_cache import prepared_clip_path, load_prepared_clip, save_prepared_clip
 from .config import AETV_MODES, AETVModeSpec
 from .kiwi import KiwiCapture
 from .flex import FlexVitaSession
@@ -432,6 +434,12 @@ class TxEngine:
         if codec.mode.name != mode_name:
             raise RuntimeError(f"{mode_name} checkpoint is not loaded")
         count = max(1, int(n_gops))
+        cache = prepared_clip_path(codec, path, count, start_s, framing)
+        cached = load_prepared_clip(cache, path, codec.mode, count, start_s)
+        if cached is not None:
+            if on_progress is not None:
+                on_progress(1.0)
+            return cached
         frames = collect_gops(
             iter_video_file(
                 path,
@@ -451,13 +459,19 @@ class TxEngine:
                 on_progress((index + 1) / count)
         preview_count = min(8, len(frames))
         preview_indices = np.linspace(0, len(frames) - 1, preview_count, dtype=int)
-        return PreparedClip(
+        prepared = PreparedClip(
             path=str(path),
             mode_name=mode_name,
             latents=tuple(latents),
             preview_frames=np.ascontiguousarray(frames[preview_indices]),
             start_s=float(start_s),
         )
+        if cache is not None and cache == prepared_clip_path(codec, path, count, start_s, framing):
+            try:
+                save_prepared_clip(cache, prepared)
+            except OSError as error:
+                self.station.log(f"Prepared clip is ready but could not be cached: {error}")
+        return prepared
 
     def transmit(self, source: str | ScreenCaptureSpec | PreparedClip) -> bool:
         self._cancel.clear()
@@ -1103,12 +1117,21 @@ class TxEngine:
                     ),
                 )
             else:
+                output_channels = 1
+                if settings.tx_audio_mode == "iq":
+                    chunks = iq_chunk_stream(
+                        chunks, settings.tx_iq_mapping, peak=settings.tx_level
+                    )
+                    output_channels = 2
                 completed = play_chunk_stream(
                     chunks,
                     fs,
                     device=settings.audio_output or None,
                     should_stop=self._cancel.is_set,
-                    on_chunk=lambda count: self._report_progress(count / max(1, n_gops)),
+                    on_chunk=lambda count: self._report_progress(
+                        min(count, n_gops) / max(1, n_gops)
+                    ),
+                    channels=output_channels,
                 )
             if not completed:
                 self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
@@ -1493,6 +1516,11 @@ class RxEngine:
                 capture_rate,
                 on_error=self._on_error,
                 on_discontinuity=self._on_soundcard_discontinuity,
+                iq_mapping=(
+                    settings.rx_iq_mapping
+                    if settings.rx_audio_mode == "iq"
+                    else None
+                ),
             )
         self._thread = threading.Thread(target=self._loop, name="aetv-rx", daemon=True)
         self._thread.start()
@@ -1574,8 +1602,10 @@ class RxEngine:
             mode_name=mode.name,
             # Virtual audio cables may servo their independent endpoint clocks.
             # Let the modem separate that harmless timing slope from EVM/SNR;
-            # Kiwi already has an exact-rate I/Q resampler upstream.
+            # Kiwi already has an exact-rate I/Q resampler upstream. Both
+            # sources still need guarded correction of waveform timing jumps.
             timing_tracking=self.station.settings.rx_source == "soundcard",
+            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard"},
         )
 
     def _loop(self) -> None:

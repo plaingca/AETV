@@ -41,6 +41,14 @@ def test_rx_demodulator_uses_loaded_mode_as_one_atomic_configuration():
     assert demodulator.expected_mode.name == "V8"
 
 
+@pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex"])
+def test_rx_timing_policy_matches_source(source):
+    engine = RxEngine(Station(StationSettings(mode="V8", rx_source=source)))
+    demodulator = engine._new_demodulator(AETV_MODES["V8"])
+    assert demodulator.boundary_tracking == (source in {"kiwi", "soundcard"})
+    assert demodulator.timing_tracking == (source == "soundcard")
+
+
 def test_stale_codec_cannot_start_a_new_mode_receive():
     station = Station(StationSettings(mode="V8"))
     station.codec = SimpleNamespace(mode=AETV_MODES["V7"])
@@ -72,6 +80,45 @@ def test_ringbuffer_incremental_reader_reports_overrun():
     old, _, overrun = ring.read_since(0)
     assert overrun
     assert np.array_equal(old, [3.0, 4.0, 5.0, 6.0, 7.0])
+
+
+def test_ringbuffer_wrap_cannot_publish_partly_overwritten_audio():
+    ring = RingBuffer(seconds=1, fs=8)
+    ring.write(np.arange(8, dtype=float))
+    written = threading.Event()
+    resume = threading.Event()
+    read_done = threading.Event()
+
+    class PausedWrite(np.ndarray):
+        def __setitem__(self, key, values):
+            super().__setitem__(key, values)
+            written.set()
+            assert resume.wait(2)
+
+    ring.buf = ring.buf.view(PausedWrite)
+    reader_result = []
+
+    def read():
+        reader_result.append(ring.read_since(0))
+        read_done.set()
+
+    writer = threading.Thread(target=lambda: ring.write(np.arange(8, 12)))
+    reader = threading.Thread(target=read)
+    writer.start()
+    try:
+        assert written.wait(2)
+        reader.start()
+        # The sample storage has changed, but the new cursor is not published
+        # yet. A reader must wait rather than return new audio with an old cursor.
+        assert not read_done.wait(0.05)
+    finally:
+        resume.set()
+        writer.join(2)
+        if reader.ident is not None:
+            reader.join(2)
+    samples, cursor, overrun = reader_result[0]
+    assert np.array_equal(samples, np.arange(4, 12))
+    assert cursor == 12 and overrun
 
 
 def test_stream_resampler_matches_oneshot():
@@ -126,7 +173,8 @@ def test_iq_stream_phase_continuity():
 def test_settings_roundtrip(tmp_path: Path):
     settings = StationSettings(
         callsign="va7eet", mode="V7", kiwi_host="1.2.3.4:8073",
-        tx_channel_profile="mpp6",
+        tx_channel_profile="mpp6", tx_audio_mode="iq", tx_iq_mapping="iq_rl",
+        rx_audio_mode="iq", rx_iq_mapping="iq_rl",
     )
     path = tmp_path / "settings.json"
     save_settings(settings, path)
@@ -135,6 +183,10 @@ def test_settings_roundtrip(tmp_path: Path):
     assert loaded.mode == "V7"
     assert loaded.kiwi_host == "1.2.3.4:8073"
     assert loaded.tx_channel_profile == "mpp6"
+    assert loaded.tx_audio_mode == "iq"
+    assert loaded.tx_iq_mapping == "iq_rl"
+    assert loaded.rx_audio_mode == "iq"
+    assert loaded.rx_iq_mapping == "iq_rl"
 
 
 def test_settings_migrate_historical_mode_to_standard_release(tmp_path: Path):
@@ -147,6 +199,25 @@ def test_settings_migrate_historical_mode_to_standard_release(tmp_path: Path):
 def test_settings_reject_unknown_channel_profile():
     settings = StationSettings(tx_channel_profile="invented")
     assert "unknown TX channel profile 'invented'" in settings.validate()
+
+
+def test_settings_default_to_mono_and_validate_iq_options():
+    assert StationSettings().tx_audio_mode == "mono"
+    assert StationSettings().tx_iq_mapping == "iq_lr"
+    assert StationSettings().rx_audio_mode == "mono"
+    assert StationSettings().rx_iq_mapping == "iq_lr"
+    assert "unknown TX audio mode 'bad'" in StationSettings(
+        tx_audio_mode="bad"
+    ).validate()
+    assert "unknown TX I/Q mapping 'bad'" in StationSettings(
+        tx_iq_mapping="bad"
+    ).validate()
+    assert "unknown RX audio mode 'bad'" in StationSettings(
+        rx_audio_mode="bad"
+    ).validate()
+    assert "unknown RX I/Q mapping 'bad'" in StationSettings(
+        rx_iq_mapping="bad"
+    ).validate()
 
 
 def test_loopback_validation_does_not_require_offline_flex():
@@ -498,6 +569,38 @@ def test_transmit_output_meter_reports_final_waveform_peak_and_clipping():
             "output_clipping": True,
         }
     ]
+
+
+def test_streaming_tx_applies_selected_stereo_iq_output(monkeypatch):
+    captured = {}
+
+    def play(stream, rate, **kwargs):
+        captured["rate"] = rate
+        captured["channels"] = kwargs["channels"]
+        captured["frames"] = np.concatenate(list(stream))
+        return True
+
+    monkeypatch.setattr("aetv.station.play_chunk_stream", play)
+    settings = StationSettings(
+        tx_audio_mode="iq",
+        tx_iq_mapping="iq_rl",
+        tx_level=0.7,
+        ptt_lead_s=0,
+        ptt_tail_s=0,
+    )
+    fs = 8000
+    source = (0.5 * np.sin(2 * np.pi * 1000 * np.arange(fs) / fs)).astype(
+        np.float32
+    )
+    engine = TxEngine(Station(settings), ptt=_FakePtt())
+
+    assert engine._keyed_send_stream(iter([source[:3000], source[3000:]]), fs, 2)
+    assert captured["rate"] == fs
+    assert captured["channels"] == 2
+    assert captured["frames"].shape == (len(source) + 512, 2)
+    assert np.max(np.abs(captured["frames"])) <= settings.tx_level + 1e-6
+    # RL mapping puts the exactly delayed real (I) path on the right channel.
+    assert np.allclose(captured["frames"][256 : 256 + len(source), 1], source)
 
 
 def test_native_flex_stream_resamples_v8_to_24khz(monkeypatch):

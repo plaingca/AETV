@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -55,6 +56,10 @@ class StationSettings:
     waveform_mode: str = "video"  # video | analog_av
     av_video_power: float = 0.5
     av_microphone_mix: float = 0.5
+    rx_audio_mode: str = "mono"  # mono | iq
+    rx_iq_mapping: str = "iq_lr"  # iq_lr | iq_rl
+    tx_audio_mode: str = "mono"  # mono | iq
+    tx_iq_mapping: str = "iq_lr"  # iq_lr | iq_rl
     tx_level: float = 0.7
     rx_source: str = "soundcard"  # soundcard | flex | kiwi
     buffer_seconds: float = 90.0
@@ -122,6 +127,14 @@ class StationSettings:
             problems.append("A/V video power must be between 0 and 1")
         if not 0.0 <= self.av_microphone_mix <= 1.0:
             problems.append("microphone mix must be between 0 and 1")
+        if self.tx_audio_mode not in {"mono", "iq"}:
+            problems.append(f"unknown TX audio mode {self.tx_audio_mode!r}")
+        if self.tx_iq_mapping not in {"iq_lr", "iq_rl"}:
+            problems.append(f"unknown TX I/Q mapping {self.tx_iq_mapping!r}")
+        if self.rx_audio_mode not in {"mono", "iq"}:
+            problems.append(f"unknown RX audio mode {self.rx_audio_mode!r}")
+        if self.rx_iq_mapping not in {"iq_lr", "iq_rl"}:
+            problems.append(f"unknown RX I/Q mapping {self.rx_iq_mapping!r}")
         if self.gops < 1:
             problems.append("GOP count must be >= 1")
         if self.tx_channel_profile != "radio" and self.tx_channel_profile not in CHANNEL_PROFILES:
@@ -195,5 +208,17 @@ def load_settings(path: Path | None = None) -> StationSettings:
 def save_settings(settings: StationSettings, path: Path | None = None) -> Path:
     target = path or settings_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(asdict(settings), indent=2) + "\n", encoding="utf-8")
+    contents = json.dumps(asdict(settings), indent=2) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(contents)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
