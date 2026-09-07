@@ -38,6 +38,7 @@ from .analog_av import (
 )
 from .cat import CatConfig, NullPtt, open_ptt
 from .codec import AETVCodec, resolve_checkpoint
+from .clip_cache import prepared_clip_path, load_prepared_clip, save_prepared_clip
 from .config import AETV_MODES, AETVModeSpec
 from .kiwi import KiwiCapture
 from .flex import FlexVitaSession
@@ -433,6 +434,12 @@ class TxEngine:
         if codec.mode.name != mode_name:
             raise RuntimeError(f"{mode_name} checkpoint is not loaded")
         count = max(1, int(n_gops))
+        cache = prepared_clip_path(codec, path, count, start_s, framing)
+        cached = load_prepared_clip(cache, path, codec.mode, count, start_s)
+        if cached is not None:
+            if on_progress is not None:
+                on_progress(1.0)
+            return cached
         frames = collect_gops(
             iter_video_file(
                 path,
@@ -452,13 +459,19 @@ class TxEngine:
                 on_progress((index + 1) / count)
         preview_count = min(8, len(frames))
         preview_indices = np.linspace(0, len(frames) - 1, preview_count, dtype=int)
-        return PreparedClip(
+        prepared = PreparedClip(
             path=str(path),
             mode_name=mode_name,
             latents=tuple(latents),
             preview_frames=np.ascontiguousarray(frames[preview_indices]),
             start_s=float(start_s),
         )
+        if cache is not None and cache == prepared_clip_path(codec, path, count, start_s, framing):
+            try:
+                save_prepared_clip(cache, prepared)
+            except OSError as error:
+                self.station.log(f"Prepared clip is ready but could not be cached: {error}")
+        return prepared
 
     def transmit(self, source: str | ScreenCaptureSpec | PreparedClip) -> bool:
         self._cancel.clear()

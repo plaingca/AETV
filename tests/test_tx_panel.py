@@ -11,6 +11,8 @@ from aetv.config import AETV_MODES
 from aetv.gui.rx_panel import ReceivePanel
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.source import ScreenCaptureSpec
+from aetv.source import ClipEdit
+from aetv.settings import StationSettings, load_settings, save_settings
 from aetv.station import RxState
 
 
@@ -169,6 +171,68 @@ def test_adding_clip_only_queues_changed_slot(monkeypatch):
     assert panel._clip_tokens == {0: 4, 3: 8}
     assert progress == [0.0]
     assert started == [([(3, new_edit)], "V8", 8)]
+
+
+def test_clip_bank_edits_and_removals_survive_restart_without_closing_app(tmp_path, monkeypatch):
+    settings_file = tmp_path / "settings.json"
+    monkeypatch.setattr("aetv.settings.settings_path", lambda: settings_file)
+    edits = {0: ClipEdit("first.mp4", 2.0, 6.0, "fit"), 2: ClipEdit("second.mp4", 0.0, 3.0, "crop")}
+    panel = SimpleNamespace(
+        station=SimpleNamespace(settings=StationSettings(receive_dir=str(tmp_path))),
+        _clip_edits=edits,
+        clip_grid=SimpleNamespace(cells=[SimpleNamespace(path="first.mp4"), SimpleNamespace(path=""), SimpleNamespace(path="second.mp4")]),
+    )
+    TransmitPanel._save_clip_paths(panel)
+    loaded = load_settings(settings_file)
+    shown = {}
+    restarted = SimpleNamespace(
+        station=SimpleNamespace(settings=loaded), _clip_edits={},
+        clip_grid=SimpleNamespace(cells=[None] * 3),
+        _show_clip_edit=lambda index, edit: shown.update({index: edit}),
+    )
+    TransmitPanel._restore_clip_bank(restarted)
+    assert restarted._clip_edits == edits and shown == edits
+
+    # Removal must be saved immediately too, including an entirely empty bank.
+    panel._clip_edits.clear()
+    for cell in panel.clip_grid.cells:
+        cell.path = ""
+    TransmitPanel._save_clip_paths(panel)
+    restarted.station.settings = load_settings(settings_file)
+    restarted._clip_edits = {}
+    TransmitPanel._restore_clip_bank(restarted)
+    assert restarted._clip_edits == {}
+
+
+def test_legacy_clip_paths_still_restore():
+    shown = {}
+    panel = SimpleNamespace(
+        station=SimpleNamespace(settings=StationSettings(clip_paths=["old.mp4", "", "last.mp4"])),
+        _clip_edits={}, clip_grid=SimpleNamespace(cells=[None] * 3),
+        gops=SimpleNamespace(value=lambda: 5),
+        _show_clip_edit=lambda index, edit: shown.update({index: edit}),
+    )
+    TransmitPanel._restore_clip_bank(panel)
+    assert shown == {0: ClipEdit("old.mp4", 0.0, 5.0, "crop"), 2: ClipEdit("last.mp4", 0.0, 5.0, "crop")}
+
+
+def test_failed_settings_replacement_keeps_last_saved_bank(tmp_path, monkeypatch):
+    import pytest
+
+    target = tmp_path / "settings.json"
+    settings = StationSettings(receive_dir=str(tmp_path), clip_bank=[ClipEdit("saved.mp4", 1, 3).to_dict()])
+    save_settings(settings, target)
+    original = target.read_bytes()
+    settings.clip_bank = []
+
+    def interrupted(*_args):
+        raise OSError("interrupted replacement")
+
+    monkeypatch.setattr("aetv.settings.os.replace", interrupted)
+    with pytest.raises(OSError):
+        save_settings(settings, target)
+    assert target.read_bytes() == original
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_invalidated_batch_slot_does_not_cancel_other_slots():

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -207,5 +208,17 @@ def load_settings(path: Path | None = None) -> StationSettings:
 def save_settings(settings: StationSettings, path: Path | None = None) -> Path:
     target = path or settings_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(asdict(settings), indent=2) + "\n", encoding="utf-8")
+    contents = json.dumps(asdict(settings), indent=2) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=target.parent,
+            prefix=f".{target.name}.", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(contents)
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from aetv.audio_io import AudioUnavailable, list_audio_devices
 from aetv.config import AETV_MODES, RELEASE_MODES, RELEASE_MODE_LABELS
 from aetv.hfchannel import CHANNEL_PROFILES
+from aetv.settings import save_settings
 from aetv.source import (
     CameraFrameBuffer,
     ClipEdit,
@@ -437,6 +438,16 @@ class TransmitPanel(QWidget):
         layout.addWidget(self.clip_grid, 0)
         layout.addWidget(self._strip, 0)
         self._fill_screen_targets()
+        self._restore_clip_bank()
+        self.sync_from_config()
+        self.camera.currentIndexChanged.connect(self._restart_preview)
+        self.screen_target.currentIndexChanged.connect(self._on_screen_target_changed)
+        self.mode.currentIndexChanged.connect(self._on_mode_changed)
+        self.av_power.valueChanged.connect(self._on_av_power_changed)
+        self.mic_mix.valueChanged.connect(self._on_mic_mix_changed)
+        self._start_preview()
+
+    def _restore_clip_bank(self) -> None:
         stored_bank = self.station.settings.clip_bank
         if stored_bank:
             for index, value in enumerate(stored_bank[: len(self.clip_grid.cells)]):
@@ -453,13 +464,6 @@ class TransmitPanel(QWidget):
                     edit = ClipEdit(str(path), 0.0, float(self.gops.value()), "crop")
                     self._clip_edits[index] = edit
                     self._show_clip_edit(index, edit)
-        self.sync_from_config()
-        self.camera.currentIndexChanged.connect(self._restart_preview)
-        self.screen_target.currentIndexChanged.connect(self._on_screen_target_changed)
-        self.mode.currentIndexChanged.connect(self._on_mode_changed)
-        self.av_power.valueChanged.connect(self._on_av_power_changed)
-        self.mic_mix.valueChanged.connect(self._on_mic_mix_changed)
-        self._start_preview()
 
     def _on_source_toggled(self, _on: bool) -> None:
         if _on:
@@ -665,6 +669,11 @@ class TransmitPanel(QWidget):
             self._clip_edits[index].to_dict() if index in self._clip_edits else {}
             for index in range(len(self.clip_grid.cells))
         ]
+        try:
+            save_settings(self.station.settings)
+        except OSError as error:
+            self.status.setText(f"Could not save the clip bank: {error}")
+            self.logMessage.emit(f"Could not save the clip bank: {error}")
 
     def model_ready(self) -> None:
         """Refresh prepared clips after the requested codec becomes available."""
