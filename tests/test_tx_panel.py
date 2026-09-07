@@ -391,8 +391,8 @@ def test_open_saved_video_directory_uses_configured_receive_path(
         status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
     )
     monkeypatch.setattr(
-        "aetv.gui.rx_panel.QDesktopServices.openUrl",
-        lambda url: opened.append(Path(url.toLocalFile())) or True,
+        "aetv.gui.rx_panel.open_directory",
+        lambda path: opened.append(path.resolve()) or True,
     )
 
     ReceivePanel.open_saved_video_directory(panel)

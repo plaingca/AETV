@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QCloseEvent, QDesktopServices
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -27,6 +27,7 @@ from aetv.codec import (
     runtime_bundle_bytes,
 )
 from aetv.config import RELEASE_MODE_LABELS, RELEASE_MODES
+from aetv.gui.desktop import open_directory
 
 
 def _mib(value: int) -> str:
@@ -315,9 +316,13 @@ class ModelManagerDialog(QDialog):
         self._apply_statuses(self._statuses)
 
     def _open_model_folder(self) -> None:
-        folder = model_cache_dir()
-        folder.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
+        try:
+            folder = model_cache_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            if not open_directory(folder):
+                raise OSError(f"Could not open model folder: {folder}")
+        except OSError as error:
+            QMessageBox.warning(self, "AETV Model Manager", str(error))
 
     def reject(self) -> None:
         if self._download_busy() or (
