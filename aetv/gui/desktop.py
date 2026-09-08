@@ -30,14 +30,26 @@ def _desktop_environment() -> dict[str, str]:
 def open_directory(folder: Path) -> bool:
     """Launch the desktop file manager without changing this process's env."""
     folder = folder.resolve()
+    return _open_external(QUrl.fromLocalFile(str(folder)), str(folder))
+
+
+def open_web_url(address: str) -> bool:
+    """Open a browser with system libraries, just like the folder opener."""
+    url = QUrl(address)
+    if not url.isValid() or url.scheme() not in {"http", "https"} or not url.host():
+        return False
+    return _open_external(url, url.toString(QUrl.ComponentFormattingOption.FullyEncoded))
+
+
+def _open_external(url: QUrl, argument: str) -> bool:
     if not sys.platform.startswith("linux"):
-        return QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        return QDesktopServices.openUrl(url)
 
     environment = QProcessEnvironment()
     for name, value in _desktop_environment().items():
         environment.insert(name, value)
     process = QProcess()
     process.setProgram("xdg-open")
-    process.setArguments([str(folder)])
+    process.setArguments([argument])
     process.setProcessEnvironment(environment)
     return process.startDetached()

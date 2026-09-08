@@ -49,7 +49,8 @@ def test_source_desktop_environment_removes_opencv_overrides_only(monkeypatch):
 
 
 @pytest.mark.parametrize("started", [False, True])
-def test_linux_folder_launch_passes_arguments_and_child_environment(monkeypatch, tmp_path, started):
+@pytest.mark.parametrize("web", [False, True])
+def test_linux_desktop_launch_passes_arguments_and_child_environment(monkeypatch, tmp_path, started, web):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LD_LIBRARY_PATH", "/aetv/_internal")
@@ -71,9 +72,11 @@ def test_linux_folder_launch_passes_arguments_and_child_environment(monkeypatch,
 
     monkeypatch.setattr(desktop, "QProcess", Process)
     folder = tmp_path / "received clips & samples"
-    assert desktop.open_directory(folder) is started
+    address = "https://huggingface.co/AETV/AETV?one=1&two=2"
+    result = desktop.open_web_url(address) if web else desktop.open_directory(folder)
+    assert result is started
     assert captured["program"] == "xdg-open"
-    assert captured["arguments"] == [str(folder.resolve())]
+    assert captured["arguments"] == [address if web else str(folder.resolve())]
     assert not captured["environment"].contains("LD_LIBRARY_PATH")
     assert os.environ["LD_LIBRARY_PATH"] == "/aetv/_internal"
 
@@ -100,3 +103,11 @@ def test_other_platforms_keep_native_desktop_opening(monkeypatch, tmp_path):
     monkeypatch.setattr(desktop.QDesktopServices, "openUrl", lambda url: opened.append(url) or True)
     assert desktop.open_directory(tmp_path)
     assert Path(opened[0].toLocalFile()) == tmp_path.resolve()
+    assert desktop.open_web_url("https://huggingface.co/AETV/AETV")
+    assert opened[1].toString() == "https://huggingface.co/AETV/AETV"
+
+
+@pytest.mark.parametrize("address", ["file:///tmp/aetv", "https:", "javascript:alert(1)"])
+def test_web_opener_rejects_non_web_addresses(monkeypatch, address):
+    monkeypatch.setattr(desktop, "QProcess", lambda: pytest.fail("must not launch"))
+    assert not desktop.open_web_url(address)

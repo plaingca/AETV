@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from urllib.parse import quote
 import numpy as np
 
 from .config import AETV_MODES, AETVModeSpec
+from .tls import download_ssl_context
 
 DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-face-gan.pt"
 MODE_DEFAULT_CHECKPOINTS = {
@@ -235,7 +237,9 @@ def download_default_checkpoint(
         downloaded = 0
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "AETV/0.1"})
-            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+            with urllib.request.urlopen(
+                request, timeout=60, context=download_ssl_context(),
+            ) as response, temporary.open("wb") as output:
                 while chunk := response.read(1 << 20):
                     output.write(chunk)
                     digest.update(chunk)
@@ -283,6 +287,8 @@ def download_runtime_bundle(
             progress(completed_bytes, total_bytes, "Preparing download")
         for filename, expected in files.items():
             target = target_dir / filename
+            if progress is not None:
+                progress(completed_bytes, total_bytes, f"Checking {filename}")
             if (
                 target.is_file()
                 and target.stat().st_size == expected["bytes"]
@@ -302,20 +308,39 @@ def download_runtime_bundle(
             digest = hashlib.sha256()
             downloaded = 0
             try:
+                if progress is not None:
+                    progress(
+                        completed_bytes, total_bytes,
+                        f"Connecting to huggingface.co for {filename}",
+                    )
                 request = urllib.request.Request(url, headers={"User-Agent": "AETV/0.1"})
-                with urllib.request.urlopen(request, timeout=60) as response, temporary.open(
+                with urllib.request.urlopen(
+                    request, timeout=60, context=download_ssl_context(),
+                ) as response, temporary.open(
                     "wb"
                 ) as output:
-                    while chunk := response.read(1 << 20):
+                    if progress is not None:
+                        progress(completed_bytes, total_bytes, f"Waiting for data: {filename}")
+                    # HTTPResponse.read(n) waits for n bytes (or EOF). read1
+                    # reports available data after one buffered read, so a slow
+                    # connection need not deliver a whole MiB before UI updates.
+                    read_chunk = getattr(response, "read1", response.read)
+                    last_progress = None
+                    while chunk := read_chunk(64 << 10):
                         output.write(chunk)
                         digest.update(chunk)
                         downloaded += len(chunk)
-                        if progress is not None:
+                        now = time.monotonic()
+                        if progress is not None and (
+                            last_progress is None or now - last_progress >= 0.1
+                            or downloaded == expected["bytes"]
+                        ):
                             progress(
                                 completed_bytes + downloaded,
                                 total_bytes,
                                 f"Downloading {filename}",
                             )
+                            last_progress = now
                 if downloaded != expected["bytes"]:
                     raise RuntimeError(
                         f"downloaded {downloaded} bytes for {filename}; "
