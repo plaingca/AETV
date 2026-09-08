@@ -1,6 +1,7 @@
 """Portable builds discover host roots without weakening TLS verification."""
 
 import ssl
+from pathlib import Path
 
 import pytest
 
@@ -18,11 +19,10 @@ def empty_linux_context(monkeypatch):
 
 
 @pytest.fixture
-def host_ca_file(tmp_path):
-    cert = ssl.create_default_context().get_ca_certs(binary_form=True)[0]
-    path = tmp_path / "host-ca.pem"
-    path.write_text(ssl.DER_cert_to_PEM_cert(cert), encoding="ascii")
-    return str(path)
+def host_ca_file():
+    # A public, self-signed test root. Never depend on the runner's CA layout:
+    # that is precisely what this module's fallback is intended to handle.
+    return str(Path(__file__).parent / "fixtures" / "test-ca.pem")
 
 
 def test_linux_loads_host_bundle_when_bundled_openssl_has_no_roots(
