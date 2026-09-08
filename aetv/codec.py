@@ -18,6 +18,7 @@ from urllib.parse import quote
 import numpy as np
 
 from .config import AETV_MODES, AETVModeSpec
+from .tls import download_ssl_context
 
 DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-face-gan.pt"
 MODE_DEFAULT_CHECKPOINTS = {
@@ -236,7 +237,9 @@ def download_default_checkpoint(
         downloaded = 0
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "AETV/0.1"})
-            with urllib.request.urlopen(request, timeout=60) as response, temporary.open("wb") as output:
+            with urllib.request.urlopen(
+                request, timeout=60, context=download_ssl_context(),
+            ) as response, temporary.open("wb") as output:
                 while chunk := response.read(1 << 20):
                     output.write(chunk)
                     digest.update(chunk)
@@ -311,7 +314,9 @@ def download_runtime_bundle(
                         f"Connecting to huggingface.co for {filename}",
                     )
                 request = urllib.request.Request(url, headers={"User-Agent": "AETV/0.1"})
-                with urllib.request.urlopen(request, timeout=60) as response, temporary.open(
+                with urllib.request.urlopen(
+                    request, timeout=60, context=download_ssl_context(),
+                ) as response, temporary.open(
                     "wb"
                 ) as output:
                     if progress is not None:

@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import ssl
 import subprocess
 import sys
 import threading
@@ -53,7 +54,8 @@ def test_default_checkpoint_download_is_atomic_and_verified(tmp_path, monkeypatc
     )
     calls = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context):
+        assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
         calls.append((request.full_url, timeout))
         return io.BytesIO(payload)
 
@@ -85,7 +87,8 @@ def test_runtime_bundle_downloads_every_component_once(tmp_path, monkeypatch):
     )
     calls = []
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context):
+        assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
         name = request.full_url.rsplit("/", 1)[-1].split("?", 1)[0]
         calls.append((name, timeout))
         return io.BytesIO(payloads[name])
@@ -135,7 +138,7 @@ def test_runtime_download_reports_slow_http_data_before_full_chunk(tmp_path, mon
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
 
-        def open_local(_request, timeout):
+        def open_local(_request, timeout, context):
             assert updates[-1][2].startswith("Connecting to huggingface.co")
             return original_urlopen(f"http://127.0.0.1:{server.server_port}/model", timeout=timeout)
 
@@ -163,7 +166,7 @@ def test_runtime_connection_timeout_reports_stage_and_cleans_up(tmp_path, monkey
     })
     updates = []
 
-    def timed_out(_request, timeout):
+    def timed_out(_request, timeout, context):
         assert timeout == 60
         assert updates[-1].startswith("Connecting to huggingface.co")
         raise TimeoutError("connection timed out")
