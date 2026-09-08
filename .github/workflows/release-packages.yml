@@ -24,7 +24,7 @@ jobs:
           - name: Linux CPU
             os: ubuntu-latest
             artifact: aetv-linux-x64-cpu
-            output: dist/linux-cpu/AETV-linux-x64-cpu.tar.gz
+            output: dist/linux-cpu/AETV-linux-x64-cpu.*
             command: ./scripts/build_linux.sh
           - name: Windows CPU
             os: windows-latest
@@ -51,6 +51,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libhamlib4t64
+
+      - name: Install appimagetool
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          echo "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0  $RUNNER_TEMP/appimagetool" \
+            | sha256sum --check
+          chmod 755 "$RUNNER_TEMP/appimagetool"
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
 
       - name: Build and smoke-test portable package
         shell: pwsh

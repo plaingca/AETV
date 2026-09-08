@@ -95,6 +95,42 @@ case "$packaged_models" in
   *) echo "Refusing to remove models outside packaged app" >&2; exit 1 ;;
 esac
 
+appimage_tool="${APPIMAGETOOL:-appimagetool}"
+if ! command -v "$appimage_tool" >/dev/null 2>&1 && [[ ! -x "$appimage_tool" ]]; then
+  echo "appimagetool was not found; set APPIMAGETOOL to its executable path" >&2
+  exit 1
+fi
+
+appimage_dir="$build_root/AETV.AppDir"
+case "$appimage_dir" in
+  "$repo_root"/.build/*) rm -rf "$appimage_dir" ;;
+  *) echo "Refusing to prepare an AppDir outside the repository" >&2; exit 1 ;;
+esac
+mkdir -p "$appimage_dir/usr/lib"
+cp -a "$app_dir" "$appimage_dir/usr/lib/AETV"
+cat > "$appimage_dir/AppRun" <<'EOF'
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/lib/AETV/AETV" "$@"
+EOF
+chmod 755 "$appimage_dir/AppRun"
+cat > "$appimage_dir/aetv.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=AETV
+Comment=Live learned video over amateur-radio channels
+Exec=AETV
+Icon=aetv
+Terminal=false
+Categories=AudioVideo;HamRadio;
+EOF
+cp "$repo_root/aetv/assets/aetv-logo.png" "$appimage_dir/aetv.png"
+
+appimage="$dist_root/AETV-linux-x64-cpu.AppImage"
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_tool" "$appimage_dir" "$appimage"
+chmod 755 "$appimage"
+
 archive="$dist_root/AETV-linux-x64-cpu.tar.gz"
 tar -czf "$archive" -C "$dist_root" AETV
 echo "Portable AETV Linux build: $archive"
+echo "AETV Linux AppImage: $appimage"
