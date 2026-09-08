@@ -4,6 +4,8 @@ import hashlib
 import io
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +104,74 @@ def test_runtime_bundle_downloads_every_component_once(tmp_path, monkeypatch):
     assert progress[-1][0] == progress[-1][1] == sum(map(len, payloads.values()))
     assert download_runtime_bundle("TEST", destination=target) == manifest
     assert len(calls) == 3
+
+
+def test_runtime_download_reports_slow_http_data_before_full_chunk(tmp_path, monkeypatch):
+    # The server withholds the remainder until the UI has seen the first KiB.
+    # read(1 MiB) used to leave the UI stale until the entire response arrived.
+    payload = b"x" * 4096
+    progress_seen = threading.Event()
+    progress_before_remainder = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload[:1024])
+            self.wfile.flush()
+            progress_before_remainder.append(progress_seen.wait(5))
+            self.wfile.write(payload[1024:])
+
+        def log_message(self, *_args):
+            pass
+
+    monkeypatch.setitem(codec_module.RELEASE_RUNTIME_FILES, "TEST", {
+        "test.runtime.json": {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()},
+    })
+    updates = []
+    original_urlopen = codec_module.urllib.request.urlopen
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+
+        def open_local(_request, timeout):
+            assert updates[-1][2].startswith("Connecting to huggingface.co")
+            return original_urlopen(f"http://127.0.0.1:{server.server_port}/model", timeout=timeout)
+
+        monkeypatch.setattr(codec_module.urllib.request, "urlopen", open_local)
+
+        def progress(done, total, detail):
+            updates.append((done, total, detail))
+            if 0 < done < total:
+                progress_seen.set()
+
+        try:
+            manifest = download_runtime_bundle("TEST", destination=tmp_path, progress=progress)
+        finally:
+            server.shutdown()
+            worker.join(5)
+    assert progress_before_remainder == [True]
+    assert manifest.read_bytes() == payload
+    assert any(detail.startswith("Waiting for data:") for _, _, detail in updates)
+    assert updates[-1][:2] == (len(payload), len(payload))
+
+
+def test_runtime_connection_timeout_reports_stage_and_cleans_up(tmp_path, monkeypatch):
+    monkeypatch.setitem(codec_module.RELEASE_RUNTIME_FILES, "TEST", {
+        "test.runtime.json": {"bytes": 2, "sha256": hashlib.sha256(b"{}").hexdigest()},
+    })
+    updates = []
+
+    def timed_out(_request, timeout):
+        assert timeout == 60
+        assert updates[-1].startswith("Connecting to huggingface.co")
+        raise TimeoutError("connection timed out")
+
+    monkeypatch.setattr(codec_module.urllib.request, "urlopen", timed_out)
+    with pytest.raises(RuntimeError, match="connection timed out"):
+        download_runtime_bundle("TEST", destination=tmp_path, progress=lambda _done, _total, detail: updates.append(detail))
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_release_model_inventory_requires_every_checksum(tmp_path, monkeypatch):

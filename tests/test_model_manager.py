@@ -6,16 +6,35 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
+import pytest
 
 from aetv.codec import ReleaseModelStatus
 import aetv.gui.app as app_module
 from aetv.gui.app import MainWindow
 from aetv.settings import StationSettings
 from aetv.gui.model_manager import ModelManagerDialog
+import aetv.gui.model_manager as model_manager
 
 
 _APP = QApplication.instance() or QApplication([])
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_model_source_link_uses_clean_desktop_opener(monkeypatch, started):
+    opened = []
+    warnings = []
+    monkeypatch.setattr(model_manager, "open_web_url", lambda url: opened.append(url) or started)
+    monkeypatch.setattr(model_manager.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    dialog = ModelManagerDialog("V8", statuses={})
+    source = next(label for label in dialog.findChildren(QLabel) if "href=" in label.text())
+    assert not source.openExternalLinks()
+    source.linkActivated.emit("https://huggingface.co/AETV/AETV")
+    assert opened == ["https://huggingface.co/AETV/AETV"]
+    assert bool(warnings) is not started
+    if warnings:
+        assert "https://huggingface.co/AETV/AETV" in warnings[0]
+    dialog.close()
 
 
 def test_first_run_preselects_current_mode_and_requires_an_install():

@@ -27,7 +27,7 @@ from aetv.codec import (
     runtime_bundle_bytes,
 )
 from aetv.config import RELEASE_MODE_LABELS, RELEASE_MODES
-from aetv.gui.desktop import open_directory
+from aetv.gui.desktop import open_directory, open_web_url
 
 
 def _mib(value: int) -> str:
@@ -138,7 +138,10 @@ class ModelManagerDialog(QDialog):
         source = QLabel(
             'Source: <a href="https://huggingface.co/AETV/AETV">AETV/AETV on Hugging Face</a>'
         )
-        source.setOpenExternalLinks(True)
+        # Qt's automatic browser opener inherits the frozen app's library
+        # paths, which can break the system shell/browser (for example Readline).
+        source.setOpenExternalLinks(False)
+        source.linkActivated.connect(self._open_source_link)
         layout.addWidget(source)
 
         self.progress_label = QLabel("")
@@ -321,6 +324,13 @@ class ModelManagerDialog(QDialog):
             folder.mkdir(parents=True, exist_ok=True)
             if not open_directory(folder):
                 raise OSError(f"Could not open model folder: {folder}")
+        except OSError as error:
+            QMessageBox.warning(self, "AETV Model Manager", str(error))
+
+    def _open_source_link(self, address: str) -> None:
+        try:
+            if not open_web_url(address):
+                raise OSError(f"Could not open browser. Open this address manually: {address}")
         except OSError as error:
             QMessageBox.warning(self, "AETV Model Manager", str(error))
 
