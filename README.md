@@ -201,7 +201,10 @@ uv run python scripts/benchmark_inference.py --mode V8 --device cpu
 
 The build fetches and verifies both pinned training checkpoints, exports the
 runtime graphs for an offline packaged smoke test, then removes all model files
-before producing the archive. Use `-Runtime gpu` for the DirectML build
+before producing the archive. The Linux release CI also installs
+`appimagetool`, and the Linux builder emits both a portable `.tar.gz` and an
+executable `.AppImage`; local Linux builds must provide `appimagetool` on
+`PATH` or through `APPIMAGETOOL`. Use `-Runtime gpu` for the DirectML build
 (`-Runtime cuda` remains a compatibility alias).
 
 Training can capture and publish a final runtime bundle directly:
