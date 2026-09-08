@@ -2,6 +2,7 @@
 
 import ssl
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,7 @@ import aetv.tls as tls
 def empty_linux_context(monkeypatch):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     monkeypatch.setattr(tls.ssl, "create_default_context", lambda: context)
-    monkeypatch.setattr(tls.sys, "platform", "linux")
+    monkeypatch.setattr(tls, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     return context
