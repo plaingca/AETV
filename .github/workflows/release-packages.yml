@@ -22,12 +22,12 @@ jobs:
       matrix:
         include:
           - name: Linux CPU
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact: aetv-linux-x64-cpu
             output: dist/linux-cpu/AETV-linux-x64-cpu.*
             command: ./scripts/build_linux.sh
           - name: Linux GPU
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact: aetv-linux-x64-gpu
             output: dist/linux-gpu/AETV-linux-x64-gpu.*
             command: AETV_RUNTIME=gpu ./scripts/build_linux.sh
@@ -55,7 +55,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libhamlib4t64 libiio-dev rtl-sdr
+          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libiio-dev rtl-sdr
 
       - name: Install appimagetool
         if: runner.os == 'Linux'

@@ -51,7 +51,8 @@ which selects its supported hardware setting. The amplitude control in the
 Transmit pane and the hardware gain slider are separate adjustments.
 
 Linux portable packages include `rtl_sdr`, libiio, and their linked runtime
-libraries. USB devices still require normal OS device access permissions.
+libraries. Release builds use Ubuntu 22.04 as their Linux ABI baseline.
+USB devices still require normal OS device access permissions.
 For a source installation, install `aetv[gui]`, libiio and the `rtl-sdr` tools.
 Windows SDR operation requires the vendor libiio runtime and `rtl_sdr.exe` on
 PATH, plus the device's USB driver; physical Windows SDR operation has not been
