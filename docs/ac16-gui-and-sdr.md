@@ -76,7 +76,10 @@ to initialize raises an error rather than being reported as working CUDA.
 
 The continuous TX path uses bounded queues and converts IQ on a producer
 thread, independently of the hardware DMA consumer. RX captures IQ separately
-from its conversion and demodulation. AC16 GUI playback uses two GOPs of
+from its conversion and demodulation. AC16 startup also verifies the received
+mode-header boundary and disambiguates neighboring repeated-preamble peaks;
+periodic payload pilots alone cannot establish the correct GOP phase.
+AC16 GUI playback uses two GOPs of
 startup buffering and a four-GOP queue cap to accommodate acquisition bursts;
 there is no extra cross-GOP image blending. Throughput and startup latency
 are separate properties.

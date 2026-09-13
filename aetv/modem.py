@@ -81,6 +81,7 @@ class AETVDemodResult:
     # Detection evidence remains based on raw pilots when equalization denoises
     # them; shrinking noise must not make a genuine weak signal fail acquisition.
     pilot_confidence: float | None = None
+    header_tail_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -121,12 +122,64 @@ def _continuous_candidate_rejection(
     to it. Either strong framing observation remains sufficient for immediate
     weak-signal startup.
     """
-    if acquisition.metric < 0.35 and result.header_score < 0.20:
+    if result.mode.name == "AC16":
+        if result.header_score < 0.20 and result.header_tail_score < 0.35:
+            return "mode-header evidence cannot establish AC16 GOP phase"
+    elif acquisition.metric < 0.35 and result.header_score < 0.20:
         return "preamble and mode-header evidence are jointly ambiguous"
     payload_confidence = float(
         np.mean(result.gops_weights[0]) if result.gops_weights else 0.0
     )
     return _payload_presence_rejection(result, payload_confidence)
+
+
+def _resolve_preamble_repetition(
+    audio: np.ndarray,
+    acquisition: Acquisition,
+    mode: AETVModeSpec,
+    *,
+    interleave: bool = False,
+    timing_tracking: bool = False,
+) -> Acquisition:
+    """Disambiguate repeated-preamble peaks with header and payload evidence.
+
+    Fading can make a matched-filter peak one useful symbol early or late.
+    Check only the finite repetition neighbourhood, without source latents or
+    an assumed transmit start. Periodic payload pilots alone are insufficient;
+    each candidate must also pass the independent mode-header framing gate.
+    """
+    _, _, m, _, _, frame_samples, preamble, header, _, _ = _band_params(mode.band)
+    minimum = preamble + header + FRAMES_PER_GOP * frame_samples
+    if acquisition.preamble_start + minimum > len(audio):
+        # A partial callback is not evidence for an earlier repetition. Keep
+        # the pending candidate until its whole first GOP is available.
+        return acquisition
+    best = acquisition
+    best_score = -1.0
+    # Keep the original on ties, and limit work to startup, never tracked GOPs.
+    shifts = [0] + [i for i in range(1 - PREAMBLE_REPEATS, PREAMBLE_REPEATS) if i]
+    for shift in shifts:
+        start = acquisition.preamble_start + shift * m
+        if start < 0 or start + minimum > len(audio):
+            continue
+        candidate = Acquisition(start, acquisition.freq_offset, acquisition.metric)
+        try:
+            result = demodulate_gop_stream(
+                audio[: start + minimum], band=mode.band,
+                acquisition=candidate, expected_mode=mode, drift_track="off",
+                interleave=interleave, timing_tracking=timing_tracking,
+            )
+        except SyncError:
+            continue
+        if _continuous_candidate_rejection(candidate, result) is not None:
+            continue
+        if shift == 0:
+            return acquisition
+        score = max(result.header_score, result.header_tail_score) * result.pilot_coherence
+        if score > best_score:
+            best, best_score = candidate, score
+    return best
+
 
 
 def to_baseband(x: np.ndarray, fcenter_hz: int, fs: int = FS) -> np.ndarray:
@@ -1395,6 +1448,12 @@ class StreamingDemodulator:
                                 to_baseband(recent, geom.fcenter_hz, fs),
                                 band=self.band,
                             )
+                            if self.expected_mode.name == "AC16":
+                                recent_acq = _resolve_preamble_repetition(
+                                    recent, recent_acq, self.expected_mode,
+                                    interleave=self.interleave,
+                                    timing_tracking=self.timing_tracking,
+                                )
                             recent_needed = recent_acq.preamble_start + minimum
                             if len(recent) < recent_needed:
                                 candidate_incomplete = True
@@ -1521,6 +1580,14 @@ class StreamingDemodulator:
                             self.buffer[:search_limit], geom.fcenter_hz, fs
                         ),
                         band=self.band,
+                    )
+                if self.continuous and self.expected_mode.name == "AC16":
+                    # Resolve pending candidates too, using all available IQ-
+                    # derived audio: the search prefix may end inside a GOP.
+                    acq = _resolve_preamble_repetition(
+                        self.buffer, acq, self.expected_mode,
+                        interleave=self.interleave,
+                        timing_tracking=self.timing_tracking,
                     )
             except SyncError:
                 if self.continuous:
@@ -2031,6 +2098,32 @@ def demodulate_gop_stream(
     if n_gops == 0:
         raise SyncError("insufficient audio length for a full GOP")
 
+    header_tail_score = 0.0
+    if mode.name == "AC16":
+        # Confirm the header/payload transition locally. The preamble is separated
+        # from the last header symbols by hundreds of milliseconds, so its channel
+        # estimate may no longer describe this boundary on a fading HF path.
+        # These known header symbols distinguish GOP phase from periodic pilots.
+        tail_channel = ofdm.demod_window(
+            z_cfo, frames_start + ncp, band=band
+        ) / preamble_pilot
+        expected_header = _header_carriers(
+            encode_header(mode.index, PROTOCOL_VERSION), geom.carriers
+        )
+        # Match in the received domain; dividing by a noisy faded carrier would
+        # amplify its noise and let a deep null dominate the framing decision.
+        tail_template = expected_header * tail_channel
+        tail_scores = []
+        for back in range(1, min(3, HEADER_SYMS) + 1):
+            observed = ofdm.demod_window(
+                z_cfo, frames_start - back * nsym + ncp, band=band
+            )
+            tail_scores.append(float(
+                abs(np.vdot(tail_template, observed))
+                / max(np.linalg.norm(tail_template) * np.linalg.norm(observed), 1e-12)
+            ))
+        header_tail_score = float(np.mean(tail_scores))
+
     pilot_seq = ofdm.pilot_sequence(band)
     all_data_syms = []
     all_data_weights = []
@@ -2192,6 +2285,7 @@ def demodulate_gop_stream(
         freq_offset=refined_freq_offset,
         sync_metric=acq.metric,
         frames_received=total_frames,
+        header_tail_score=header_tail_score,
         beacon=beacon_res,
         callsign=beacon_res.callsign if beacon_res else "",
         preamble_start=acq.preamble_start,
