@@ -1024,6 +1024,7 @@ class TransmitPanel(QWidget):
             self.transmitting()
             and (self.cam_radio.isChecked() or self.screen_radio.isChecked())
             and not self.emulating()
+            and self.station.settings.tx_backend != "pluto"
         ):
             return
         self.preview.set_rgb(frames)

@@ -76,8 +76,10 @@ def pack_gop_symbols(
             perm = GOP_INTERLEAVER_N
         elif band == "W":
             perm = GOP_INTERLEAVER_W
-        else:
+        elif band == "U":
             perm = GOP_INTERLEAVER_U
+        else:
+            perm = derive_gop_interleaver(geom.latents_per_gop)
         tx_latents = latents[perm]
     else:
         tx_latents = latents
@@ -153,8 +155,10 @@ def unpack_gop_symbols(
             inv_perm = GOP_DEINTERLEAVER_N
         elif band == "W":
             inv_perm = GOP_DEINTERLEAVER_W
-        else:
+        elif band == "U":
             inv_perm = GOP_DEINTERLEAVER_U
+        else:
+            inv_perm = np.argsort(derive_gop_interleaver(geom.latents_per_gop))
         latents = raw_latents[inv_perm]
         weights = raw_weights[inv_perm]
     else:

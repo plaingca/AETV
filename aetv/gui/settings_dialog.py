@@ -334,6 +334,8 @@ class SettingsDialog(QDialog):
         self.rx_source.addItem("Soundcard", "soundcard")
         self.rx_source.addItem("FlexRadio network audio (automatic)", "flex")
         self.rx_source.addItem("Public KiwiSDR (remote receive only)", "kiwi")
+        self.rx_source.addItem("PlutoSDR", "pluto")
+        self.rx_source.addItem("RTL-SDR", "rtlsdr")
         self.rx_source.setCurrentIndex(max(0, self.rx_source.findData(self._settings.rx_source)))
         self.buffer_s = QDoubleSpinBox()
         self.buffer_s.setRange(20.0, 300.0)

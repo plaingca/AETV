@@ -31,7 +31,7 @@ WIDE_CHECKPOINT = Path("models") / "v8-flex8k-ota-rxfix.pt"
 
 def test_default_mode_is_the_standard_channel_release():
     assert DEFAULT_MODE == "V8"
-    assert set(RELEASE_CHECKPOINTS) == {"V7", "V8"}
+    assert set(RELEASE_CHECKPOINTS) == {"V7", "V8", "AC16"}
 
 
 def test_resolve_checkpoint_from_environment(tmp_path, monkeypatch):

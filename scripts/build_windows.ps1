@@ -93,6 +93,8 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "NOTICE") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "FFMPEG-NOTICE.txt") -Destination $AppDir
+New-Item -ItemType Directory -Force -Path (Join-Path $AppDir "docs") | Out-Null
+Copy-Item -LiteralPath (Join-Path $RepoRoot "docs\ac16-gui-and-sdr.md") -Destination (Join-Path $AppDir "docs")
 
 $PreviousOffline = $env:AETV_OFFLINE
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM

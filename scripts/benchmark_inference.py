@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from aetv.codec import AETVCodec
+from aetv.config import RELEASE_MODES
 from aetv.source import write_video_smoke_test
 
 
@@ -30,7 +31,7 @@ def _measure(call, synchronize, repeats: int) -> list[float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("V7", "V8"), default="V8")
+    parser.add_argument("--mode", choices=RELEASE_MODES, default="V8")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threads", type=int, default=0, help="CPU threads; 0 keeps the backend default")

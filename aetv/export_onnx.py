@@ -13,6 +13,24 @@ from .config import AETV_MODES
 from .models import AETVAutoencoder
 
 
+class _AC16Encoder(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, frames):
+        return self.model.encode_gop(frames)
+
+
+class _AC16Decoder(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, latents, weights):
+        return self.model.decode_gop(latents, weights)[0]
+
+
 class _DecoderForExport(torch.nn.Module):
     def __init__(self, decoder: torch.nn.Module, output_shape: tuple[int, int, int]):
         super().__init__()
@@ -46,13 +64,18 @@ def export_checkpoint(
     if mode_name not in AETV_MODES:
         raise ValueError(f"{checkpoint} has unknown mode {mode_name!r}")
     mode = AETV_MODES[mode_name]
-    model = AETVAutoencoder(
-        mode=mode,
-        width=int(args.get("model_width", 128)),
-        latent_channels=int(args.get("latent_channels", 3)),
-        compact=bool(args.get("compact", False)),
-        causal=mode.causal,
-    )
+    ac16 = payload.get("architecture") == "ac16-asymmetric-context-v4"
+    if ac16:
+        from .ac16 import AsymmetricContextCodecV4
+        model = AsymmetricContextCodecV4(**payload["model_config"])
+    else:
+        model = AETVAutoencoder(
+            mode=mode,
+            width=int(args.get("model_width", 128)),
+            latent_channels=int(args.get("latent_channels", 3)),
+            compact=bool(args.get("compact", False)),
+            causal=mode.causal,
+        )
     state = payload.get("model_state_dict") or payload.get("model")
     if state is None:
         raise KeyError(f"{checkpoint} has no model_state_dict")
@@ -70,7 +93,7 @@ def export_checkpoint(
 
     with torch.inference_mode():
         torch.onnx.export(
-            model.encoder,
+            _AC16Encoder(model) if ac16 else model.encoder,
             (frames,),
             encoder_path,
             input_names=["frames"],
@@ -79,7 +102,7 @@ def export_checkpoint(
             dynamo=False,
         )
         torch.onnx.export(
-            _DecoderForExport(model.decoder, (mode.gop_frames, mode.height, mode.width)),
+            _AC16Decoder(model) if ac16 else _DecoderForExport(model.decoder, (mode.gop_frames, mode.height, mode.width)),
             (latents, weights),
             decoder_path,
             input_names=["latents", "weights"],
@@ -97,6 +120,8 @@ def export_checkpoint(
                 "mode": mode_name,
                 "step": payload.get("step"),
                 "source_checkpoint": checkpoint.name,
+                "source_sha256": _sha256(checkpoint),
+                "architecture": payload.get("architecture", "aetv-autoencoder"),
                 "encoder": encoder_path.name,
                 "decoder": decoder_path.name,
                 "model_width": int(args.get("model_width", 128)),

@@ -26,6 +26,11 @@ jobs:
             artifact: aetv-linux-x64-cpu
             output: dist/linux-cpu/AETV-linux-x64-cpu.*
             command: ./scripts/build_linux.sh
+          - name: Linux GPU
+            os: ubuntu-latest
+            artifact: aetv-linux-x64-gpu
+            output: dist/linux-gpu/AETV-linux-x64-gpu.*
+            command: AETV_RUNTIME=gpu ./scripts/build_linux.sh
           - name: Windows CPU
             os: windows-latest
             artifact: aetv-windows-x64-cpu
@@ -50,7 +55,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libhamlib4t64
+          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libhamlib4t64 libiio-dev rtl-sdr
 
       - name: Install appimagetool
         if: runner.os == 'Linux'
@@ -120,5 +125,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --generate-notes --verify-tag
+            extra=()
+            if [[ "$GITHUB_REF_NAME" == *rc* || "$GITHUB_REF_NAME" == *-* ]]; then extra+=(--prerelease --latest=false); fi
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" --generate-notes --verify-tag "${extra[@]}"
           fi

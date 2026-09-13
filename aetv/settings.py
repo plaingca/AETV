@@ -62,6 +62,15 @@ class StationSettings:
     tx_iq_mapping: str = "iq_lr"  # iq_lr | iq_rl
     tx_level: float = 0.7
     rx_source: str = "soundcard"  # soundcard | flex | kiwi
+    tx_backend: str = "audio"  # audio | pluto
+    sdr_frequency_mhz: float = 439.0
+    pluto_uri: str = "ip:192.168.2.1"
+    rtl_serial: str = "1001"
+    pluto_tx_gain: float = -30.0
+    pluto_rx_gain: float = 30.0
+    rtl_rx_gain: float = 37.2
+    sdr_rx_correction_hz: float = 0.0
+    sdr_auto_correct: bool = True
     buffer_seconds: float = 90.0
     decode_every_s: float = 0.1
 
@@ -141,7 +150,7 @@ class StationSettings:
             problems.append(f"unknown TX channel profile {self.tx_channel_profile!r}")
         if self.cat_backend not in {"none", "hamlib", "rigctld", "flex", "rts", "dtr"}:
             problems.append(f"unknown CAT backend {self.cat_backend!r}")
-        if self.rx_source not in {"soundcard", "flex", "kiwi"}:
+        if self.rx_source not in {"soundcard", "flex", "kiwi", "pluto", "rtlsdr"}:
             problems.append(f"unknown receive source {self.rx_source!r}")
         if receive and self.rx_source == "kiwi":
             if not self.kiwi_host:
@@ -153,14 +162,36 @@ class StationSettings:
                     problems.append(str(error))
         if self.prop_antenna_pattern not in {"unknown", "dipole", "directional"}:
             problems.append(f"unknown propagation antenna pattern {self.prop_antenna_pattern!r}")
-        if radio_tx and self.cat_backend == "flex" and not self.flex_host:
+        if radio_tx and self.tx_backend == "audio" and self.cat_backend == "flex" and not self.flex_host:
             problems.append("Flex host is empty")
-        if radio_tx and self.cat_backend == "hamlib" and self.hamlib_model <= 0:
+        if radio_tx and self.tx_backend == "audio" and self.cat_backend == "hamlib" and self.hamlib_model <= 0:
             problems.append("Hamlib radio model is not selected")
         if receive and self.rx_source == "flex" and not self.flex_host:
             problems.append("Flex host is empty")
-        if radio_tx and self.cat_backend in {"rts", "dtr"} and not self.serial_port:
+        if radio_tx and self.tx_backend == "audio" and self.cat_backend in {"rts", "dtr"} and not self.serial_port:
             problems.append("serial PTT port is empty")
+        if self.tx_backend not in {"audio", "pluto"}:
+            problems.append("unknown transmit backend")
+        using_sdr = (radio_tx and self.tx_backend == "pluto") or (receive and self.rx_source in {"pluto", "rtlsdr"})
+        using_pluto = (radio_tx and self.tx_backend == "pluto") or (receive and self.rx_source == "pluto")
+        if using_sdr:
+            if using_pluto and not 70 <= self.sdr_frequency_mhz <= 6000:
+                problems.append("Pluto frequency must be 70–6000 MHz")
+            if self.waveform_mode != "video":
+                problems.append("Direct SDR requires video waveform mode")
+            if using_pluto and not self.pluto_uri.strip():
+                problems.append("Pluto URI is empty")
+            if not -89.75 <= self.pluto_tx_gain <= 0:
+                problems.append("Pluto TX gain must be −89.75 to 0 dB")
+            if not 0 <= self.pluto_rx_gain <= 70 or not 0 <= self.rtl_rx_gain <= 49.6:
+                problems.append("SDR receive gain is outside hardware bounds")
+            if not -25000 <= self.sdr_rx_correction_hz <= 25000:
+                problems.append("RX frequency correction must be within ±25 kHz")
+        if receive and self.rx_source == "rtlsdr":
+            if not 24 <= self.sdr_frequency_mhz <= 1765:
+                problems.append("RTL-SDR frequency must be 24–1765 MHz")
+            if not self.rtl_serial.strip():
+                problems.append("Select an RTL-SDR serial")
         return problems
 
     def receive_path(self) -> Path:

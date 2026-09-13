@@ -454,6 +454,8 @@ class ReceivePanel(QWidget):
         self.source.addItem("Soundcard", "soundcard")
         self.source.addItem("FlexRadio (network)", "flex")
         self.source.addItem("Public KiwiSDR", "kiwi")
+        self.source.addItem("PlutoSDR", "pluto")
+        self.source.addItem("RTL-SDR", "rtlsdr")
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
         self.playback_label = QLabel("Program audio to")
@@ -1045,15 +1047,17 @@ class ReceivePanel(QWidget):
     def _on_error(self, message: str) -> None:
         self.status.setText(message)
         self.logMessage.emit(message)
+        if self.station.settings.rx_source in {"pluto", "rtlsdr"} and self.listening():
+            self.stop()
 
     def _show_video(self, video, state: RxState) -> None:
         mode = self.station.require_codec().mode
         self.preview.enqueue_rgb(
             video,
             fps=mode.fps,
-            prebuffer_frames=mode.gop_frames,
-            boundary_blend_frames=4,
-            max_queue_frames=2 * mode.gop_frames,
+            prebuffer_frames=(2 if mode.name == "AC16" else 1) * mode.gop_frames,
+            boundary_blend_frames=0 if mode.name == "AC16" else 4,
+            max_queue_frames=(4 if mode.name == "AC16" else 2) * mode.gop_frames,
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
@@ -1136,9 +1140,9 @@ class ReceivePanel(QWidget):
         self.preview.enqueue_rgb(
             video,
             fps=mode.fps,
-            prebuffer_frames=mode.gop_frames,
-            boundary_blend_frames=4,
-            max_queue_frames=2 * mode.gop_frames,
+            prebuffer_frames=(2 if mode.name == "AC16" else 1) * mode.gop_frames,
+            boundary_blend_frames=0 if mode.name == "AC16" else 4,
+            max_queue_frames=(4 if mode.name == "AC16" else 2) * mode.gop_frames,
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)

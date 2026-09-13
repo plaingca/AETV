@@ -1,6 +1,6 @@
 [project]
 name = "aetv"
-version = "0.1.19"
+version = "0.1.20rc1"
 description = "Live learned video over challenging amateur-radio channels"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ gui = [
     "websockets>=12.0",
     "pyserial>=3.5",
     "onnxruntime>=1.20,<1.24",
+    "pyadi-iio>=0.0.20,<0.1",
 ]
 train = [
     "torch>=2.2",

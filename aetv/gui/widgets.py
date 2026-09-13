@@ -134,6 +134,9 @@ class VideoView(QWidget):
         self._timer.setSingleShot(True)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._advance_frame)
+        self._prebuffer_timer = QTimer(self)
+        self._prebuffer_timer.setSingleShot(True)
+        self._prebuffer_timer.timeout.connect(self._start_playout)
         self.setMinimumSize(240, 135)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAutoFillBackground(False)
@@ -144,6 +147,7 @@ class VideoView(QWidget):
 
     def clear(self) -> None:
         self._timer.stop()
+        self._prebuffer_timer.stop()
         self._playout_deadline = None
         self._frames.clear()
         self._last_enqueued_frame = None
@@ -151,6 +155,7 @@ class VideoView(QWidget):
         self.update()
 
     def set_rgb(self, frames: np.ndarray, fps: float | None = None) -> None:
+        self._prebuffer_timer.stop()
         if frames is None or frames.size == 0:
             self.clear()
             return
@@ -209,10 +214,17 @@ class VideoView(QWidget):
         # decoded material is available to ride through the GUI's batched GOP
         # delivery. Playback itself remains locked to the advertised frame rate.
         if len(self._frames) < max(1, int(prebuffer_frames)):
+            # A short transmission or final GOP after an underrun must still
+            # play when no further GOP arrives to satisfy the prebuffer.
+            if not self._prebuffer_timer.isActive():
+                self._prebuffer_timer.start(
+                    max(1, math.ceil(1000 * prebuffer_frames / self._fps))
+                )
             return
         self._start_playout()
 
     def _start_playout(self) -> None:
+        self._prebuffer_timer.stop()
         self._playout_deadline = time.monotonic()
         self._advance_frame()
 

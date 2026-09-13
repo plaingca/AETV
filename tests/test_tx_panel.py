@@ -27,6 +27,7 @@ class _Preview:
 def _panel(*, emulating: bool):
     return SimpleNamespace(
         transmitting=lambda: True,
+        station=SimpleNamespace(settings=SimpleNamespace(tx_backend="audio")),
         cam_radio=SimpleNamespace(isChecked=lambda: True),
         emulating=lambda: emulating,
         preview=_Preview(),
@@ -333,7 +334,7 @@ def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
         station=SimpleNamespace(
             settings=SimpleNamespace(gops=10),
             require_codec=lambda: SimpleNamespace(
-                mode=SimpleNamespace(fps=6, gop_frames=2)
+                mode=SimpleNamespace(name="V8", fps=6, gop_frames=2)
             ),
         ),
         preview=Preview(),

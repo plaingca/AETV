@@ -946,7 +946,7 @@ class StreamingDemodulator:
         self._tracking_pending: list[tuple[AETVDemodResult, int]] = []
         self._tracking_expected_offset = 0
         self._tracking_rate_adjustment = 0.0
-        default_mode = {"N": "V0", "W": "V1", "U": "V7"}[band]
+        default_mode = {"N": "V0", "W": "V1", "U": "V7", "A": "AC16"}[band]
         self.expected_mode = AETV_MODES[mode_name or default_mode]
         if self.expected_mode.band != band:
             raise ValueError(

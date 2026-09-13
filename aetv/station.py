@@ -642,6 +642,18 @@ class TxEngine:
                     leveled_chunks(), transmit_rate, n_gops, codec,
                     channel_profile, tx_recorder,
                 )
+            if settings.tx_backend == "pluto":
+                from .sdr import transmit_pluto
+                self._set(TxPhase.ENCODING, 0.0, "Preparing Pluto transmit")
+                complete = transmit_pluto(
+                    leveled_chunks(), transmit_rate, settings, self._cancel,
+                    lambda progress: self._set(TxPhase.SENDING, progress, "Pluto transmitting"),
+                    max_seconds=n_gops + 0.65,
+                )
+                self._set(TxPhase.DONE if complete else TxPhase.CANCELLED,
+                          1.0 if complete else self.state.progress,
+                          "Pluto off · sent" if complete else "Pluto off · cancelled")
+                return complete
             return self._keyed_send_stream(leveled_chunks(), transmit_rate, n_gops)
         except Exception as error:
             self._on_error(str(error))
@@ -1390,6 +1402,7 @@ class RxEngine:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._stream = None
+        self._sdr = None
         self._kiwi: KiwiCapture | None = None
         self._flex: FlexVitaSession | None = None
         self.ring: RingBuffer | None = None
@@ -1470,7 +1483,17 @@ class RxEngine:
         self._on_ring(self.ring)
         self.state = RxState(listening=True, source=settings.rx_source, message="starting")
         self._on_state(self.state)
-        if settings.rx_source == "kiwi":
+        if settings.rx_source in {"pluto", "rtlsdr"}:
+            from .sdr import SDRCapture
+            self._sdr = SDRCapture(settings, codec.mode, self.ring,
+                                   on_error=self._on_error, on_status=self.station.log)
+            try:
+                self._sdr.start()
+            except Exception:
+                self.stop()
+                raise
+            self._on_ring(self._sdr.preview)
+        elif settings.rx_source == "kiwi":
             self._kiwi = KiwiCapture(
                 host=settings.kiwi_host,
                 dial_mhz=settings.kiwi_dial_mhz,
@@ -1527,6 +1550,12 @@ class RxEngine:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._sdr is not None:
+            try:
+                self._sdr.stop()
+            except Exception as error:
+                self._on_error(str(error))
+            self._sdr = None
         if self._kiwi is not None:
             self._kiwi.stop()
             self._kiwi = None
@@ -1605,7 +1634,7 @@ class RxEngine:
             # Kiwi already has an exact-rate I/Q resampler upstream. Both
             # sources still need guarded correction of waveform timing jumps.
             timing_tracking=self.station.settings.rx_source == "soundcard",
-            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard"},
+            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard", "pluto", "rtlsdr"},
         )
 
     def _loop(self) -> None:
