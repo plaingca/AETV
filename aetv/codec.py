@@ -527,8 +527,10 @@ class AETVCodec:
                 raise FileNotFoundError(f"runtime model component not found: {model_path}")
 
         requested = str(device or "auto").lower()
-        if requested.startswith("cuda") and "CUDAExecutionProvider" not in ort.get_available_providers():
-            raise RuntimeError("CUDA is unavailable in this ONNX runtime. Install the GPU package or select CPU.")
+        # The GUI historically stores its generic GPU choice as "cuda" on
+        # both platforms; Windows fulfills that choice through DirectML.
+        if requested.startswith("cuda") and not {"CUDAExecutionProvider", "DmlExecutionProvider"}.intersection(ort.get_available_providers()):
+            raise RuntimeError("GPU inference is unavailable in this ONNX runtime. Install the GPU package or select CPU.")
         if requested not in {"cpu", "cpu:0", "dml"} and "CUDAExecutionProvider" in ort.get_available_providers():
             if hasattr(ort, "preload_dlls"):
                 ort.preload_dlls(directory="")
