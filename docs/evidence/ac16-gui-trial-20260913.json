@@ -1,0 +1,214 @@
+{
+  "created_utc": "2026-09-13T23:30:00.059258+00:00",
+  "source_commit": "77f389a745db77f988e24f8cfec9731c7bc2c70b",
+  "build_run": "https://github.com/plaingca/AETV/actions/runs/34788969428",
+  "release_tag": "trial-ac16-gui-0.1.20rc1",
+  "checkpoint_sha256": "ff451787feb2708310eebac4a47151cb0fef654c071af463022d8be2f1c618cb",
+  "huggingface_revision": "6f3a4cd4df1e8b261141da75988f3df2750666db",
+  "tests": {
+    "passed": 344,
+    "skipped": 2
+  },
+  "onnx_parity": {
+    "cases": 16,
+    "max_rgb_error": 1.0,
+    "max_mean_rgb_error": 1.808449074074074e-05
+  },
+  "trials": {
+    "final-cpu-60-quiet": {
+      "passed": true,
+      "packaged": true,
+      "backend": "onnxruntime",
+      "device": "CPU",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "radio": {
+        "rx_source": "rtlsdr",
+        "sdr_frequency_mhz": 439.0,
+        "pluto_uri": "ip:192.168.2.1",
+        "rtl_serial": "1001",
+        "pluto_tx_gain": -10.0,
+        "pluto_rx_gain": 37.2,
+        "rtl_rx_gain": 37.2,
+        "sdr_auto_correct": true,
+        "sdr_rx_correction_hz": 0.0
+      },
+      "source_sha256": "85f201e2c51902c864e5f2dcd15dea2aa4ddbe51ff8796a47092cc10125d9fdb",
+      "gops": 60,
+      "displayed_frames": 600,
+      "correct_chronology": true,
+      "errors": [],
+      "display_fps": 9.999927328541387,
+      "display_interval_p99_ms": 152.219798695296,
+      "encode_mean_ms": 201.6967992298305,
+      "decode_mean_ms": 298.74531789682806,
+      "latent_cosine_min": 0.952131986618042,
+      "latent_cosine_mean": 0.9567574987808863,
+      "frame_latency_median_s": 4.60608711047098,
+      "frame_latency_p95_s": 4.606906221201643,
+      "modem_snr_mean_db": 34.89290104081412,
+      "rx_backlog_p95_s": 0.4
+    },
+    "final-gpu-60": {
+      "passed": true,
+      "packaged": true,
+      "backend": "onnxruntime",
+      "device": "CUDA",
+      "providers": [
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "radio": {
+        "rx_source": "rtlsdr",
+        "sdr_frequency_mhz": 439.0,
+        "pluto_uri": "ip:192.168.2.1",
+        "rtl_serial": "1001",
+        "pluto_tx_gain": -10.0,
+        "pluto_rx_gain": 37.2,
+        "rtl_rx_gain": 37.2,
+        "sdr_auto_correct": true,
+        "sdr_rx_correction_hz": 0.0
+      },
+      "source_sha256": "85f201e2c51902c864e5f2dcd15dea2aa4ddbe51ff8796a47092cc10125d9fdb",
+      "gops": 60,
+      "displayed_frames": 600,
+      "correct_chronology": true,
+      "errors": [],
+      "display_fps": 9.999551626470886,
+      "display_interval_p99_ms": 155.09028488770127,
+      "encode_mean_ms": 30.440801940858364,
+      "decode_mean_ms": 33.3473966922611,
+      "latent_cosine_min": 0.953572690486908,
+      "latent_cosine_mean": 0.9567511131366094,
+      "frame_latency_median_s": 6.288410046603531,
+      "frame_latency_p95_s": 6.291159220552072,
+      "modem_snr_mean_db": 35.19672314718415,
+      "rx_backlog_p95_s": 0.1
+    },
+    "final-pluto-10": {
+      "passed": true,
+      "packaged": true,
+      "backend": "onnxruntime",
+      "device": "CPU",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "radio": {
+        "rx_source": "pluto",
+        "sdr_frequency_mhz": 439.0,
+        "pluto_uri": "ip:192.168.2.1",
+        "rtl_serial": "1001",
+        "pluto_tx_gain": -10.0,
+        "pluto_rx_gain": 40.0,
+        "rtl_rx_gain": 40.0,
+        "sdr_auto_correct": true,
+        "sdr_rx_correction_hz": 0.0
+      },
+      "source_sha256": "85f201e2c51902c864e5f2dcd15dea2aa4ddbe51ff8796a47092cc10125d9fdb",
+      "gops": 10,
+      "displayed_frames": 100,
+      "correct_chronology": true,
+      "errors": [],
+      "display_fps": 9.998475154770068,
+      "display_interval_p99_ms": 162.07414574921128,
+      "encode_mean_ms": 240.51812421530485,
+      "decode_mean_ms": 342.1875834465027,
+      "latent_cosine_min": 0.9574881196022034,
+      "latent_cosine_mean": 0.9583968639373779,
+      "frame_latency_median_s": 6.026609752327204,
+      "frame_latency_p95_s": 6.027244083769619,
+      "modem_snr_mean_db": 37.614853800437615,
+      "rx_backlog_p95_s": 0.8649999999999997
+    }
+  },
+  "packages": [
+    {
+      "name": "AETV-linux-x64-cpu.AppImage",
+      "bytes": 245578232,
+      "sha256": "5ea903295cf1e56e2045e787420a329f67a6232143c530e3d0d1c20741853439"
+    },
+    {
+      "name": "AETV-linux-x64-cpu.tar.gz",
+      "bytes": 267901115,
+      "sha256": "7b27d779670d53022317ca00e6af2a9fc5542c69ef339f0289ee24c2fbab4ea1"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.AppImage",
+      "bytes": 1783515640,
+      "sha256": "c93f60c6480e0c743161205544790af5153744acfa1dcfa3a3bc936cf32eeb61"
+    },
+    {
+      "name": "AETV-windows-x64-cpu.zip",
+      "bytes": 260045535,
+      "sha256": "1bc12647748a22dc1582489ac57430f9dec39235f38fab7a8db47e55cdd52bdc"
+    },
+    {
+      "name": "AETV-windows-x64-gpu.zip",
+      "bytes": 271692800,
+      "sha256": "22a9adad16d2825b49994fef9cc1c444475c20bd5ac7628fc91b80aef14cb0fb"
+    }
+  ],
+  "limitations": [
+    "Strong local 439 MHz link, about 10 ft separation; no weak-link or all-host throughput guarantee.",
+    "Paced held-out RGB fixture excludes camera-driver acquisition; Qt offscreen widget callbacks exclude physical display scan-out.",
+    "Display timing includes periodic GUI screenshot capture and several seconds of startup buffering.",
+    "Windows passed CI/package smoke checks; physical Windows SDR operation was not tested. Vendor SDR runtimes/drivers are required."
+  ],
+  "cpu_cuda_encoder_parity": {
+    "min_cosine": 0.999999463558197,
+    "mean_cosine": 0.9999997615814209,
+    "max_absolute_difference": 0.005227565765380859
+  },
+  "final_hardware_state": {
+    "tx_powerdown": "1",
+    "tx_gain": -89.75,
+    "rx_lo": 439099998,
+    "rx_gain": 40,
+    "sample_rate": 2399999,
+    "rtl_processes": []
+  },
+  "saved_video_checks": [
+    {
+      "trial": "final-cpu-60-quiet",
+      "width": 256,
+      "height": 144,
+      "r_frame_rate": "10/1",
+      "duration": "60.000000",
+      "nb_frames": "600"
+    },
+    {
+      "trial": "final-gpu-60",
+      "width": 256,
+      "height": 144,
+      "r_frame_rate": "10/1",
+      "duration": "60.000000",
+      "nb_frames": "600"
+    },
+    {
+      "trial": "final-pluto-10",
+      "width": 256,
+      "height": 144,
+      "r_frame_rate": "10/1",
+      "duration": "10.000000",
+      "nb_frames": "100"
+    }
+  ],
+  "packaged_cpu_benchmark": {
+    "mode": "AC16",
+    "device": "CPU",
+    "checkpoint": "ac16-v4.runtime.json",
+    "cpu": "x86_64",
+    "logical_cpus": 32,
+    "backend": "onnxruntime",
+    "backend_version": "1.23.2",
+    "backend_threads": 8,
+    "encode_median_ms": 185.91,
+    "decode_median_ms": 274.23,
+    "cycle_median_ms": 460.14,
+    "encode_realtime_headroom": 5.38,
+    "decode_realtime_headroom": 3.65,
+    "full_duplex_headroom": 2.17,
+    "repeats": 2
+  }
+}
