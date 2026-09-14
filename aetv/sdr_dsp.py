@@ -41,7 +41,8 @@ class ModemToIQ:
     AC16 A/V instead uses a 10 kHz center for its complete 20 kHz composite.
     """
 
-    def __init__(self, sample_rate=2400000, offset_hz=100000, center_hz=8000):
+    def __init__(self, sample_rate=2400000, offset_hz=100000, center_hz=8000,
+                 *, peak_limit=None):
         if (
             sample_rate % 48000
             or sample_rate <= 48000
@@ -49,6 +50,10 @@ class ModemToIQ:
             or abs(offset_hz) + center_hz >= sample_rate / 2
         ):
             raise ValueError("Invalid hardware sample rate or LO offset")
+        if peak_limit is not None and not 0 < peak_limit < 1:
+            raise ValueError("IQ peak limit must be between zero and one")
+        self.peak_limit = peak_limit
+        self.headroom_gain = 1.0
         self.sample_rate, self.offset_hz = sample_rate, offset_hz
         self.center_hz = center_hz
         self.factor = sample_rate // 48000
@@ -90,6 +95,16 @@ class ModemToIQ:
             * np.remainder(radio_positions * (self.offset_hz / self.sample_rate), 1)
         )
         self.input_count += len(audio)
+        if self.peak_limit is not None:
+            # GUI transports submit complete GOP-sized blocks, then split the
+            # bounded output into USB buffers. Back off the entire complex
+            # waveform uniformly; component clipping would corrupt OFDM and
+            # produce out-of-band energy. Hold acquired headroom through the
+            # rest of the transmission instead of pumping gain during speech.
+            peak = float(np.max(np.abs(result)))
+            if peak > 0:
+                self.headroom_gain = min(self.headroom_gain, self.peak_limit / peak)
+            result *= self.headroom_gain
         if max(abs(result.real).max(), abs(result.imag).max()) >= 1:
             raise ValueError("IQ exceeds DAC component range; reduce explicit TX RMS")
         return result.astype(np.complex64)

@@ -281,7 +281,7 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 pass
 
     def produce():
-        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings))
+        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9)
         resample = StreamResampler(*resample_ratio(fs, 48000))
         count = 0
         try:
@@ -294,10 +294,14 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                     raise RuntimeError("HackRF source exceeded the requested duration")
                 power = _active_signal_power(audio)
                 audio = audio * (0.2 * settings.tx_level / 0.7 / max(np.sqrt(power), 1e-12))
-                for pos in range(0, len(audio), 4800):
+                for pos in range(0, len(audio), 48000):
                     if stopped.is_set() or cancel.is_set():
                         return
-                    put(encode_iq(adapter.feed(audio[pos:pos + 4800])))
+                    iq = adapter.feed(audio[pos:pos + 48000])
+                    for offset in range(0, len(iq), SAMPLE_RATE // 10):
+                        if stopped.is_set() or cancel.is_set():
+                            return
+                        put(encode_iq(iq[offset:offset + SAMPLE_RATE // 10]))
             # Drain the resampler and sideband FIR tail before the USB flush.
             put(encode_iq(adapter.feed(resample(np.zeros(9600)))))
         except Exception as error:

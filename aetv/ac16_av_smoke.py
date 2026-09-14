@@ -16,6 +16,62 @@ from .settings import StationSettings
 from .station import Station, TxEngine
 
 
+def pluto_headroom_smoke() -> dict:
+    """Run the real Pluto producer against a simulated DAC and receiver."""
+    import threading
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from .sdr import transmit_pluto
+
+    sent = np.random.default_rng(39).normal(size=(3, 19200)).astype(np.float32)
+    t = np.arange(8000) / 8000
+    # Short audio bursts formerly exceeded the DAC range even at default RMS.
+    voice = np.tile(np.sin(2*np.pi*1000*t) * (t < .01), 3)
+    settings = StationSettings(mode='AC16', waveform_mode='analog_av', av_microphone_mix=0,
+                               av_video_power=.2, tx_level=1.0)
+    chunks = TxEngine(Station(settings))._composite_chunks(
+        modulate_continuous_chunks(sent, 'AC16'), voice, 3, capture_microphone=False)
+    receiver = IQToModem(sample_rate=2400000, signal_offset_hz=100000, center_hz=10000)
+    separator = AC16CompositeSeparator()
+    demod = StreamingDemodulator('A', continuous=True, mode_name='AC16', boundary_tracking=True)
+    received = []
+    power = SimpleNamespace(value='1')
+
+    class Radio:
+        _ctrl = SimpleNamespace(find_channel=lambda *_: SimpleNamespace(attrs={'powerdown': power}))
+        peak_component = 0.0
+        destroyed = False
+
+        def disable_dds(self):
+            pass
+
+        def tx_destroy_buffer(self):
+            self.destroyed = True
+
+        def tx(self, values):
+            peak = max(float(abs(values.real).max()), float(abs(values.imag).max()))
+            self.peak_component = max(self.peak_component, peak)
+            if peak >= 16384:
+                raise RuntimeError('Pluto headroom check exceeded DAC range')
+            iq = (values.real.astype(np.int16) + 1j*values.imag.astype(np.int16)) / 16384
+            _, video = separator.process(receiver.feed(iq))
+            received.extend(r.gops_latents[0] for r in demod.feed(video))
+
+    radio = Radio()
+    with patch('aetv.sdr.open_pluto', return_value=radio):
+        complete = transmit_pluto(chunks, 48000, settings, threading.Event(), lambda _: None,
+                                  max_seconds=4.65)
+    if not complete or len(received) != 3 or not radio.destroyed or power.value != '1':
+        raise RuntimeError('Pluto headroom transmit/receive/shutdown failed')
+    cosines = [float(np.dot(a,b)/(np.linalg.norm(a)*np.linalg.norm(b))) for a,b in zip(sent, received)]
+    if min(cosines) < .9 or not .89 < radio.peak_component/16384 < .901:
+        raise RuntimeError(f'Pluto headroom payload or scaling failed: {cosines}')
+    return dict(passed=True, radio_opened=False, transport='transmit_pluto',
+                tx_level=1.0, audio_burst_seconds=.01, video_power=.2, decoded_gops=3,
+                peak_dac_component=radio.peak_component, dac_component_limit=16384,
+                latent_cosines=cosines, powered_down=True, buffer_destroyed=True)
+
+
 def av_tracking_smoke(*, gops=60) -> dict:
     """Exercise thermal-like drift and joining after the startup preamble.
 
@@ -189,5 +245,6 @@ def av_smoke(codec=None, *, output: Path | None = None, source: Path | None = No
                 raise RuntimeError('Saved AC16 A/V video or audio did not decode')
             result.update(saved_video=str(output), saved_frames=saved_frames, saved_audio_samples=len(track))
     result['tracking'] = av_tracking_smoke()
+    result['pluto_headroom'] = pluto_headroom_smoke()
     result['elapsed_s'] = time.perf_counter() - started
     return result

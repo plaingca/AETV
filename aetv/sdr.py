@@ -374,7 +374,7 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 pass
 
     def produce():
-        adapter = ModemToIQ(center_hz=waveform_center_hz(settings))
+        adapter = ModemToIQ(center_hz=waveform_center_hz(settings), peak_limit=0.9)
         resample = StreamResampler(*resample_ratio(fs, 48000))
         try:
             for audio in chunks:
@@ -385,10 +385,14 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 audio = audio * (
                     0.2 * settings.tx_level / 0.7 / max(np.sqrt(power), 1e-12)
                 )
-                for pos in range(0, len(audio), 4800):
+                for pos in range(0, len(audio), 48000):
                     if stopped.is_set() or cancel.is_set():
                         break
-                    put(adapter.feed(audio[pos : pos + 4800]))
+                    iq = adapter.feed(audio[pos : pos + 48000])
+                    for offset in range(0, len(iq), 240000):
+                        if stopped.is_set() or cancel.is_set():
+                            break
+                        put(iq[offset : offset + 240000].copy())
         except Exception as error:
             put(error)
         finally:

@@ -42,6 +42,30 @@ def test_causal_sdr_adapter_recovers_ac16_continuous_stream():
         assert np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)) > 0.9
 
 
+def test_automatic_iq_headroom_is_linear_and_does_not_pump_gain():
+    t = np.arange(4800) / 48000
+    audio = 4*np.sin(2*np.pi*2000*t)
+    with pytest.raises(ValueError, match='DAC component range'):
+        ModemToIQ(sample_rate=960000).feed(audio)
+    protected = ModemToIQ(sample_rate=960000, peak_limit=.9)
+    reference = ModemToIQ(sample_rate=960000)
+    for scale in (1, .01, .1):
+        output = protected.feed(audio*scale)
+        expected = reference.feed(audio*scale*.01) * (100*protected.headroom_gain)
+        np.testing.assert_allclose(output, expected, rtol=2e-6, atol=1e-7)
+        assert abs(output).max() <= .900001
+        if scale == 1:
+            initial_gain = protected.headroom_gain
+            assert initial_gain < 1
+        else:
+            assert protected.headroom_gain <= initial_gain
+
+
+def test_pluto_transmit_handles_short_audio_peaks_at_maximum_gui_level():
+    from aetv.ac16_av_smoke import pluto_headroom_smoke
+    assert pluto_headroom_smoke()['decoded_gops'] == 3
+
+
 @pytest.mark.parametrize("failure", ["push", "source", "cancel", None])
 def test_pluto_always_powers_down_and_destroys_buffer(monkeypatch, failure):
     import aetv.sdr as module

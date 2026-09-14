@@ -46,7 +46,11 @@ reference. Hardware LOs are offset by 100 kHz to keep the desired waveform
 away from their DC spur.
 
 Pluto TX starts at −30 dB hardware gain by default, with the slider covering
-−89.75 to 0 dB. Pluto RX uses manual gain; RTL gain is passed to its tuner,
+−89.75 to 0 dB. Pluto and HackRF automatically reduce digital gain when a
+waveform's peaks need additional DAC headroom. They scale complete I/Q blocks
+linearly, preserve that headroom for the transmission, and keep the selected
+hardware gain. Short program-audio peaks therefore do not abort transmission
+or get individually clipped. Pluto RX uses manual gain; RTL gain is passed to its tuner,
 which selects its supported hardware setting. The amplitude control in the
 Transmit pane and the hardware gain slider are separate adjustments.
 
