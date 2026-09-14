@@ -18,7 +18,7 @@ The successful Pluto repeat used `OPENBLAS_NUM_THREADS=2` and `OMP_NUM_THREADS=8
 
 Physical Windows USB/RF operation and installer execution were not tested here. A first-time USB driver binding still requires Windows administrator access; the utilities are included. See [portable setup](sdr-portable-setup.md).
 
-[Release downloads](https://github.com/plaingca/AETV/releases/tag/trial-ac16-gui-0.1.20rc2). Full machine-readable results are in [the evidence file](evidence/sdr-portable-0.1.20rc2.json).
+[Stable release downloads](https://github.com/plaingca/AETV/releases/tag/v0.1.20). Full machine-readable results are in [the evidence file](evidence/sdr-portable-0.1.20rc2.json).
 
 ## Artifact SHA-256
 

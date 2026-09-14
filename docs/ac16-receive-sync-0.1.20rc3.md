@@ -93,4 +93,4 @@ blind entry recovered four sequential payloads at minimum cosine 0.95408.
 [Checksums, package reports, and trial evidence](evidence/ac16-receive-sync-0.1.20rc3.json)
 are recorded separately from the unchanged model provenance. The six portable
 assets and machine-readable validation report accompany the
-[rc3 trial release](https://github.com/plaingca/AETV/releases/tag/trial-ac16-gui-0.1.20rc3).
+[Stable release downloads](https://github.com/plaingca/AETV/releases/tag/v0.1.20).

@@ -9,7 +9,7 @@ The final code is `a1b4df938909818d429aac1244738db641414829` (`0.1.20rc10`).
 [PR #18](https://github.com/plaingca/AETV/pull/18),
 [package build](https://github.com/plaingca/AETV/actions/runs/34889511643),
 and [CI](https://github.com/plaingca/AETV/actions/runs/34889516941).
-[Trial release](https://github.com/plaingca/AETV/releases/tag/trial-ac16-gui-0.1.20rc10).
+[Stable release downloads](https://github.com/plaingca/AETV/releases/tag/v0.1.20).
 The final downloaded Linux executables completed hardware trials in all five modes.
 
 ## Setup and evidence boundaries
