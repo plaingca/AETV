@@ -1174,18 +1174,19 @@ class StreamingDemodulator:
         return missing_gops
 
     def _attempt_blind_acquisition(self, fs: int) -> bool:
-        blind_minimum = 12 * fs
+        blind_minimum = 6 * fs
         if not self.continuous or len(self.buffer) < blind_minimum:
             return False
         stream_end = self.samples_consumed + len(self.buffer)
-        if stream_end - self._last_blind_attempt_end < fs:
+        if stream_end - self._last_blind_attempt_end < fs // 2:
             return False
         self._last_blind_attempt_end = stream_end
         started = time.perf_counter()
         self._debug("blind_search_started", stream_sample=int(stream_end))
         try:
+            window_length = min(len(self.buffer), 12 * fs)
             blind = blind_acquire_continuous_payload(
-                self.buffer[-blind_minimum:], self.expected_mode
+                self.buffer[-window_length:], self.expected_mode
             )
         except SyncError as error:
             self._debug(
@@ -1194,7 +1195,7 @@ class StreamingDemodulator:
                 stream_sample=int(stream_end),
             )
             return False
-        window_start = len(self.buffer) - blind_minimum
+        window_start = len(self.buffer) - window_length
         discard = window_start + blind.payload_start
         retained = (
             min(discard, _band_params(self.band)[3])
@@ -1577,7 +1578,7 @@ class StreamingDemodulator:
                         self._awaiting_search_offset += scan_step
                     if not self._awaiting_blind:
                         continue
-                if len(self.buffer) < 12 * fs:
+                if len(self.buffer) < 6 * fs:
                     break
                 if self._attempt_blind_acquisition(fs):
                     continue
@@ -1878,6 +1879,31 @@ def _pilot_occupancy(h_pilot: np.ndarray, latent_carriers: int) -> float:
     )
 
 
+def _blind_frequency_drift(analytic, starts, m, ncp, fs):
+    """Fit slow oscillator drift from independent cyclic-prefix observations.
+
+    Pilot phase alone aliases every 8 Hz. A twelve-second acquisition window
+    can span more than that during SDR warmup even though each one-second
+    tracked GOP is easy to decode. CP phase has a 50 Hz unambiguous span.
+    Aggregate it per second, unwrap, and accept only a supported bounded fit.
+    """
+    indices = np.asarray(starts)[:, None] + np.arange(ncp)
+    cross = np.sum(analytic[indices + m] * np.conj(analytic[indices]), axis=1)
+    groups = len(cross) // 40
+    if groups < 5:
+        return 0.0
+    observed = cross[:groups * 40].reshape(groups, 40).sum(axis=1)
+    times = np.asarray(starts[:groups * 40]).reshape(groups, 40).mean(axis=1) / fs
+    frequency = np.unwrap(np.angle(observed)) * fs / (2 * np.pi * m)
+    slope, intercept = np.polyfit(times, frequency, 1)
+    residual = frequency - (intercept + slope * times)
+    error = np.sqrt(np.sum(residual**2) / max(groups - 2, 1)
+                    / np.sum((times - times.mean())**2))
+    if abs(slope) > 4 or abs(slope) < max(.15, 3 * error):
+        return 0.0
+    return float(slope)
+
+
 def blind_acquire_continuous_payload(
     audio: np.ndarray,
     mode: AETVModeSpec,
@@ -1894,8 +1920,12 @@ def blind_acquire_continuous_payload(
     ncp = m // 4
     nsym = m + ncp
     frame_samples = SYMS_PER_FRAME * nsym
-    if len(values) < 12 * fs:
-        raise SyncError("blind acquisition needs 12 seconds of continuous payload")
+    # A 181-chip beacon occupies 5.65625 seconds. Try as soon as one whole
+    # beacon can be present; retain up to twelve seconds for arbitrary entry
+    # phase and the existing repeated-beacon weak-signal fallback. Shortening
+    # this initial wait does not waive the beacon's CRC or payload checks.
+    if len(values) < 6 * fs:
+        raise SyncError("blind acquisition needs 6 seconds of continuous payload")
     peak = float(np.max(np.abs(values)))
     if not np.isfinite(peak) or peak <= 1e-12:
         raise SyncError("blind acquisition has no finite signal energy")
@@ -1925,12 +1955,22 @@ def blind_acquire_continuous_payload(
         raise SyncError(f"blind CP timing confidence too low ({timing_metric:.2f})")
 
     starts = list(range(symbol_offset, len(values) - nsym + 1, nsym))
+    drift = _blind_frequency_drift(analytic, starts, m, ncp, fs)
+    midpoint = len(values) / (2 * fs)
+    if drift:
+        times = np.arange(len(values)) / fs - midpoint
+        rotation = np.exp(-1j * np.pi * drift * times**2)
+        z *= rotation
+        analytic *= rotation
     # Real audio retains a conjugate image: lag-M correlation of it has no
     # useful CFO phase when the center frequency is an integer multiple of RS.
     # Use analytic audio for this estimate, then resolve whole-carrier offsets
     # against the known pilot. Temporal coherent averaging before CFO removal
     # cancels even a fraction-of-a-hertz offset over this twelve-second window.
-    fractional_cfo = _cp_frequency_offset(values, np.asarray(starts), m, ncp, fs)
+    indices = np.asarray(starts)[:, None] + np.arange(ncp)
+    fractional_cfo = float(np.angle(np.sum(
+        analytic[indices + m] * np.conj(analytic[indices])
+    )) * fs / (2 * np.pi * m))
     useful_starts = np.asarray(starts) + ncp - DEMOD_BACKOFF
     window_indices = useful_starts[:, None] + np.arange(m)
     corrected = freq_correct(z, fractional_cfo, fs)
@@ -2013,7 +2053,10 @@ def blind_acquire_continuous_payload(
 
     return BlindPayloadAcquisition(
         payload_start=int(payload_start),
-        freq_offset=float(freq_offset),
+        # Tracking starts at the newest complete GOP, not at the acquisition
+        # window midpoint. Seed it with that GOP's mean pilot frequency so
+        # the 8 Hz pilot ambiguity cannot turn a valid beacon into bad video.
+        freq_offset=float(freq_offset + drift * (payload_start / fs + .4525 - midpoint)),
         metric=timing_metric,
         beacon=found,
     )

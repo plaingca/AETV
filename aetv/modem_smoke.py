@@ -3,6 +3,7 @@
 import time
 
 import numpy as np
+from scipy.signal import hilbert
 
 from .config import AETV_MODES
 from .hfchannel import freq_shift
@@ -19,9 +20,14 @@ def acquisition_smoke() -> dict:
     sent = np.random.default_rng(439).standard_normal((17, mode.latents_per_gop)).astype(np.float32)
     waveform = np.concatenate(list(modulate_continuous_chunks(sent, mode.name, "N0CALL")))
     cases = []
-    for offset in (-12.5, 12.5):
+    for offset, drift in ((-12.5, 0), (12.5, 0), (112.5, 1.5), (-112.5, -1.5)):
         started = time.perf_counter()
-        audio = freq_shift(waveform, offset, fs=fs)[int(3.125 * fs):int(15.125 * fs)]
+        if drift:
+            times = np.arange(len(waveform)) / fs
+            shifted = (hilbert(waveform) * np.exp(2j*np.pi*(offset*times + .5*drift*times**2))).real
+        else:
+            shifted = freq_shift(waveform, offset, fs=fs)
+        audio = shifted[int(3.125 * fs):int(15.125 * fs)]
         acquired = blind_acquire_continuous_payload(audio, mode)
         result = demodulate_tracked_gop(
             audio[acquired.payload_start:acquired.payload_start + fs],
@@ -30,14 +36,17 @@ def acquisition_smoke() -> dict:
         received = result.gops_latents[0] * result.gops_weights[0]
         similarities = sent @ received / (np.linalg.norm(sent, axis=1) * np.linalg.norm(received))
         cosine = float(similarities.max())
+        expected_offset = offset + drift * (3.125 + acquired.payload_start/fs + .4525)
         if (
             acquired.beacon.callsign != "N0CALL"
-            or abs(acquired.freq_offset - offset) > 0.1
+            or abs(acquired.freq_offset - expected_offset) > 0.1
             or cosine < 0.90
         ):
             raise RuntimeError(f"AC16 late-entry acquisition failed at {offset:+g} Hz")
         cases.append({
-            "offset_hz": offset, "estimated_offset_hz": acquired.freq_offset,
+            "offset_hz": offset, "drift_hz_per_s": drift,
+            "expected_payload_offset_hz": expected_offset,
+            "estimated_offset_hz": acquired.freq_offset,
             "timing_metric": acquired.metric, "latent_cosine": cosine,
             "elapsed_s": time.perf_counter() - started,
         })

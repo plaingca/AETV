@@ -78,3 +78,28 @@ def test_ac16_startup_history_is_bounded_and_keeps_future_preamble():
             received.extend(result.gops_latents)
     assert len(received) == len(sent)
     assert all(np.corrcoef(a, b)[0, 1] > 0.9 for a, b in zip(sent, received))
+
+
+@pytest.mark.parametrize("drift", [-1.5, 1.5])
+def test_late_entry_during_sdr_warmup_preserves_frequency_and_gop_identity(drift):
+    from scipy.signal import hilbert
+
+    sent = np.random.default_rng(941).normal(size=(24, 19200)).astype(np.float32)
+    waveform = np.concatenate(list(modem.modulate_continuous_chunks(sent, "AC16", "VE7TEST")))
+    t = np.arange(len(waveform)) / 48000
+    audio = (hilbert(waveform) * np.exp(2j*np.pi*(112.5*t + .5*drift*t**2))).real
+    audio = audio[150000:]
+    receiver = modem.StreamingDemodulator("A", continuous=True, mode_name="AC16", boundary_tracking=True)
+    first = None
+    rows = []
+    for start in range(0, len(audio), 4800):
+        for result in receiver.feed(audio[start:start+4800]):
+            first = (start + 4800) / 48000 if first is None else first
+            assert result.callsign == "VE7TEST"
+            z = result.gops_latents[0]
+            similarity = sent @ z / (np.linalg.norm(sent, axis=1) * np.linalg.norm(z))
+            assert similarity.max() > .9
+            rows.append(int(similarity.argmax()))
+    assert first is not None and first < 12
+    assert len(rows) >= 10
+    assert np.all(np.diff(rows) == 1)

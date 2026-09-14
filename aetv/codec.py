@@ -587,6 +587,13 @@ class AETVCodec:
         self.step = metadata.get("step")
         self.args = metadata
         self.model = None
+        if use_cuda and mode_name == "AC16":
+            # CUDA's first inference includes kernel selection and allocation.
+            # Pay that cost in the model-loading worker before live capture,
+            # instead of stalling the first transmitted and received GOPs.
+            frames = np.zeros((self.mode.gop_frames, self.mode.height, self.mode.width, 3), np.uint8)
+            latent = self.encode_gop(frames)
+            self.decode_gop(latent, np.ones_like(latent))
 
     def _init_torch(
         self,

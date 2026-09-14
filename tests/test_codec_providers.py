@@ -4,6 +4,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from aetv.codec import AETVCodec
@@ -22,10 +23,15 @@ from aetv.codec import AETVCodec
 def test_packaged_compute_selection(tmp_path, monkeypatch, provider, requested, actual, qualified_profile):
     available = list(dict.fromkeys([provider, "CPUExecutionProvider"]))
     sessions = []
+    warmups = []
 
     def session(_path, *, sess_options, providers):
         sessions.append(providers)
-        return SimpleNamespace(get_providers=lambda: providers)
+        def run(_outputs, inputs):
+            warmups.append(tuple(inputs))
+            shape = (1, 19200) if "frames" in inputs else (1, 10, 3, 144, 256)
+            return [np.zeros(shape, np.float32)]
+        return SimpleNamespace(get_providers=lambda: providers, run=run)
 
     runtime = SimpleNamespace(
         __version__="test",
@@ -64,6 +70,7 @@ def test_packaged_compute_selection(tmp_path, monkeypatch, provider, requested, 
         assert codec.device.type == actual
         expected = ["CPUExecutionProvider"] if actual == "cpu" else [provider, "CPUExecutionProvider"]
         assert sessions == [expected, expected]
+        assert warmups == ([("frames",), ("latents", "weights")] if actual == "cuda" else [])
         if qualified_profile == "cpu":
             assert "color accuracy check" in codec.runtime_notice
             assert codec.cpu_threads == 8

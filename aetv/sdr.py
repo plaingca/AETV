@@ -23,7 +23,7 @@ import numpy as np
 
 from .audio_io import StreamResampler, resample_ratio
 from .hfchannel import _active_signal_power
-from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ, estimate_signal_offset
+from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ, estimate_signal_offset, estimate_weak_signal_offset
 
 
 def rtl_executable() -> str:
@@ -190,6 +190,8 @@ class SDRCapture:
         self._threads = []
         self._queue = queue.Queue(maxsize=80)
         self.error = ""
+        self._clipped_buffers = 0
+        self._overload_reported = False
 
     def start(self):
         settings = self.settings
@@ -274,6 +276,14 @@ class SDRCapture:
                 raw = np.frombuffer(data, np.uint8).astype(np.float32)
                 if len(raw) % 2:
                     raise RuntimeError("Truncated RTL IQ sample")
+                clipped = float(np.mean((raw <= 1) | (raw >= 254)))
+                self._clipped_buffers = self._clipped_buffers + 1 if clipped >= .001 else 0
+                if self._clipped_buffers >= 3 and not self._overload_reported:
+                    self._overload_reported = True
+                    self.on_status(
+                        f"RTL-SDR ADC overload ({100 * clipped:.1f}% clipped samples); "
+                        "lower RTL RX gain and apply RF settings."
+                    )
                 iq = ((raw[::2] - 127.5) + 1j * (raw[1::2] - 127.5)) / 128
             self.preview.write(iq)
             if self._decimator is not None:
@@ -300,24 +310,34 @@ class SDRCapture:
             if auto:
                 calibration.append(iq)
                 calibration = calibration[-40:]
-                if len(calibration) < 10:
+                if len(calibration) < 5:
                     continue
+                composite = self.settings.waveform_mode == "analog_av"
+                weak = False
                 try:
                     measured = estimate_signal_offset(
-                        np.concatenate(calibration[-10:]), self.conversion_rate,
-                        **({"composite": True} if self.settings.waveform_mode == "analog_av" else {}),
+                        np.concatenate(calibration[-5:]), self.conversion_rate,
+                        **({"composite": True} if composite else {}),
                     )
                 except ValueError:
-                    estimates.clear()
-                    continue
-                # Partial preambles have biased spectral centers. Require five
-                # stable payload-like spectra before committing to a correction.
+                    try:
+                        measured = estimate_weak_signal_offset(
+                            np.concatenate(calibration[-10:]), self.conversion_rate,
+                            composite=composite,
+                        )
+                        weak = True
+                    except ValueError:
+                        estimates.clear()
+                        continue
+                # Partial preambles can bias spectral centers. Require three
+                # stable payload-like spectra; weak edge fits have coarser
+                # precision but remain inside the modem's +/-600 Hz search.
                 if not 14400 <= measured.get("video_width_hz", measured.get("obw99_hz", 0)) <= 15600:
                     estimates.clear()
                     continue
                 estimates.append(measured["offset_hz"])
-                estimates = estimates[-5:]
-                if len(estimates) < 5 or np.ptp(estimates) > 150:
+                estimates = estimates[-3:]
+                if len(estimates) < 3 or np.ptp(estimates) > (300 if weak else 150):
                     continue
                 offset = float(np.median(estimates))
                 adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
@@ -404,6 +424,17 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     samples = 0
     complete = False
     try:
+        # Configure the powered-down radio while live capture gathers the
+        # first GOP. Opening IIO and tuning after encoding delayed every
+        # subsequent frame, even though the producer and radio are independent.
+        radio = open_pluto(settings.pluto_uri)
+        radio._ctrl.find_channel("altvoltage1", True).attrs["powerdown"].value = "1"
+        radio.sample_rate = 2400000
+        radio.tx_lo = round(settings.sdr_frequency_mhz * 1e6 - 100000)
+        radio.tx_rf_bandwidth = 600000
+        radio.tx_cyclic_buffer = False
+        radio.disable_dds()
+        radio.tx_hardwaregain_chan0 = settings.pluto_tx_gain
         while not cancel.is_set():
             if time.monotonic() > deadline:
                 raise TimeoutError("Pluto TX exceeded its duration watchdog")
@@ -416,17 +447,6 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 break
             if isinstance(audio, Exception):
                 raise audio
-            if radio is None:
-                radio = open_pluto(settings.pluto_uri)
-                radio._ctrl.find_channel("altvoltage1", True).attrs[
-                    "powerdown"
-                ].value = "1"
-                radio.sample_rate = 2400000
-                radio.tx_lo = round(settings.sdr_frequency_mhz * 1e6 - 100000)
-                radio.tx_rf_bandwidth = 600000
-                radio.tx_cyclic_buffer = False
-                radio.disable_dds()
-                radio.tx_hardwaregain_chan0 = settings.pluto_tx_gain
             pending = np.concatenate((pending, audio))
             while len(pending) >= 240000 and not cancel.is_set():
                 if samples == 0:

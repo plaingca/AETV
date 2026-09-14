@@ -193,6 +193,53 @@ def _composite_video_offset(f, power, nominal_hz):
                 method="Received-only AC16 A/V video edges; speech excluded; rounded to 50 Hz")
 
 
+def estimate_weak_signal_offset(iq, sample_rate=960000, nominal_hz=-100000, *, composite=False):
+    """Locate a weak video bank without integrating rectified noise tails.
+
+    The strong-signal OBW estimator integrates positive noise fluctuations
+    over the entire search band, making its estimated width approach 50 kHz
+    as SNR falls. Here signed, noise-relative power in both known band edges
+    is compared with adjacent guard space. Four independent interior slices
+    must also contain broadband energy. This is only coarse frequency setup;
+    the modem still authenticates timing, mode, beacon CRC and payload pilots.
+    """
+    if len(iq) < sample_rate:
+        raise ValueError("Weak calibration needs one second of IQ")
+    f, power = welch(iq, fs=sample_rate, nperseg=16384, return_onesided=False)
+    order = np.argsort(f)
+    f, power = f[order], power[order]
+    selected = abs(f - nominal_hz) < 45000
+    f, power = f[selected], power[selected]
+    noise = float(np.median(power[abs(f - nominal_hz) > 37000]))
+    if not np.isfinite(noise) or noise <= 0:
+        raise ValueError("No finite calibration noise reference")
+    smooth = median_filter(power, size=7) / noise - 1
+    sums = np.r_[0., np.cumsum(smooth)]
+    centers = nominal_hz + np.arange(-25000, 25001, 50) + (2000 if composite else 0)
+
+    def mean(low, high):
+        left = np.searchsorted(f, centers + low)
+        right = np.searchsorted(f, centers + high)
+        return (sums[right] - sums[left]) / np.maximum(right - left, 1)
+
+    inner = (mean(-7300, -5700) + mean(5700, 7300)) / 2
+    outer = mean(7800, 9400)
+    if not composite:
+        outer = (outer + mean(-9400, -7800)) / 2
+    scores = inner - outer
+    index = int(np.argmax(scores))
+    slices = np.array([mean(x, x + 3000)[index] for x in (-6500, -3000, 500, 3500)])
+    if scores[index] < .15 or np.min(slices) < .12:
+        raise ValueError("No independently occupied weak AC16 video bank")
+    # Reject an apparent bank dominated by a narrow interferer or one edge.
+    if np.max(slices) > 4 * np.min(slices):
+        raise ValueError("Weak calibration spectrum is not broadband video")
+    center = centers[index] - (2000 if composite else 0)
+    return dict(offset_hz=float(center), video_width_hz=15000.,
+                inband_over_noise_db=float(10*np.log10(1 + np.mean(slices))),
+                method="Received-only weak video edge contrast and four interior slices")
+
+
 class IQToModem:
     """Integer polyphase decimation with persistent FIR and oscillator state."""
 
