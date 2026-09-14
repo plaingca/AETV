@@ -30,7 +30,9 @@ if (Test-Path -LiteralPath $SdrDir) { Remove-Item -LiteralPath $SdrDir -Recurse 
 if ($LASTEXITCODE -ne 0) { throw "SDR runtime download failed" }
 if ($PackageRuntime -eq "gpu") {
     uv pip uninstall --python $Python onnxruntime
-    uv pip install --python $Python onnxruntime-directml
+    # Match the application's ORT 1.23 release family instead of silently
+    # replacing its <1.24 runtime constraint with the latest DirectML wheel.
+    uv pip install --python $Python 'onnxruntime-directml==1.23.0'
 }
 $RuntimeModelDir = Join-Path $BuildRoot "models"
 & $Python (Join-Path $RepoRoot "scripts\fetch_release_runtime.py") `
@@ -167,6 +169,13 @@ try {
         if ($TestDirectML -and $SmokeResult.device -ne "DirectML") {
             throw "Packaged GPU benchmark did not select DirectML"
         }
+        # Exercise AC16 with the GPU package's actual provider selection. Hosts
+        # without a usable DirectML adapter must record explicit CPU fallback;
+        # hosts with one also run the CPU-reference color qualification.
+        $Ac16Device = if ($PackageRuntime -eq 'gpu') { 'auto' } else { 'cpu' }
+        & ".\AETV-Benchmark.exe" --mode AC16 --device $Ac16Device --warmup 0 --repeats 1 `
+            --json (Join-Path $AppDir 'ac16-build-smoke.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged AC16 inference check failed' }
         $GuiSmoke = Start-Process -FilePath ".\AETV.exe" `
             -ArgumentList @("--smoke-test", "--video-smoke-output", $VideoSmoke) `
             -PassThru -WindowStyle Hidden

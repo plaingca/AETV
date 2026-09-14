@@ -299,15 +299,24 @@ class MainWindow(QMainWindow):
         with self.station.codec_lock:
             self.station.codec = codec
         self.model_label.setText(text)
+        validation = getattr(codec, "runtime_validation", None) or {}
+        runtime_details = "\n".join(
+            [getattr(codec, "runtime_notice", "")]
+            + [f"{attempt['profile']}: {attempt['reason']}"
+               for attempt in validation.get("attempts", []) if not attempt["passed"]]
+        )
         self.model_label.setToolTip(
             f"Model: {self.station.codec.checkpoint_path}\n"
             "Install or inspect release models with File > Model Manager."
+            + ("\n" + runtime_details if runtime_details else "")
         )
         self.tx.send_button.setEnabled(True)
         self.tx.model_ready()
         self.rx.start_button.setEnabled(True)
         _configure_waterfall(self.waterfall, self.settings)
         self._log(f"codec ready: {text}")
+        if getattr(codec, "runtime_notice", ""):
+            self._log(codec.runtime_notice)
         if self._resume_rx_after_codec_reload:
             self._resume_rx_after_codec_reload = False
             self._log(f"restarting receive with {self.settings.mode}")

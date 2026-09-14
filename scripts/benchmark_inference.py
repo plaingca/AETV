@@ -89,6 +89,7 @@ def main() -> None:
         "backend": codec.backend,
         "backend_version": codec.backend_version,
         "backend_threads": codec.cpu_threads,
+        "runtime_validation": getattr(codec, "runtime_validation", None),
         "encode_median_ms": round(statistics.median(encode) * 1000, 2),
         "decode_median_ms": round(statistics.median(decode) * 1000, 2),
         "cycle_median_ms": round(statistics.median(cycle) * 1000, 2),

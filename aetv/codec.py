@@ -547,12 +547,32 @@ class AETVCodec:
         configured_threads = os.environ.get("AETV_CPU_THREADS") or ("8" if mode_name == "AC16" else None)
         if configured_threads and not use_dml:
             options.intra_op_num_threads = max(1, int(configured_threads))
-        self._encoder_session = ort.InferenceSession(
-            str(encoder_path), sess_options=options, providers=providers
-        )
-        self._decoder_session = ort.InferenceSession(
-            str(decoder_path), sess_options=options, providers=providers
-        )
+        self.runtime_validation = None
+        self.runtime_notice = ""
+        if use_dml and mode_name == "AC16":
+            from .runtime_validation import qualified_directml_sessions
+            sessions, self.runtime_validation = qualified_directml_sessions(
+                ort, encoder_path, decoder_path, AETV_MODES[mode_name],
+                max(1, int(configured_threads or 8)),
+            )
+            self._encoder_session, self._decoder_session = sessions
+            profile = self.runtime_validation["selected"]
+            if profile == "cpu":
+                use_dml = False
+                options.intra_op_num_threads = max(1, int(configured_threads or 8))
+                self.runtime_notice = (
+                    "DirectML failed the AC16 color accuracy check; using CPU. "
+                    "Details are in the model tooltip and benchmark report."
+                )
+            else:
+                self.runtime_notice = f"DirectML AC16 color accuracy check passed ({profile} GPU settings)."
+        else:
+            self._encoder_session = ort.InferenceSession(
+                str(encoder_path), sess_options=options, providers=providers
+            )
+            self._decoder_session = ort.InferenceSession(
+                str(decoder_path), sess_options=options, providers=providers
+            )
         if use_cuda and any("CUDAExecutionProvider" not in session.get_providers()
                             for session in (self._encoder_session, self._decoder_session)):
             if requested != "auto":

@@ -1,4 +1,4 @@
-# AC16 receive synchronization correction — 0.1.20rc3
+# AC16 synchronization and DirectML color validation — 0.1.20rc3
 
 A Windows RTL-SDR receive log showed 11 rejected startup candidates, 40 pending
 preamble searches, two failed blind acquisitions, and no accepted or decoded
@@ -34,3 +34,40 @@ findings are unchanged; no new findings were introduced. Each packaged GUI and
 benchmark executable also runs the ±12.5 Hz AC16 fixture through its own frozen
 modem during the native SDR runtime smoke check. Physical Windows RF reception
 still requires confirmation on the user's receiver.
+
+## DirectML color corruption
+
+The user also reported a severe red cast during clean local loopback on
+DirectML, while CPU loopback had normal colors. This isolates the reported
+color problem to the accelerator path; it does not identify the faulty GPU
+operator or driver. No Windows GPU is attached to the development host.
+The rc2 Windows GPU artifact's embedded report identifies ORT 1.24.4: the
+packaging step had installed DirectML without respecting the application's
+`onnxruntime<1.24` constraint. The new build pins DirectML 1.23.0, the available
+Windows DirectML wheel in the application's 1.23 release family. This corrects
+version drift; it is not by itself proof that 1.24.4 caused the red cast.
+
+AC16 now qualifies DirectML against CPU sessions of the same checksum-pinned
+model before selecting it. Two generated RGB clips exercise texture, motion
+and color, each at full and half receiver confidence. The check covers encoder
+latents and the complete decoded GOP. Limits are 0.2% relative latent RMSE,
+one 8-bit level of mean RGB error, and eight levels of maximum RGB error.
+
+If normal DirectML fails, the loader retries with vendor metacommands and
+graph fusion disabled. These controls are supported by the pinned-runtime-era
+[DirectML provider factory](https://github.com/microsoft/onnxruntime/blob/v1.23.2/onnxruntime/core/providers/dml/dml_provider_factory.cc)
+and [session configuration](https://github.com/microsoft/onnxruntime/blob/v1.23.2/onnxruntime/core/providers/dml/dml_session_options_config_keys.h).
+If the retry fails or cannot initialize, the loader selects its CPU reference
+sessions and reports the actual CPU device, reasons in the model tooltip, and
+a log message. The benchmark JSON retains all qualification attempts.
+
+This is a runtime compatibility check and explicit fallback, not a claim that
+an unidentified DirectML kernel has been repaired. The compatible GPU profile
+still needs validation on the affected Windows hardware. Tests inject red
+decoder bias, encoder corruption, nonfinite outputs and missing providers to
+verify retry/fallback behavior. The real AC16 models also pass the same
+numerical check on this host's CUDA provider against CPU.
+
+After the color-qualification changes, the full suite passed 371 tests with
+two skipped. The DirectML GPU hardware limitation above remains explicit;
+successful CPU fallback on a build runner is not GPU accuracy evidence.

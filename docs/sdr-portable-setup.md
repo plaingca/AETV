@@ -77,3 +77,9 @@ enabled, direct SDR reception saves `*.audio.wav` at the modem sample rate and
 the recovered modem signal, not microphone audio or source video. Preserve both
 files from the same attempt when reporting a failure. The log includes tuning
 messages, acquisition timing, and whether a GOP reached the video decoder.
+
+For AC16, the Windows GPU package checks DirectML color accuracy against CPU
+when loading the model. It retries compatible GPU settings if needed, then
+selects CPU if the result still differs too much. The model label shows the
+device actually in use; the log and model tooltip explain any fallback. For
+a diagnostic report, run `AETV-Benchmark.exe --mode AC16 --device auto --json ac16.json`.
