@@ -219,7 +219,8 @@ class StationSettings:
 
 
 def settings_path() -> Path:
-    return config_dir() / "settings.json"
+    override = os.environ.get("AETV_SETTINGS_PATH")
+    return Path(override) if override else config_dir() / "settings.json"
 
 
 def effective_rx_source(

@@ -901,16 +901,9 @@ def test_receive_audio_meter_reports_raw_and_filtered_peaks_and_clipping():
 
 
 def test_composite_loopback_retains_received_program_audio(monkeypatch):
+    from aetv.config import AETV_MODES
+    from aetv.modem import modulate_continuous_chunks
     from aetv.station import Station
-
-    result = SimpleNamespace(
-        gops_latents=[np.array([1.0])],
-        gops_weights=[np.array([1.0])],
-        freq_offset=0.0,
-        sync_metric=0.9,
-        snr_db=20.0,
-        callsign="N0CALL",
-    )
 
     class FakeChannel:
         def __init__(self, *_args, **_kwargs):
@@ -919,49 +912,26 @@ def test_composite_loopback_retains_received_program_audio(monkeypatch):
         def process(self, audio):
             return audio
 
-    class FakeSeparator:
-        def process(self, audio):
-            values = np.asarray(audio, dtype=np.float32)
-            return np.ones_like(values), values
-
-    class FakeResampler:
-        def __init__(self, *_args):
-            pass
-
-        def __call__(self, audio):
-            return audio
-
-    class FakeDemodulator:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def feed(self, _audio):
-            return [result]
-
     class Codec:
-        mode = SimpleNamespace(name="V8", band="W", gop_frames=1)
+        mode = AETV_MODES["V8"]
 
         def decode_gop(self, *_args):
-            return np.zeros((1, 2, 2, 3), dtype=np.uint8)
+            return np.zeros((6, 2, 2, 3), dtype=np.uint8)
 
     monkeypatch.setattr("aetv.station.StreamingChannelEmulator", FakeChannel)
-    monkeypatch.setattr("aetv.station.StreamingCompositeSeparator", FakeSeparator)
-    monkeypatch.setattr("aetv.station.StreamResampler", FakeResampler)
-    monkeypatch.setattr(
-        "aetv.station.resample_audio",
-        lambda audio, _source_rate, _target_rate: np.asarray(audio, dtype=np.float32),
-    )
-    monkeypatch.setattr("aetv.station.StreamingDemodulator", FakeDemodulator)
     station = Station(StationSettings(mode="V8", waveform_mode="analog_av"))
     engine = TxEngine(station)
-
-    assert engine._emulated_send_stream(
-        [np.ones(24, dtype=np.float32)], COMPOSITE_FS, 1, Codec(), "clean"
+    latent = np.random.default_rng(13).normal(size=(1, 2816)).astype(np.float32)
+    voice = .2 * np.sin(2*np.pi*700*np.arange(8000)/8000)
+    chunks = engine._composite_chunks(
+        modulate_continuous_chunks(latent, "V8", total_gops=1), voice, 1,
+        capture_microphone=False,
     )
-
-    assert station.loopback_audio is not None
-    assert len(station.loopback_audio) == 8000
-    assert np.all(station.loopback_audio[:24] == 1.0)
+    assert engine._emulated_send_stream(chunks, COMPOSITE_FS, 1, Codec(), "clean")
+    assert station.loopback_audio.shape == (8000,)
+    assert station.loopback_video.shape == (6, 2, 2, 3)
+    spectrum = abs(np.fft.rfft(station.loopback_audio))
+    assert abs(np.argmax(spectrum) - 700) <= 1
 
 
 def test_channel_loopback_decodes_without_keying(monkeypatch):

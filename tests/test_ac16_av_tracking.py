@@ -99,7 +99,7 @@ def test_receive_burst_drops_whole_pairs_and_preserves_all_recorded_media():
     station.codec = SimpleNamespace(mode=AETV_MODES['AC16'])
     audio, video = [], []
     engine = RxEngine(station, on_video=lambda frames,state: video.append(int(frames[0,0,0,0])))
-    engine._audio_playback = SimpleNamespace(write=lambda values: audio.append(int(values[0])))
+    engine._audio_playback = SimpleNamespace(write=lambda values, on_start: (audio.append(int(values[0])), on_start(), True)[-1])
     now = [100.0]
     engine._av_playout = PairedAVPlayout(clock=lambda: now[0])
     for i in range(8):

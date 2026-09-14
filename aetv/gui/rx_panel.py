@@ -1060,9 +1060,10 @@ class ReceivePanel(QWidget):
             prebuffer_frames=mode.gop_frames,
             boundary_blend_frames=0 if mode.name == "AC16" else 4,
             max_queue_frames=(
-                (1 if self.station.settings.waveform_mode == "analog_av" else 4)
-                if mode.name == "AC16" else 2
-            ) * mode.gop_frames,
+                mode.gop_frames + max(1, round(.2 * mode.fps))
+                if self.station.settings.waveform_mode == "analog_av"
+                else (4 if mode.name == "AC16" else 2) * mode.gop_frames
+            ),
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
@@ -1149,9 +1150,10 @@ class ReceivePanel(QWidget):
             prebuffer_frames=mode.gop_frames,
             boundary_blend_frames=0 if mode.name == "AC16" else 4,
             max_queue_frames=(
-                (1 if self.station.settings.waveform_mode == "analog_av" else 4)
-                if mode.name == "AC16" else 2
-            ) * mode.gop_frames,
+                mode.gop_frames + max(1, round(.2 * mode.fps))
+                if self.station.settings.waveform_mode == "analog_av"
+                else (4 if mode.name == "AC16" else 2) * mode.gop_frames
+            ),
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)

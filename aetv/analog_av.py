@@ -291,7 +291,7 @@ class AC16CompositeSeparator:
         return voice.astype(np.float32), video.astype(np.float32)
 
 
-class AC16ProgramAudio:
+class ProgramAudio:
     """Pair each decoded GOP with its following, one-second audio interval.
 
     Positions come from received modem framing, so joining a running station
@@ -300,8 +300,9 @@ class AC16ProgramAudio:
     sample coordinates while buffering the filter lookahead.
     """
 
-    def __init__(self):
+    def __init__(self, mode_name="AC16"):
         from .ringbuffer import RingBuffer
+        self.profile = composite_profile(mode_name)
         self.voice = RingBuffer(40, NATIVE_AETV_FS)
         self.pending = deque()
         self._frequency = deque(maxlen=64)
@@ -310,8 +311,8 @@ class AC16ProgramAudio:
 
     def add(self, result, payload):
         if result.stream_start_sample is None:
-            raise ValueError("AC16 A/V needs received payload sample positions")
-        start = round(result.stream_start_sample / 6) + NATIVE_AETV_FS
+            raise ValueError("A/V needs received payload sample positions")
+        start = round(result.stream_start_sample * NATIVE_AETV_FS / self.profile.video_fs) + NATIVE_AETV_FS
         self.pending.append((start, payload))
         frequency = float(getattr(result, "freq_offset", np.nan))
         if (np.isfinite(frequency)
@@ -319,7 +320,7 @@ class AC16ProgramAudio:
             # Mean center of AC16's eight pilot symbols: .015 + .125*i.
             # Voice n is sent alongside video n+1, so observations must be
             # indexed by receive time, not by the video/audio pairing index.
-            when = result.stream_start_sample / AC16_AV.fs + 0.4525
+            when = result.stream_start_sample / self.profile.video_fs + 0.4525
             if not self._frequency or when > self._frequency[-1][0]:
                 self._frequency.append((when, frequency))
 
@@ -338,7 +339,7 @@ class AC16ProgramAudio:
 
     def _correct(self, start, audio):
         if not self._frequency:
-            return _cosine_lowpass(audio, NATIVE_AETV_FS, 3_200, 3_300)
+            return _cosine_lowpass(audio, NATIVE_AETV_FS, self.profile.audio_high_hz - 100, self.profile.audio_high_hz)
         halo = 320  # 40 ms on each side reduces Hilbert/FFT boundary artifacts.
         left = max(0, start - halo, self.voice.total_written - self.voice.n)
         extended, _, _ = self.voice.read_since(left)
@@ -357,7 +358,7 @@ class AC16ProgramAudio:
                                  (start - self._next_sample) / NATIVE_AETV_FS)
         cycles += self._phase - cycles[offset]
         corrected = (signal.hilbert(extended) * np.exp(-2j*np.pi*cycles[:-1])).real
-        corrected = _cosine_lowpass(corrected, NATIVE_AETV_FS, 3_200, 3_300)
+        corrected = _cosine_lowpass(corrected, NATIVE_AETV_FS, self.profile.audio_high_hz - 100, self.profile.audio_high_hz)
         self._phase = float(cycles[offset + NATIVE_AETV_FS] % 1.0)
         self._next_sample = start + NATIVE_AETV_FS
         return corrected[offset:offset + NATIVE_AETV_FS]
@@ -373,3 +374,7 @@ class AC16ProgramAudio:
                 # Never pair a video GOP with a different source second.
                 continue
             yield payload, self._correct(start, audio[:NATIVE_AETV_FS]).astype(np.float32)
+
+
+# Retain the existing import used by release validation and external tools.
+AC16ProgramAudio = ProgramAudio

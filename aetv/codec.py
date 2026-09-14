@@ -587,7 +587,7 @@ class AETVCodec:
         self.step = metadata.get("step")
         self.args = metadata
         self.model = None
-        if use_cuda and mode_name == "AC16":
+        if use_cuda:
             # CUDA's first inference includes kernel selection and allocation.
             # Pay that cost in the model-loading worker before live capture,
             # instead of stalling the first transmitted and received GOPs.

@@ -51,7 +51,7 @@ def reduce_to_width(row: np.ndarray, width: int) -> np.ndarray:
     if row.size > width:
         # Peak-hold so a one-bin carrier is not sampled away.
         edges = np.linspace(0, row.size, width + 1).astype(int)
-        return np.array([row[edges[i] : edges[i + 1]].max() if edges[i + 1] > edges[i] else 0.0 for i in range(width)], dtype=np.float32)
+        return np.maximum.reduceat(row, edges[:-1]).astype(np.float32)
     x = np.linspace(0, row.size - 1, width)
     return np.interp(x, np.arange(row.size), row).astype(np.float32)
 
@@ -215,8 +215,13 @@ class Waterfall(QWidget):
         painter.drawImage(0, 1, self._image)
         painter.end()
         self._image = shifted
-        for x, rgb in enumerate(colors):
-            self._image.setPixel(x, 0, QColor(int(rgb[0]), int(rgb[1]), int(rgb[2])).rgb())
+        # A Python/QColor call per display pixel held the interpreter lock
+        # thousands of times per tick, competing with live USB capture. Write
+        # identical RGB32 pixels in one array operation instead.
+        pixels = np.frombuffer(self._image.bits(), dtype=np.uint32,
+                               count=self._image.bytesPerLine() // 4)
+        rgb = colors.astype(np.uint32)
+        pixels[:len(rgb)] = 0xff000000 | (rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2]
         peak = float(np.max(np.abs(samples))) if samples.size else 0.0
         self._peak = 0.85 * self._peak + 0.15 * peak
         component_peak = max(np.max(abs(samples.real)), np.max(abs(samples.imag))) if rf else peak

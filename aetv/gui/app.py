@@ -707,6 +707,9 @@ def main(argv: list[str] | None = None) -> int:
         from aetv.gui.ota_validation import load_validation
         index = args.index("--ota-validation")
         validation, validation_settings = load_validation(args[index+1])
+        # Test mode selections, output devices and long durations must not
+        # replace the operator's normal station profile.
+        os.environ["AETV_SETTINGS_PATH"] = str(Path(validation["output"]).with_suffix(".settings.json"))
         del args[index:index+2]
     smoke_test = "--smoke-test" in args
     if smoke_test:

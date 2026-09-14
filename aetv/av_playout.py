@@ -33,7 +33,8 @@ class PairedAVPlayout:
             return None
         # Do not burst to catch up after a decoder or GUI stall. Audio hardware
         # still needs one second to render the pair released now.
-        self._deadline = now + 1.0
+        deadline = self._deadline + 1.0 if self._deadline is not None else now + 1.0
+        self._deadline = deadline if deadline > now else now + 1.0
         return self._pending.popleft()
 
     def clear(self):

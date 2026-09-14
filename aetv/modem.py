@@ -85,6 +85,7 @@ class AETVDemodResult:
     # Absolute payload position in StreamingDemodulator input samples. Used
     # to associate delayed analog program audio, including after reacquisition.
     stream_start_sample: int | None = None
+    stream_frame_counter: int | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,11 @@ def _continuous_candidate_rejection(
     if result.mode.name == "AC16":
         if result.header_score < 0.20 and result.header_tail_score < 0.35:
             return "mode-header evidence cannot establish AC16 GOP phase"
+    elif result.mode.band == "N":
+        # With only 24 carriers, a random payload slice can resemble a weak
+        # mode header. Confirm its transition or defer to the beacon CRC.
+        if result.header_score < 0.30 and result.header_tail_score < 0.35:
+            return "narrow-mode header cannot establish GOP phase"
     elif acquisition.metric < 0.35 and result.header_score < 0.20:
         return "preamble and mode-header evidence are jointly ambiguous"
     payload_confidence = float(
@@ -727,7 +733,9 @@ def _cp_timing_phase(audio: np.ndarray, band: str) -> tuple[int, float]:
     geom, fs, m, ncp, nsym, *_rest = _band_params(band)
     if len(values) < m + ncp:
         return 0, 0.0
-    z = to_baseband(values, geom.fcenter_hz, fs)
+    # Analytic audio avoids cancellation between conjugate passband images
+    # near a quarter-carrier CFO, including normal SDR oscillator warmup.
+    z = signal.hilbert(values)
     product = z[m:] * np.conj(z[:-m])
     kernel = np.ones(ncp)
     correlation = signal.fftconvolve(product, kernel, mode="valid")
@@ -1013,6 +1021,8 @@ class StreamingDemodulator:
         self._pending_acquisition: Acquisition | None = None
         self._header_aided_allowed = False
         self._awaiting_search_offset = 0
+        self._beacon_total_chips = 0
+        self._beacon_phase_error = 0
 
     def _start_tracking(
         self, mode: AETVModeSpec, freq_offset: float
@@ -1025,6 +1035,8 @@ class StreamingDemodulator:
         self._tracking_rate_adjustment = 0.0
 
     def _clear_beacon(self) -> None:
+        self._beacon_total_chips = 0
+        self._beacon_phase_error = 0
         self.beacon_chips = np.zeros(0, dtype=np.float64)
         self.beacon_repeated_chips = np.zeros(0, dtype=np.float64)
         self.last_beacon = None
@@ -1054,7 +1066,7 @@ class StreamingDemodulator:
         """
         fs = mode.geometry.fs
         _geom, _fs, _m, ncp, nsym, *_rest = _band_params(mode.band)
-        max_offset = ncp + 2 * nsym
+        max_offset = expected_offset + 2 * nsym
         if len(self.buffer) < fs + max_offset:
             return None
         phase, cp_metric = _cp_timing_phase(
@@ -1111,8 +1123,11 @@ class StreamingDemodulator:
             whole_adjustment = int(np.trunc(self._tracking_rate_adjustment))
             self._tracking_rate_adjustment -= whole_adjustment
             whole_adjustment = int(np.clip(whole_adjustment, -ncp, ncp))
-            consumed = payload_offset + payload_samples + whole_adjustment - ncp
-            self._tracking_expected_offset = ncp
+            # Retain enough history for a short USB sample deletion as well
+            # as an insertion. One CP alone cannot rewind a 10 ms clock jump.
+            history = ncp + 2 * _nsym if self.boundary_tracking else ncp
+            consumed = payload_offset + payload_samples + whole_adjustment - history
+            self._tracking_expected_offset = history
         consumed = max(1, min(int(consumed), len(self.buffer)))
         self.buffer = self.buffer[consumed:]
         self.samples_consumed += consumed
@@ -1143,6 +1158,9 @@ class StreamingDemodulator:
             )
             missing_gops = max(0, elapsed_gops - 1)
         self._last_accepted_preamble = stream_sample
+        logical = repeated_chips if result.mode.band == "U" else chips
+        if logical is not None:
+            self._beacon_total_chips += (missing_gops + 1) * len(logical)
         if chips is not None and chips.size:
             if missing_gops:
                 self.beacon_chips = np.concatenate(
@@ -1168,6 +1186,16 @@ class StreamingDemodulator:
             found = find_beacon_superframe(self.beacon_repeated_chips, expected_mode=result.mode.index)
             if found is not None and found.mode_index == result.mode.index:
                 self.last_beacon = found
+        logical_history = self.beacon_repeated_chips if result.mode.band == "U" else self.beacon_chips
+        phase_beacon = find_beacon_superframe(logical_history, expected_mode=result.mode.index)
+        if phase_beacon is not None:
+            first_chip = self._beacon_total_chips - len(logical_history)
+            relative_frame = (first_chip + phase_beacon.chip_offset) // DATA_SYMS_PER_FRAME
+            self._beacon_phase_error = (phase_beacon.frame_index - relative_frame) % FRAMES_PER_GOP
+            current_frame = (self._beacon_total_chips - len(logical)) // DATA_SYMS_PER_FRAME
+            result.stream_frame_counter = (
+                phase_beacon.frame_index + current_frame - relative_frame
+            ) % (beacon.MAX_FRAME_COUNTER + 1)
         if self.last_beacon is not None:
             result.beacon = self.last_beacon
             result.callsign = self.last_beacon.callsign
@@ -1306,11 +1334,16 @@ class StreamingDemodulator:
                                 pilot_coherence=float(result.pilot_coherence),
                                 timing_only=False,
                             )
+                degraded_boundary = (
+                    self.boundary_tracking
+                    and result is not None
+                    and result.pilot_coherence < 0.70
+                )
                 if (
-                    self.timing_tracking
-                    and (result is None or result.pilot_coherence < 0.09)
+                    (self.timing_tracking and (result is None or result.pilot_coherence < 0.09))
+                    or degraded_boundary
                 ):
-                    search_required = payload_samples + _ncp + 2 * _nsym
+                    search_required = payload_samples + expected_offset + 2 * _nsym
                     if len(self.buffer) < search_required:
                         break
                     recovered = self._tracked_candidate(
@@ -1331,6 +1364,17 @@ class StreamingDemodulator:
                         candidate_supported = (
                             candidate.pilot_coherence >= 0.09 or timing_only
                         )
+                        if degraded_boundary:
+                            # A USB timing slip can leave periodic pilots
+                            # plausible while corrupting data. Repair only
+                            # when independent CP timing and a much stronger
+                            # pilot window agree; weak RF alone must not move
+                            # the established GOP boundary.
+                            candidate_supported = (
+                                cp_metric >= 0.50
+                                and candidate.pilot_coherence >= 0.70
+                                and candidate.pilot_coherence > result.pilot_coherence + 0.15
+                            )
                     else:
                         candidate_supported = False
                         timing_only = False
@@ -1407,9 +1451,25 @@ class StreamingDemodulator:
                 self._tracking_freq_offset = result.freq_offset
                 self._tracking_bad_gops = 0
                 self._tracking_pending.clear()
+                if realigned and abs(payload_offset - expected_offset) > _ncp:
+                    # A large jump may change frame phase. Keep the already
+                    # verified station identity while rebuilding its counter.
+                    identity = self.last_beacon
+                    self._clear_beacon()
+                    self.last_beacon = identity
                 missing_gops = self._accumulate_beacon(
                     result, stream_sample, payload_samples
                 )
+                if self._beacon_phase_error:
+                    phase = self._beacon_phase_error
+                    advance = (FRAMES_PER_GOP - phase) * frame_samples
+                    self._tracking_expected_offset += advance
+                    self._debug("tracking_gop_phase_corrected", stream_sample=int(stream_sample),
+                                phase_frames=int(phase), advance_samples=int(advance))
+                    identity = self.last_beacon
+                    self._clear_beacon()
+                    self.last_beacon = identity
+                    continue
                 self._debug(
                     "gop_accepted",
                     tracked=True,
@@ -2181,7 +2241,7 @@ def demodulate_gop_stream(
         raise SyncError("insufficient audio length for a full GOP")
 
     header_tail_score = 0.0
-    if mode.name == "AC16":
+    if mode.name == "AC16" or mode.band == "N":
         # Confirm the header/payload transition locally. The preamble is separated
         # from the last header symbols by hundreds of milliseconds, so its channel
         # estimate may no longer describe this boundary on a fading HF path.

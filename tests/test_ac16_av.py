@@ -133,7 +133,8 @@ def test_live_receive_engine_pairs_and_retains_the_final_audio_gop(monkeypatch, 
     playback = []
     monkeypatch.setattr('aetv.station.open_input_stream', lambda *a, **k: (stream, 48000))
     monkeypatch.setattr('aetv.station.AudioPlaybackStream', lambda *a, **k: SimpleNamespace(
-        write=lambda samples: playback.append(samples.copy()), close=lambda: None))
+        write=lambda samples, on_start: (playback.append(samples.copy()), on_start(), True)[-1], close=lambda: None,
+        _queue=SimpleNamespace(qsize=lambda: 0), health={}))
     sent = np.random.default_rng(2033).normal(size=(3, 19200)).astype(np.float32)
     settings = StationSettings(mode='AC16', waveform_mode='analog_av', av_microphone_mix=0,
                                debug_capture=False, autosave=False, decode_every_s=.05)

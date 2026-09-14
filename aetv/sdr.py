@@ -23,7 +23,7 @@ import numpy as np
 
 from .audio_io import StreamResampler, resample_ratio
 from .hfchannel import _active_signal_power
-from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ, estimate_signal_offset, estimate_weak_signal_offset
+from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ, estimate_signal_offset, estimate_weak_signal_offset, estimate_mode_signal_offset
 
 
 def rtl_executable() -> str:
@@ -169,10 +169,11 @@ class IQPreview:
 
 
 class SDRCapture:
-    def __init__(self, settings, mode, ring, *, on_error, on_status):
+    def __init__(self, settings, mode, ring, *, on_error, on_status, on_discontinuity=None):
         self.settings = replace(settings)
         self.mode, self.ring = mode, ring
         self.on_error, self.on_status = on_error, on_status
+        self.on_discontinuity = on_discontinuity or (lambda: None)
         self.rate = 2400000 if settings.rx_source == "pluto" else 960000
         self._hackrf = None
         self._decimator = None
@@ -189,6 +190,11 @@ class SDRCapture:
         self._process = None
         self._threads = []
         self._queue = queue.Queue(maxsize=80)
+        self._gap = object()
+        self.health = dict(captured_samples=0, converted_samples=0, iq_queue_high_water=0,
+                           iq_overruns=0, iq_discarded_samples=0, conversion_max_ms=0.,
+                           conversion_total_s=0., conversion_blocks=0, capture_gap_max_s=0.)
+        self._last_capture = None
         self.error = ""
         self._clipped_buffers = 0
         self._overload_reported = False
@@ -286,14 +292,33 @@ class SDRCapture:
                     )
                 iq = ((raw[::2] - 127.5) + 1j * (raw[1::2] - 127.5)) / 128
             self.preview.write(iq)
+            now = time.monotonic()
+            if self._last_capture is not None:
+                self.health["capture_gap_max_s"] = max(self.health["capture_gap_max_s"], now-self._last_capture)
+            self._last_capture = now
+            self.health["captured_samples"] += len(iq)
             if self._decimator is not None:
                 iq = self._decimator.feed(iq)
             try:
                 self._queue.put_nowait(iq)
-            except queue.Full as error:
-                raise RuntimeError(
-                    "SDR processing exceeded its 8-second IQ queue; stop and restart reception"
-                ) from error
+            except queue.Full:
+                # Old IQ cannot keep up after a long processing stall. Mark a
+                # discontinuity explicitly rather than splicing sample clocks
+                # or leaving the GUI permanently stopped until manual restart.
+                discarded = 0
+                while True:
+                    try:
+                        stale = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if stale is not self._gap:
+                        discarded += len(stale)
+                self.health["iq_overruns"] += 1
+                self.health["iq_discarded_samples"] += discarded
+                self._queue.put_nowait(self._gap)
+                self._queue.put_nowait(iq)
+                self.on_status(f"SDR IQ queue overrun; discarded {discarded/self.conversion_rate:.1f} s and reacquiring")
+            self.health["iq_queue_high_water"] = max(self.health["iq_queue_high_water"], self._queue.qsize())
 
     def _convert(self):
         offset = -100000 + self.settings.sdr_rx_correction_hz
@@ -301,12 +326,22 @@ class SDRCapture:
         resample = StreamResampler(*resample_ratio(48000, waveform_sample_rate(self.settings)))
         calibration = []
         estimates = []
-        auto = self.settings.sdr_auto_correct and self.mode.name == "AC16"
+        auto = self.settings.sdr_auto_correct
         while not self._stop.is_set():
             try:
                 iq = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            if iq is self._gap:
+                offset = -100000 + self.settings.sdr_rx_correction_hz
+                adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
+                resample = StreamResampler(*resample_ratio(48000, waveform_sample_rate(self.settings)))
+                calibration.clear()
+                estimates.clear()
+                auto = self.settings.sdr_auto_correct
+                self.on_discontinuity()
+                continue
+            before = time.perf_counter()
             if auto:
                 calibration.append(iq)
                 calibration = calibration[-40:]
@@ -315,11 +350,20 @@ class SDRCapture:
                 composite = self.settings.waveform_mode == "analog_av"
                 weak = False
                 try:
-                    measured = estimate_signal_offset(
-                        np.concatenate(calibration[-5:]), self.conversion_rate,
-                        **({"composite": True} if composite else {}),
-                    )
+                    if self.mode.name == "AC16":
+                        measured = estimate_signal_offset(
+                            np.concatenate(calibration[-5:]), self.conversion_rate,
+                            **({"composite": True} if composite else {}),
+                        )
+                    else:
+                        measured = estimate_mode_signal_offset(
+                            np.concatenate(calibration[-10:]), self.mode,
+                            self.conversion_rate, composite=composite,
+                        )
                 except ValueError:
+                    if self.mode.name != "AC16":
+                        estimates.clear()
+                        continue
                     try:
                         measured = estimate_weak_signal_offset(
                             np.concatenate(calibration[-10:]), self.conversion_rate,
@@ -332,7 +376,7 @@ class SDRCapture:
                 # Partial preambles can bias spectral centers. Require three
                 # stable payload-like spectra; weak edge fits have coarser
                 # precision but remain inside the modem's +/-600 Hz search.
-                if not 14400 <= measured.get("video_width_hz", measured.get("obw99_hz", 0)) <= 15600:
+                if self.mode.name == "AC16" and not 14400 <= measured.get("video_width_hz", measured.get("obw99_hz", 0)) <= 15600:
                     estimates.clear()
                     continue
                 estimates.append(measured["offset_hz"])
@@ -351,6 +395,11 @@ class SDRCapture:
                     f"SDR received-only frequency correction: {offset + 100000:+.0f} Hz"
                 )
             self.ring.write(resample(adapter.feed(iq)))
+            elapsed = time.perf_counter() - before
+            self.health["converted_samples"] += len(iq)
+            self.health["conversion_blocks"] += 1
+            self.health["conversion_total_s"] += elapsed
+            self.health["conversion_max_ms"] = max(self.health["conversion_max_ms"], elapsed*1000)
 
     def stop(self):
         self._stop.set()
@@ -376,7 +425,7 @@ class SDRCapture:
             raise RuntimeError("SDR worker did not stop within its driver timeout")
 
 
-def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
+def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds, diagnostics=None):
     """Consume live modem chunks through finite DMA buffers, with a watchdog."""
     settings = replace(settings)
     ready = queue.Queue(maxsize=24)
@@ -384,11 +433,18 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     end = object()
     radio = None
     deadline = time.monotonic() + max_seconds + 25
+    health = diagnostics if diagnostics is not None else {}
+    health.update(iq_queue_high_water=0, producer_blocks=0, producer_wait_s=0.,
+                  late_data_events=0, queue_wait_max_ms=0., tx_write_max_ms=0., tx_gap_max_s=0.,
+                  sent_samples=0, completed=False)
 
     def put(value):
+        before = time.monotonic()
         while not (stopped.is_set() or cancel.is_set()):
             try:
                 ready.put(value, timeout=0.1)
+                health["producer_wait_s"] += time.monotonic() - before
+                health["iq_queue_high_water"] = max(health["iq_queue_high_water"], ready.qsize())
                 return
             except queue.Full:
                 pass
@@ -413,6 +469,7 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                         if stopped.is_set() or cancel.is_set():
                             break
                         put(iq[offset : offset + 240000].copy())
+                        health["producer_blocks"] += 1
         except Exception as error:
             put(error)
         finally:
@@ -423,6 +480,8 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     pending = np.empty(0, np.complex64)
     samples = 0
     complete = False
+    last_write_end = None
+    starving = False
     try:
         # Configure the powered-down radio while live capture gathers the
         # first GOP. Opening IIO and tuning after encoding delayed every
@@ -439,9 +498,15 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
             if time.monotonic() > deadline:
                 raise TimeoutError("Pluto TX exceeded its duration watchdog")
             try:
+                wait_started = time.monotonic()
                 audio = ready.get(timeout=0.1)
             except queue.Empty:
+                if samples and not starving:
+                    health["late_data_events"] += 1
+                    starving = True
                 continue
+            starving = False
+            health["queue_wait_max_ms"] = max(health["queue_wait_max_ms"], (time.monotonic()-wait_started)*1000)
             if audio is end:
                 complete = True
                 break
@@ -453,9 +518,15 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                     radio._ctrl.find_channel("altvoltage1", True).attrs[
                         "powerdown"
                     ].value = "0"
+                before = time.monotonic()
+                if last_write_end is not None:
+                    health["tx_gap_max_s"] = max(health["tx_gap_max_s"], before-last_write_end)
                 radio.tx(pending[:240000] * 16384)
+                last_write_end = time.monotonic()
+                health["tx_write_max_ms"] = max(health["tx_write_max_ms"], (last_write_end-before)*1000)
                 pending = pending[240000:]
                 samples += 240000
+                health["sent_samples"] = samples
                 on_progress(min(1, samples / 2400000 / max(1, max_seconds)))
         if radio is not None and complete and not cancel.is_set():
             if len(pending):
@@ -463,7 +534,8 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
             for _ in range(4):
                 radio.tx(np.zeros(240000, np.complex64))
             cancel.wait(0.4)
-        return complete and not cancel.is_set()
+        health["completed"] = complete and not cancel.is_set()
+        return health["completed"]
     finally:
         stopped.set()
         try:

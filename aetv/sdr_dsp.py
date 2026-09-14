@@ -240,6 +240,83 @@ def estimate_weak_signal_offset(iq, sample_rate=960000, nominal_hz=-100000, *, c
                 method="Received-only weak video edge contrast and four interior slices")
 
 
+def estimate_mode_signal_offset(iq, mode, sample_rate=960000, nominal_hz=-100000,
+                                *, composite=False):
+    """Coarse received-only tuning for the released narrow/wide carrier banks.
+
+    Use signed noise-relative energy, four occupied interior slices, and
+    adjacent guard contrast. A speech tone cannot stand in for a video bank.
+    This only selects the radio passband; modem framing must still succeed.
+    """
+    from .analog_av import composite_profile
+    from .config import RS
+
+    if len(iq) < sample_rate // 2:
+        raise ValueError("Coarse tuning needs half a second of IQ")
+    f, power = welch(iq, fs=sample_rate, nperseg=32768, return_onesided=False)
+    order = np.argsort(f)
+    f, power = f[order], power[order]
+    selected = abs(f - nominal_hz) < 45000
+    f, power = f[selected], power[selected]
+    noise = float(np.median(power[abs(f - nominal_hz) > 37000]))
+    if not np.isfinite(noise) or noise <= 0:
+        raise ValueError("No finite calibration noise reference")
+    smooth = median_filter(power, size=5) / noise - 1
+    sums = np.r_[0., np.cumsum(smooth)]
+    geometry = mode.geometry
+    width = geometry.carriers * RS
+    video_center = geometry.carrier0_hz + (geometry.carriers - 1) * RS / 2
+    if composite:
+        profile = composite_profile(mode.name)
+        video_center += profile.shift_hz - profile.bandwidth_hz / 2
+    else:
+        video_center -= geometry.fcenter_hz
+    centers = nominal_hz + np.arange(-25000, 25001, 25) + video_center
+
+    def mean(low, high):
+        left = np.searchsorted(f, centers + low)
+        right = np.searchsorted(f, centers + high)
+        return (sums[right] - sums[left]) / np.maximum(right - left, 1)
+
+    slices = np.array([mean(x * width, (x + .2) * width) for x in (-.4, -.2, 0, .2)])
+    outside = mean(.6 * width, .9 * width)
+    if not composite:
+        outside = (outside + mean(-.9 * width, -.6 * width)) / 2
+    scores = slices.mean(axis=0) - outside
+    occupied = (slices.min(axis=0) > .12) & (slices.max(axis=0) < 6 * slices.min(axis=0))
+    scores[~occupied] = -np.inf
+    index = int(np.argmax(scores))
+    if scores[index] < .15:
+        raise ValueError(f"No independently occupied {mode.name} video bank")
+    if index < 2 or index >= len(centers) - 2:
+        raise ValueError("Calibration maximum lies at the search boundary")
+    if scores[index] < .35 * slices[:, index].mean():
+        raise ValueError("Calibration energy lacks distinct video-band edges")
+    center = centers[index] - video_center
+    # Strong signals permit a tighter edge estimate. The broad contrast score
+    # alone can favor one side of an uneven bank by a few hundred hertz, which
+    # the video modem tolerates but would cut into low-frequency A/V speech.
+    inside = abs(f - centers[index]) < .35 * width
+    level = float(np.percentile(smooth[inside], 25))
+    if level > 5:
+        threshold = .15 * level
+        occupied_bins = smooth > threshold
+        middle = int(np.searchsorted(f, centers[index]))
+        left = right = middle
+        while left > 0 and occupied_bins[left]:
+            left -= 1
+        while right < len(f) - 1 and occupied_bins[right]:
+            right += 1
+        if left < middle < right:
+            low = np.interp(threshold, smooth[left:left+2], f[left:left+2])
+            high = np.interp(threshold, smooth[right-1:right+1][::-1], f[right-1:right+1][::-1])
+            if .8 * width <= high - low <= 1.2 * width:
+                center = round(((low + high) / 2 - video_center) / 25) * 25
+    return dict(offset_hz=float(center), video_width_hz=float(width),
+                inband_over_noise_db=float(10*np.log10(1 + slices[:, index].mean())),
+                method=f"Received-only {mode.name} carrier-bank contrast and four interior slices")
+
+
 class IQToModem:
     """Integer polyphase decimation with persistent FIR and oscillator state."""
 

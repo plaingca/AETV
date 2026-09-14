@@ -494,7 +494,8 @@ def _play_chunk_stream_direct(
         ratio = resample_ratio(rate, target_rate)
         resamplers = [StreamResampler(*ratio) for _ in range(channels)]
     with sd.OutputStream(
-        samplerate=target_rate, channels=channels, dtype="float32", device=device
+        samplerate=target_rate, channels=channels, dtype="float32", device=device,
+        blocksize=wasapi_blocksize(target_rate), latency=.1,
     ) as stream:
         for index, chunk in enumerate(chunks):
             if should_stop is not None and should_stop():
@@ -755,6 +756,9 @@ class AudioPlaybackStream:
         self._rate = int(rate)
         self._device = device
         self._queue: queue.Queue = queue.Queue(maxsize=20)
+        self._lock = threading.Lock()
+        self._queued_samples = 0
+        self.health = dict(queue_high_water_samples=0, dropped_blocks=0, idle_samples=0)
         self._stop = threading.Event()
         self._sentinel = object()
         self._error: Exception | None = None
@@ -766,11 +770,25 @@ class AudioPlaybackStream:
         self._thread.start()
 
     def _chunks(self):
-        while True:
-            item = self._queue.get()
+        while not self._stop.is_set():
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                # Keep the endpoint clock running between decoded GOPs and
+                # during RF fades. Starving the blocking device stream made
+                # ALSA/Pulse repeatedly restart with seconds of extra delay.
+                silence = np.zeros(max(1, self._rate // 50), np.float32)
+                self.health["idle_samples"] += len(silence)
+                yield silence
+                continue
             if item is self._sentinel:
                 return
-            yield item
+            samples, on_start = item
+            with self._lock:
+                self._queued_samples -= len(samples)
+            if on_start is not None:
+                on_start()
+            yield samples
 
     def _run(self) -> None:
         try:
@@ -783,17 +801,35 @@ class AudioPlaybackStream:
         except Exception as error:
             self._error = error
 
-    def write(self, audio: np.ndarray) -> None:
+    def write(self, audio: np.ndarray, *, on_start=None) -> bool:
         if self._error is not None:
             raise self._error
+        if self._stop.is_set():
+            return False
         samples = np.asarray(audio, dtype=np.float32).reshape(-1)
         if samples.size:
-            self._queue.put(samples.copy())
+            with self._lock:
+                # A blocked/disconnected audio endpoint must never block RF
+                # decoding or accumulate seconds of sound behind live video.
+                if self._queued_samples + len(samples) > 2 * self._rate:
+                    self.health["dropped_blocks"] += 1
+                    return False
+                try:
+                    self._queue.put_nowait((samples.copy(), on_start))
+                except queue.Full:
+                    self.health["dropped_blocks"] += 1
+                    return False
+                self._queued_samples += len(samples)
+                self.health["queue_high_water_samples"] = max(
+                    self.health["queue_high_water_samples"], self._queued_samples)
+        return True
 
     def close(self) -> None:
         try:
             self._queue.put(self._sentinel, timeout=1.0)
             self._thread.join(timeout=5.0)
+        except queue.Full:
+            self._stop.set()
         finally:
             if self._thread.is_alive():
                 self._stop.set()

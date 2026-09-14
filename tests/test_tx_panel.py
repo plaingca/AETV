@@ -333,7 +333,7 @@ def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
 
     panel = SimpleNamespace(
         station=SimpleNamespace(
-            settings=SimpleNamespace(gops=10),
+            settings=SimpleNamespace(gops=10, waveform_mode="video"),
             require_codec=lambda: SimpleNamespace(
                 mode=SimpleNamespace(name="V8", fps=6, gop_frames=2)
             ),

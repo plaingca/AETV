@@ -130,6 +130,8 @@ class VideoView(QWidget):
         self._last_enqueued_frame: np.ndarray | None = None
         self._fps = 12.0
         self._playout_deadline: float | None = None
+        self.health = dict(enqueued_frames=0, displayed_frames=0, trimmed_frames=0,
+                           queue_high_water=0, empty_events=0, late_ticks=0, late_max_s=0.)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -202,12 +204,16 @@ class VideoView(QWidget):
         )
         self._last_enqueued_frame = np.ascontiguousarray(values[-1]).copy()
         incoming = [np.ascontiguousarray(frame).copy() for frame in values]
+        self.health["enqueued_frames"] += len(incoming)
         if max_queue_frames is not None:
             queue_limit = max(len(incoming), int(max_queue_frames))
             stale = max(0, len(self._frames) + len(incoming) - queue_limit)
             for _ in range(min(stale, len(self._frames))):
                 self._frames.popleft()
+                self.health["trimmed_frames"] += 1
+        self.health["trimmed_frames"] += max(0, len(self._frames) + len(incoming) - self._frames.maxlen)
         self._frames.extend(incoming)
+        self.health["queue_high_water"] = max(self.health["queue_high_water"], len(self._frames))
         if self._timer.isActive():
             return
         # After startup or an underrun, hold the last picture until enough
@@ -230,22 +236,36 @@ class VideoView(QWidget):
 
     def _advance_frame(self) -> None:
         if not self._frames:
+            if self._playout_deadline is not None:
+                self.health["empty_events"] += 1
             self._timer.stop()
             self._playout_deadline = None
             return
-        self._show_frame(self._frames.popleft())
         now = time.monotonic()
         period = 1.0 / max(self._fps, 1e-6)
+        if self._playout_deadline is not None:
+            late = max(0., now - self._playout_deadline)
+            skip = min(int(late / period), len(self._frames) - 1)
+            for _ in range(skip):
+                self._frames.popleft()
+            if skip:
+                self.health["trimmed_frames"] += skip
+                self.health["late_ticks"] += 1
+                self.health["late_max_s"] = max(self.health["late_max_s"], late)
+                self._playout_deadline += skip * period
+        self._show_frame(self._frames.popleft())
+        self.health["displayed_frames"] += 1
         deadline = (
             self._playout_deadline + period
             if self._playout_deadline is not None
             else now + period
         )
-        # Never burst frames to catch up after a delayed GUI paint. The next
-        # enqueue trims stale backlog, while this clock keeps visible cadence
-        # smooth and alternates integer timer delays to represent 6/12 fps
-        # without long-term rounding drift.
+        # Skip missed presentation instants instead of replaying old pictures
+        # slowly after a blocked GUI. Ordinary sub-frame jitter keeps the
+        # absolute clock, including fractional 6/12 fps timer intervals.
         if deadline <= now:
+            self.health["late_ticks"] += 1
+            self.health["late_max_s"] = max(self.health["late_max_s"], now - deadline)
             deadline = now + period
         self._playout_deadline = deadline
         self._timer.start(max(1, math.ceil(1000.0 * (deadline - now))))

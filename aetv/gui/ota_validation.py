@@ -24,10 +24,14 @@ def load_validation(path):
     if config.get("transmit") is not True:
         raise ValueError("OTA validation requires explicit transmit=true")
     gops = int(config.get("gops", 10))
-    if not 1 <= gops <= 60:
-        raise ValueError("OTA validation is limited to 1–60 GOPs")
+    limit = 900 if config.get("stress") else 60
+    if not 1 <= gops <= limit:
+        raise ValueError(f"OTA validation is limited to 1–{limit} GOPs")
+    selected = config.get("mode", "AC16")
+    av = selected.endswith("_AV")
     settings = StationSettings(
-        mode="AC16",
+        mode=selected.removesuffix("_AV") if av else selected,
+        waveform_mode="analog_av" if av else "video",
         tx_backend=config.get("transmitter", "pluto"),
         rx_source=config.get("receiver", "rtlsdr"),
         gops=gops,
@@ -48,6 +52,8 @@ def load_validation(path):
         buffer_seconds=8,
         autosave=True,
         debug_capture=True,
+        audio_playback_output=config.get("audio_output", ""),
+        av_microphone_mix=0,
     )
     problems = settings.validate()
     if settings.tx_backend not in {"pluto", "hackrf"}:
@@ -60,6 +66,9 @@ def load_validation(path):
 
 
 def install_validation(window, app, config):
+    if config.get("stress"):
+        from .ota_stress import install_stress
+        return install_stress(window, app, config)
     output = Path(config["output"])
     output.mkdir(parents=True, exist_ok=False)
     source_path = Path(config["source"])

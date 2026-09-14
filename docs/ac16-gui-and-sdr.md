@@ -37,11 +37,11 @@ synthesized spectrum or source waveform. The other radio/audio receive paths
 retain their existing audio waterfall.
 
 The RX frequency correction field accounts for tuner/oscillator error. Its
-units are Hz relative to the nominal received signal offset. AC16's optional
-automatic correction estimates the occupied spectrum from received IQ only;
-initial acquisition waits for a stable strong-signal spectrum and can add
-startup delay. Disable automatic correction and set a manual correction for
-weak signals. The dial denotes RF waveform center, not a soundcard audio
+units are Hz relative to the nominal received signal offset. Automatic correction supports all released modes and both A/V layouts.
+It estimates the occupied video bank from received I/Q and requires stable
+independent spectral evidence before tuning. The modem still validates the
+header or beacon. A manual correction remains available when automatic
+calibration cannot identify the signal. The dial denotes RF waveform center, not a soundcard audio
 reference. Hardware LOs are offset by 100 kHz to keep the desired waveform
 away from their DC spur.
 
@@ -177,3 +177,8 @@ is insufficient: displayed frame counts and latent fidelity are also checked.
 Trial release evidence and artifact checksums are recorded separately in the
 release validation report. No claim is made that every SNR, CPU, GPU provider,
 USB topology, or OS has the same throughput.
+
+## Extended receiver testing
+
+See [all-mode SDR stress testing](all-modes-sdr-stress.md) for long transmissions,
+late joins, fault injection, buffer telemetry, and saved-I/Q replay.
