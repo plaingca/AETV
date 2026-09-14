@@ -32,7 +32,8 @@ def test_paired_clock_does_not_accumulate_polling_jitter_over_ten_minutes():
 @pytest.mark.parametrize("name,av", [("V8", False), ("V7", False), ("V8", True)])
 @pytest.mark.parametrize("snr", [0., 35.])
 @pytest.mark.parametrize("seed", [8473, 836])
-def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, av, snr, seed):
+@pytest.mark.parametrize("sample_rate", [960000, 1008000])
+def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, av, snr, seed, sample_rate):
     from aetv.modem import modulate_continuous_chunks
     from aetv.sdr_dsp import ModemToIQ, estimate_mode_signal_offset
     from aetv.audio_io import StreamResampler, resample_ratio
@@ -49,10 +50,10 @@ def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, a
         voice = .2*np.sin(2*np.pi*731*np.arange(24000)/8000)
         chunks = TxEngine(Station(settings))._composite_chunks(chunks, voice, 3, capture_microphone=False)
     audio = StreamResampler(*resample_ratio(waveform_sample_rate(settings), 48000))(np.concatenate(list(chunks)))
-    iq = ModemToIQ(960000, -105150, waveform_center_hz(settings), peak_limit=.9).feed(audio*.1)[960000:1920000]
-    power = np.mean(abs(iq)**2) * (.5 if av else 1) * (960000/(50*mode.geometry.carriers)) / 10**(snr/10)
+    iq = ModemToIQ(sample_rate, -105150, waveform_center_hz(settings), peak_limit=.9).feed(audio*.1)[sample_rate:2*sample_rate]
+    power = np.mean(abs(iq)**2) * (.5 if av else 1) * (sample_rate/(50*mode.geometry.carriers)) / 10**(snr/10)
     iq += np.sqrt(power/2)*(rng.normal(size=len(iq))+1j*rng.normal(size=len(iq)))
-    result = estimate_mode_signal_offset(iq, mode, composite=av)
+    result = estimate_mode_signal_offset(iq, mode, sample_rate=sample_rate, composite=av)
     # Merely being inside the modem's +/-600 Hz search is insufficient: a
     # narrow A/V receive filter can lose its edge beacon before its pilots.
     assert abs(result["offset_hz"] + 105150) < 150, result

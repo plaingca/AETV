@@ -1,0 +1,182 @@
+[
+  {
+    "mode": "V8",
+    "input_awgn_db": null,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9697121381759644,
+        "pooled_psnr_db": 25.581517350333108
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9697589874267578,
+        "pooled_psnr_db": 25.582409527950155
+      }
+    },
+    "psnr_delta_db": 0.000892177617046741
+  },
+  {
+    "mode": "V8",
+    "input_awgn_db": 8,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9308124780654907,
+        "pooled_psnr_db": 24.943818652523426
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9307866096496582,
+        "pooled_psnr_db": 24.945403988506342
+      }
+    },
+    "psnr_delta_db": 0.001585335982916547
+  },
+  {
+    "mode": "V7",
+    "input_awgn_db": null,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9642988443374634,
+        "pooled_psnr_db": 27.631860569772012
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9643235206604004,
+        "pooled_psnr_db": 27.632236094560167
+      }
+    },
+    "psnr_delta_db": 0.00037552478815428003
+  },
+  {
+    "mode": "V7",
+    "input_awgn_db": 8,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9213237762451172,
+        "pooled_psnr_db": 27.314472401859135
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9212797284126282,
+        "pooled_psnr_db": 27.316624786745926
+      }
+    },
+    "psnr_delta_db": 0.0021523848867914808
+  },
+  {
+    "mode": "AC16",
+    "input_awgn_db": null,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.95787513256073,
+        "pooled_psnr_db": 29.177470574324317
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9579045176506042,
+        "pooled_psnr_db": 29.178075478323287
+      }
+    },
+    "psnr_delta_db": 0.0006049039989690641
+  },
+  {
+    "mode": "AC16",
+    "input_awgn_db": 8,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9200360774993896,
+        "pooled_psnr_db": 28.494731845071662
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9199966192245483,
+        "pooled_psnr_db": 28.494273728218353
+      }
+    },
+    "psnr_delta_db": -0.0004581168533093205
+  },
+  {
+    "mode": "V8_AV",
+    "input_awgn_db": null,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9217528104782104,
+        "pooled_psnr_db": 25.321485363025854
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.9216455817222595,
+        "pooled_psnr_db": 25.327124249377633
+      }
+    },
+    "psnr_delta_db": 0.005638886351778893
+  },
+  {
+    "mode": "V8_AV",
+    "input_awgn_db": 8,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.8941931128501892,
+        "pooled_psnr_db": 24.532268514251424
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.8940620422363281,
+        "pooled_psnr_db": 24.530532763890122
+      }
+    },
+    "psnr_delta_db": -0.0017357503613020242
+  },
+  {
+    "mode": "AC16_AV",
+    "input_awgn_db": null,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.9576350450515747,
+        "pooled_psnr_db": 29.17403636135944
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.957568347454071,
+        "pooled_psnr_db": 29.17272434008155
+      }
+    },
+    "psnr_delta_db": -0.0013120212778900964
+  },
+  {
+    "mode": "AC16_AV",
+    "input_awgn_db": 8,
+    "gops": 6,
+    "arms": {
+      "before": {
+        "decoded": 6,
+        "source_cosine_min": 0.8494923114776611,
+        "pooled_psnr_db": 27.777648608467253
+      },
+      "after": {
+        "decoded": 6,
+        "source_cosine_min": 0.849521279335022,
+        "pooled_psnr_db": 27.778600098541272
+      }
+    },
+    "psnr_delta_db": 0.00095149007401929
+  }
+]

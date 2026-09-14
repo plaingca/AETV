@@ -18,7 +18,12 @@ from .analog_av import waveform_center_hz
 
 import numpy as np
 
-SAMPLE_RATE = 9600000  # >=8 MHz ADC/DAC recommendation; integer 48 kHz ratio.
+# Keep the One's converter above its documented 8 MHz recommendation. This
+# 168*48 kHz rate also permits an integer /8 host decimator before calibration.
+# HackRF One has no hardware filtered decimation; this lowers its sample clock.
+SAMPLE_RATE = 8064000
+RX_DECIMATION = 8
+RX_SAMPLE_RATE = SAMPLE_RATE // RX_DECIMATION
 FILTER_BANDWIDTH = 1750000
 _device_lock = threading.Lock()  # One shared TX/RX selector: half duplex.
 
@@ -92,9 +97,13 @@ def runtime_smoke():
 def encode_iq(iq):
     values = np.asarray(iq, np.complex64).reshape(-1)
     components = values.view(np.float32)
-    if not np.all(np.isfinite(components)) or np.any(np.abs(components) >= 1):
+    low, high = components.min(initial=0), components.max(initial=0)
+    if not np.isfinite(low) or not np.isfinite(high) or low <= -1 or high >= 1:
         raise ValueError("HackRF IQ exceeds signed 8-bit range; reduce TX level")
-    return np.clip(np.rint(components * 128), -128, 127).astype(np.int8).tobytes()
+    scaled = components * 128
+    np.rint(scaled, out=scaled)
+    np.clip(scaled, -128, 127, out=scaled)
+    return scaled.astype(np.int8).tobytes()
 
 
 def decode_iq(data):
@@ -215,7 +224,8 @@ class HackRF:
                 self.tx_samples += transfer.valid_length // 2
                 return 0 if transfer.valid_length else -1
             except queue.Empty:
-                self.error = "HackRF TX underrun: inference/modem could not supply IQ in real time"
+                self.error = ("HackRF TX underrun: host could not supply IQ in real time; "
+                              "try a prepared clip or faster inference")
             except Exception as error:
                 self.error = str(error)
             return -1
@@ -259,7 +269,8 @@ class HackRF:
             raise RuntimeError("HackRF shutdown failed: " + "; ".join(errors))
 
 
-def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
+def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
+                    diagnostics=None):
     from dataclasses import replace
     from .audio_io import StreamResampler, resample_ratio
     from .hfchannel import _active_signal_power
@@ -271,17 +282,23 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     end = object()
     deadline = time.monotonic() + max_seconds + 25
     radio = None
+    health = diagnostics if diagnostics is not None else {}
+    health.update(iq_queue_high_water=0, conversion_max_ms=0., packing_max_ms=0.,
+                  conversion_seconds=0., packing_seconds=0., produced_samples=0,
+                  late_data_events=0, completed=False)
 
     def put(value):
         while not (stopped.is_set() or cancel.is_set()):
             try:
                 ready.put(value, timeout=0.1)
+                health["iq_queue_high_water"] = max(health["iq_queue_high_water"], ready.qsize())
                 return
             except queue.Full:
                 pass
 
     def produce():
-        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9)
+        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9,
+                            narrowband=True)
         resample = StreamResampler(*resample_ratio(fs, 48000))
         count = 0
         try:
@@ -297,13 +314,25 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 for pos in range(0, len(audio), 48000):
                     if stopped.is_set() or cancel.is_set():
                         return
+                    before = time.perf_counter()
                     iq = adapter.feed(audio[pos:pos + 48000])
+                    elapsed = time.perf_counter() - before
+                    health["conversion_seconds"] += elapsed
+                    health["conversion_max_ms"] = max(health["conversion_max_ms"], elapsed * 1000)
                     for offset in range(0, len(iq), SAMPLE_RATE // 10):
                         if stopped.is_set() or cancel.is_set():
                             return
-                        put(encode_iq(iq[offset:offset + SAMPLE_RATE // 10]))
+                        before = time.perf_counter()
+                        packed = encode_iq(iq[offset:offset + SAMPLE_RATE // 10])
+                        elapsed = time.perf_counter() - before
+                        health["packing_seconds"] += elapsed
+                        health["packing_max_ms"] = max(health["packing_max_ms"], elapsed * 1000)
+                        health["produced_samples"] += len(packed) // 2
+                        put(packed)
             # Drain the resampler and sideband FIR tail before the USB flush.
-            put(encode_iq(adapter.feed(resample(np.zeros(9600)))))
+            tail = adapter.feed(resample(np.zeros(round(fs * .2))))
+            health["produced_samples"] += len(tail)
+            put(encode_iq(tail))
         except Exception as error:
             put(error)
         finally:
@@ -313,8 +342,10 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     producer = threading.Thread(target=produce, name="hackrf-modem", daemon=True)
     producer.start()
     try:
-        # Half a second of prepared IQ absorbs callback and encoder jitter.
-        while ready.qsize() < 5 and not produced.is_set() and not cancel.is_set():
+        # The old five-buffer threshold could start USB on the header alone,
+        # before the first video GOP had even been encoded. Prime nearly the
+        # bounded 1.6-second queue so normal first-GOP latency has a reserve.
+        while ready.qsize() < 15 and not produced.is_set() and not cancel.is_set():
             if time.monotonic() > deadline:
                 raise TimeoutError("HackRF TX preparation exceeded its duration watchdog")
             cancel.wait(0.02)
@@ -324,10 +355,13 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
         radio.start_tx(ready, end, cancel)
         while not cancel.is_set():
             if radio.error:
+                if "underrun" in radio.error:
+                    health["late_data_events"] += 1
                 raise RuntimeError(radio.error)
             if radio.flushed.wait(0.02):
                 if radio.error:
                     raise RuntimeError(radio.error)
+                health["completed"] = radio.tx_eof
                 return radio.tx_eof
             if time.monotonic() > deadline:
                 raise TimeoutError("HackRF TX exceeded its duration watchdog")

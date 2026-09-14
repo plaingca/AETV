@@ -296,7 +296,8 @@ def test_station_routes_prepared_clip_to_hackrf_without_cat(monkeypatch):
     prepared = PreparedClip("fixture.mp4", "AC16", (np.ones(19200, np.float32),),
                             np.zeros((10, 144, 256, 3), np.uint8))
     observed = []
-    def send(chunks, fs, actual, cancel, progress, *, max_seconds):
+    def send(chunks, fs, actual, cancel, progress, *, max_seconds, diagnostics):
+        assert diagnostics is engine.sdr_health
         observed.append((sum(len(x) for x in chunks), fs, actual.tx_backend, max_seconds))
         return True
     monkeypatch.setattr("aetv.hackrf.transmit_hackrf", send)
@@ -358,3 +359,58 @@ def test_capture_feeds_existing_modem_and_raw_iq_waterfall(monkeypatch):
     audio = np.concatenate(writes)[1000:]
     peak = np.argmax(abs(np.fft.rfft(audio))) * 48000 / len(audio)
     assert abs(peak - 9000) < 30
+
+
+def test_tx_primes_past_header_before_starting_usb(monkeypatch):
+    """Encoding the first payload must not empty an already-transmitting header."""
+    import time
+    import aetv.hackrf as module
+    lib = FakeLibrary()
+    original_start = lib.__getattr__('hackrf_start_tx')
+    first_payload = threading.Event()
+    sent_bytes = []
+    cancel = threading.Event()
+    workers = []
+    health = {}
+
+    def start(*args):
+        assert first_payload.is_set(), 'USB started with only the header prepared'
+        original_start(*args)
+        def consume():
+            # Callback pacing represents the configured sample rate; capture bytes without the
+            # per-element ctypes conversion in the small API unit-test fake.
+            count = 0
+            epoch = time.monotonic()
+            while True:
+                size = 262144
+                buf = (C.c_uint8 * size)()
+                transfer = Transfer(None, buf, size, size, None, None)
+                if lib.transmit(C.pointer(transfer)) != 0:
+                    break
+                count += transfer.valid_length
+                cancel.wait(max(0, epoch + count/(2*SAMPLE_RATE) - time.monotonic()))
+            sent_bytes.append(count)
+            lib.flush(None, 1)
+        worker = threading.Thread(target=consume)
+        workers.append(worker)
+        worker.start()
+        return 0
+
+    lib.hackrf_start_tx = start
+    monkeypatch.setattr(module, 'load_library', lambda: lib)
+    def chunks():
+        yield np.zeros(31200)  # 650 ms header, enough for the old five buffers.
+        time.sleep(.25)
+        first_payload.set()
+        yield np.zeros(48000)
+        yield np.zeros(48000)
+    try:
+        assert transmit_hackrf(chunks(), 48000, settings(), cancel, lambda _: None,
+                               max_seconds=2.65, diagnostics=health)
+    finally:
+        for worker in workers:
+            worker.join(timeout=5)
+    assert health['completed'] and health['late_data_events'] == 0
+    assert health['iq_queue_high_water'] <= 16
+    assert health['produced_samples'] == sent_bytes[0] // 2
+    assert abs(health['produced_samples'] / SAMPLE_RATE - 2.85) < .01

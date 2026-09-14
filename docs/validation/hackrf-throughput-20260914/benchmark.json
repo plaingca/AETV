@@ -1,0 +1,17 @@
+{
+  "scope": "Local host DSP and signed-IQ conversion only; no USB hardware or neural inference",
+  "results": [
+    {
+      "arm": "before",
+      "sample_rate": 9600000,
+      "tx_seconds_per_signal_second": 0.6296745706349611,
+      "rx_seconds_per_signal_second": 0.5225766869261861
+    },
+    {
+      "arm": "after",
+      "sample_rate": 8064000,
+      "tx_seconds_per_signal_second": 0.1873737731948495,
+      "rx_seconds_per_signal_second": 0.19932237919420004
+    }
+  ]
+}

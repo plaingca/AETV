@@ -178,10 +178,11 @@ class SDRCapture:
         self._hackrf = None
         self._decimator = None
         if settings.rx_source == "hackrf":
-            from .hackrf import SAMPLE_RATE
+            from .hackrf import SAMPLE_RATE, RX_DECIMATION
             self.rate = SAMPLE_RATE
-            self._decimator = IQDecimator(self.rate // 960000)
-        self.conversion_rate = 960000 if self._decimator else self.rate
+            self._decimator = IQDecimator(RX_DECIMATION,
+                                         protected_fraction=150000 / (self.rate / RX_DECIMATION))
+        self.conversion_rate = self.rate // self._decimator.factor if self._decimator else self.rate
         self.preview = IQPreview(self.rate, settings.sdr_frequency_mhz * 1e6, mode)
         if settings.waveform_mode == "analog_av":
             self.preview.bandwidth_hz = 2 * waveform_center_hz(settings)
@@ -342,7 +343,13 @@ class SDRCapture:
                 self.health["iq_discarded_samples"] += discarded
                 self._queue.put_nowait(self._gap)
                 self._queue.put_nowait(iq)
-                self.on_status(f"SDR IQ queue overrun; discarded {discarded/self.conversion_rate:.1f} s and reacquiring")
+                detail = ""
+                if self._hackrf is not None and self.health["converted_samples"]:
+                    cost = self.health["conversion_total_s"] / (
+                        self.health["converted_samples"] / self.conversion_rate
+                    )
+                    detail = f"; I/Q conversion {cost:.2f} s per signal second"
+                self.on_status(f"SDR IQ queue overrun; discarded {discarded/self.conversion_rate:.1f} s and reacquiring{detail}")
             self.health["iq_queue_high_water"] = max(self.health["iq_queue_high_water"], self._queue.qsize())
 
     def _convert(self):

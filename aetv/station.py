@@ -668,7 +668,7 @@ class TxEngine:
                     leveled_chunks(), transmit_rate, settings, self._cancel,
                     lambda progress: self._set(TxPhase.SENDING, progress, f"{label} transmitting"),
                     max_seconds=n_gops + (1.65 if settings.waveform_mode == "analog_av" else 0.65),
-                    **({"diagnostics": self.sdr_health} if settings.tx_backend == "pluto" else {}),
+                    diagnostics=self.sdr_health,
                 )
                 self._set(TxPhase.DONE if complete else TxPhase.CANCELLED,
                           1.0 if complete else self.state.progress,
