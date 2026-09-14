@@ -177,8 +177,8 @@ class SettingsDialog(QDialog):
 
     def apply_to(self, settings: StationSettings) -> None:
         settings.callsign = normalize_callsign(self.callsign.text()) or "N0CALL"
-        settings.waveform_mode = "analog_av" if self.mode.currentData() == "V8_AV" else "video"
-        settings.mode = "V8" if settings.waveform_mode == "analog_av" else self.mode.currentData()
+        settings.waveform_mode = "analog_av" if self.mode.currentData() in {"V8_AV", "AC16_AV"} else "video"
+        settings.mode = self.mode.currentData().removesuffix("_AV")
         settings.checkpoint = self.checkpoint.text().strip()
         selected_device = self.torch_device.currentData()
         settings.torch_device = (
@@ -247,7 +247,8 @@ class SettingsDialog(QDialog):
             self.mode.addItem(RELEASE_MODE_LABELS[name], name)
         v8 = AETV_MODES["V8"]
         self.mode.addItem(f"V8 A/V — {v8.description} + analog audio", "V8_AV")
-        selected = "V8_AV" if self._settings.waveform_mode == "analog_av" else self._settings.mode
+        self.mode.addItem("AC16 A/V · 20 kHz — 256×144 @ 10 fps + 3.3 kHz audio", "AC16_AV")
+        selected = f"{self._settings.mode}_AV" if self._settings.waveform_mode == "analog_av" else self._settings.mode
         self.mode.setCurrentIndex(max(0, self.mode.findData(selected)))
         self.checkpoint = QLineEdit(self._settings.checkpoint)
         self.checkpoint.setPlaceholderText(

@@ -82,6 +82,9 @@ class AETVDemodResult:
     # them; shrinking noise must not make a genuine weak signal fail acquisition.
     pilot_confidence: float | None = None
     header_tail_score: float = 0.0
+    # Absolute payload position in StreamingDemodulator input samples. Used
+    # to associate delayed analog program audio, including after reacquisition.
+    stream_start_sample: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1425,6 +1428,7 @@ class StreamingDemodulator:
                     missing_gops=int(missing_gops),
                     callsign=result.callsign,
                 )
+                result.stream_start_sample = int(stream_sample)
                 results.append(result)
                 continue
             if self.continuous and self._awaiting_blind:
@@ -1766,6 +1770,7 @@ class StreamingDemodulator:
                 missing_gops=int(missing_gops),
                 callsign=result.callsign,
             )
+            result.stream_start_sample = int(candidate_sample + preamble_samples + header_samples)
             results.append(result)
         return results
 

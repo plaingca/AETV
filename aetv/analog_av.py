@@ -1,12 +1,14 @@
-"""Experimental analog-voice plus frequency-stacked AETV waveform.
+"""Analog program audio plus frequency-stacked AETV waveforms.
 
-The composite keeps ordinary 0--2.2 kHz speech at baseband and translates the
-native V8/W waveform from 450--2650 Hz to 2600--4800 Hz.  Its explicitly
-filtered lower skirt begins at 2500 Hz, leaving a real 300 Hz guard band at a
-12 kHz soundcard rate.
+V8 retains its 0–2.2 kHz voice / 2.6–4.8 kHz video layout at 12 ksample/s.
+AC16 A/V uses 0–3.3 kHz audio and shifts the guarded 16 kHz video waveform
+up by 4 kHz, for a 20 kHz composite at 48 ksample/s.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from collections import deque
 
 import numpy as np
 from scipy import signal
@@ -21,6 +23,40 @@ AETV_FILTER_LOW_HZ = 2_500.0
 AETV_FILTER_HIGH_HZ = 4_900.0
 AETV_SHIFT_HZ = 2_150.0
 GOP_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class CompositeProfile:
+    fs: int
+    video_fs: int
+    audio_high_hz: float
+    shift_hz: float
+    bandwidth_hz: float
+
+
+V8_AV = CompositeProfile(12_000, 8_000, 2_200, 2_150, 5_000)
+AC16_AV = CompositeProfile(48_000, 48_000, 3_300, 4_000, 20_000)
+
+
+def composite_profile(mode_name: str) -> CompositeProfile:
+    return {"V8": V8_AV, "AC16": AC16_AV}[mode_name]
+
+
+def waveform_center_hz(settings) -> float:
+    """The SDR frequency dial is the center of the selected RF waveform."""
+    from .config import AETV_MODES
+
+    if settings.waveform_mode == "analog_av":
+        return composite_profile(settings.mode).bandwidth_hz / 2
+    return AETV_MODES[settings.mode].geometry.fcenter_hz
+
+
+def waveform_sample_rate(settings) -> int:
+    from .config import AETV_MODES
+
+    if settings.waveform_mode == "analog_av":
+        return composite_profile(settings.mode).fs
+    return AETV_MODES[settings.mode].geometry.fs
 
 
 def _cosine_lowpass(values: np.ndarray, fs: int, pass_hz: float, stop_hz: float) -> np.ndarray:
@@ -140,10 +176,23 @@ def mix_composite_chunk(
     *,
     video_power: float,
     peak: float = 0.95,
+    profile: CompositeProfile = V8_AV,
 ) -> np.ndarray:
     """Compose one aligned stream chunk using an average-power allocation."""
-    upper = translate_aetv_up(aetv_8k)
-    voice = prepare_voice(voice_8k)
+    if profile == AC16_AV:
+        native = np.asarray(aetv_8k, dtype=np.float64)
+        timeline = np.arange(len(native)) / profile.fs
+        upper = _cosine_bandpass(
+            np.real(signal.hilbert(native) * np.exp(2j * np.pi * profile.shift_hz * timeline)),
+            profile.fs, 4_200, 4_400, 19_600, 20_000,
+        )
+        voice = _cosine_lowpass(
+            signal.resample_poly(np.asarray(voice_8k, dtype=np.float64), 6, 1),
+            profile.fs, 3_200, profile.audio_high_hz,
+        )
+    else:
+        upper = translate_aetv_up(aetv_8k)
+        voice = prepare_voice(voice_8k)
     count = min(len(upper), len(voice))
     upper, voice = upper[:count], voice[:count]
     video_power = float(np.clip(video_power, 0.0, 1.0))
@@ -198,3 +247,76 @@ class StreamingCompositeSeparator:
         mixed = 2.0 * upper * np.cos(2.0 * np.pi * AETV_SHIFT_HZ * indices / COMPOSITE_FS)
         native, self._native_zi = signal.sosfilt(self._native_sos, mixed, zi=self._native_zi)
         return voice.astype(np.float32), native.astype(np.float32)
+
+
+class AC16CompositeSeparator:
+    """Separate 0–3.3 kHz audio and the shifted AC16 waveform at 48 ksample/s.
+
+    Select only the positive video sideband before translating down: a real
+    cosine mixer would fold an image into the upper half of AC16's payload.
+    Both FIR paths have the same 512-sample (10.67 ms) group delay.
+    """
+
+    delay_samples = 512
+
+    def __init__(self):
+        profile = AC16_AV
+        count = 2 * self.delay_samples + 1
+        self._voice_taps = signal.firwin(count, 3_500, fs=profile.fs, window=("kaiser", 10))
+        base = signal.firwin(count, 7_800, fs=profile.fs, window=("kaiser", 10))
+        self._video_taps = 2 * base * np.exp(
+            2j * np.pi * 12_000 * (np.arange(count) - self.delay_samples) / profile.fs
+        )
+        self._voice_state = np.zeros(count - 1)
+        self._video_state = np.zeros(count - 1, np.complex128)
+        self._sample = 0
+
+    def process(self, composite: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        values = np.asarray(composite, dtype=np.float64).reshape(-1)
+        if not values.size:
+            return np.empty(0, np.float32), np.empty(0, np.float32)
+        voice, self._voice_state = signal.lfilter(
+            self._voice_taps, [1.0], values, zi=self._voice_state
+        )
+        upper, self._video_state = signal.lfilter(
+            self._video_taps, [1.0], values, zi=self._video_state
+        )
+        # Undo the translation at the delayed sample time, retaining phase
+        # across arbitrary receive callback boundaries.
+        positions = self._sample + np.arange(len(values)) - self.delay_samples
+        video = (upper * np.exp(-2j * np.pi * AC16_AV.shift_hz * positions / AC16_AV.fs)).real
+        self._sample += len(values)
+        return voice.astype(np.float32), video.astype(np.float32)
+
+
+class AC16ProgramAudio:
+    """Pair each decoded GOP with its following, one-second audio interval.
+
+    Positions come from received modem framing, so joining a running station
+    or skipping a damaged GOP does not shift the saved soundtrack. Audio and
+    video FIR delays match, and the streaming voice resampler preserves
+    sample coordinates while buffering the filter lookahead.
+    """
+
+    def __init__(self):
+        from .ringbuffer import RingBuffer
+        self.voice = RingBuffer(40, NATIVE_AETV_FS)
+        self.pending = deque()
+
+    def add(self, result, payload):
+        if result.stream_start_sample is None:
+            raise ValueError("AC16 A/V needs received payload sample positions")
+        start = round(result.stream_start_sample / 6) + NATIVE_AETV_FS
+        self.pending.append((start, payload))
+
+    def ready(self):
+        while self.pending:
+            start, payload = self.pending[0]
+            if self.voice.total_written < start + NATIVE_AETV_FS:
+                break
+            audio, _, overrun = self.voice.read_since(start)
+            self.pending.popleft()
+            if overrun:
+                # Never pair a video GOP with a different source second.
+                continue
+            yield payload, audio[:NATIVE_AETV_FS].astype(np.float32)

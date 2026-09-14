@@ -134,8 +134,8 @@ class StationSettings:
             problems.append("TX level must be between 0.05 and 1.0")
         if self.waveform_mode not in {"video", "analog_av"}:
             problems.append(f"unknown waveform mode {self.waveform_mode!r}")
-        if self.waveform_mode == "analog_av" and self.mode != "V8":
-            problems.append("V8 A/V transport requires video mode V8")
+        if self.waveform_mode == "analog_av" and self.mode not in {"V8", "AC16"}:
+            problems.append("A/V transport requires video mode V8 or AC16")
         if not 0.0 <= self.av_video_power <= 1.0:
             problems.append("A/V video power must be between 0 and 1")
         if not 0.0 <= self.av_microphone_mix <= 1.0:
@@ -164,6 +164,11 @@ class StationSettings:
                     self.kiwi_host = normalize_kiwi_host(self.kiwi_host)
                 except ValueError as error:
                     problems.append(str(error))
+        if self.mode == "AC16" and self.waveform_mode == "analog_av":
+            if receive and self.rx_source in {"kiwi", "flex"}:
+                problems.append("AC16 A/V requires a 20 kHz receive path: use SDR or a 48 kHz soundcard")
+            if radio_tx and self.tx_backend == "audio" and self.cat_backend == "flex" and self.flex_native_audio:
+                problems.append("AC16 A/V exceeds native Flex audio bandwidth; use SDR or a 48 kHz soundcard")
         if self.prop_antenna_pattern not in {"unknown", "dipole", "directional"}:
             problems.append(f"unknown propagation antenna pattern {self.prop_antenna_pattern!r}")
         if radio_tx and self.tx_backend == "audio" and self.cat_backend == "flex" and not self.flex_host:
@@ -181,8 +186,6 @@ class StationSettings:
         if using_sdr:
             if using_pluto and not 70 <= self.sdr_frequency_mhz <= 6000:
                 problems.append("Pluto frequency must be 70–6000 MHz")
-            if self.waveform_mode != "video":
-                problems.append("Direct SDR requires video waveform mode")
             if using_pluto and not self.pluto_uri.strip():
                 problems.append("Pluto URI is empty")
             if radio_tx and self.tx_backend == "pluto" and not -89.75 <= self.pluto_tx_gain <= 0:

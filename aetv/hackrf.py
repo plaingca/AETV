@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+from .analog_av import waveform_center_hz
+
 import numpy as np
 
 SAMPLE_RATE = 9600000  # >=8 MHz ADC/DAC recommendation; integer 48 kHz ratio.
@@ -260,7 +262,6 @@ class HackRF:
 def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     from dataclasses import replace
     from .audio_io import StreamResampler, resample_ratio
-    from .config import AETV_MODES
     from .hfchannel import _active_signal_power
     from .sdr_dsp import ModemToIQ
 
@@ -280,7 +281,7 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 pass
 
     def produce():
-        adapter = ModemToIQ(SAMPLE_RATE, center_hz=AETV_MODES[settings.mode].geometry.fcenter_hz)
+        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings))
         resample = StreamResampler(*resample_ratio(fs, 48000))
         count = 0
         try:

@@ -120,6 +120,8 @@ done
     --mode V8 --device cpu --warmup 0 --repeats 1 --json build-smoke.json
   AETV_CPU_THREADS=8 AETV_OFFLINE=1 ./AETV-Benchmark \
     --mode AC16 --device cpu --warmup 1 --repeats 1 --json ac16-build-smoke.json
+  AETV_CPU_THREADS=8 AETV_OFFLINE=1 ./AETV-Benchmark \
+    --mode AC16 --device cpu --av-smoke --av-output ac16-av-smoke.mp4 --json ac16-av-smoke.json
   XDG_CACHE_HOME="$build_root/smoke-cache" \
     XDG_CONFIG_HOME="$build_root/smoke-config" \
     QT_QPA_PLATFORM=offscreen AETV_OFFLINE=1 ./AETV --smoke-test \

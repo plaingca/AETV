@@ -44,6 +44,9 @@ def main() -> None:
         type=Path,
         help="exercise the packaged Save video FFmpeg path and exit",
     )
+    parser.add_argument("--av-smoke", action="store_true", help="validate AC16 frames through the 20 kHz A/V waveform and simulated signed RF IQ")
+    parser.add_argument("--av-output", type=Path, help="save the recovered A/V validation MP4")
+    parser.add_argument("--av-source", type=Path, help="optional RGB .npy frames for A/V validation")
     args = parser.parse_args()
 
     if args.sdr_smoke:
@@ -64,6 +67,14 @@ def main() -> None:
     if args.threads:
         os.environ["AETV_CPU_THREADS"] = str(args.threads)
     codec = AETVCodec(args.checkpoint, device=args.device, mode=args.mode)
+    if args.av_smoke:
+        from aetv.ac16_av_smoke import av_smoke
+        result = av_smoke(codec, output=args.av_output, source=args.av_source)
+        text = json.dumps(result, indent=2) + "\n"
+        print(text, end="")
+        if args.json:
+            args.json.write_text(text, encoding="utf-8")
+        return
     rng = np.random.default_rng(20260824)
     frames = rng.integers(
         0,

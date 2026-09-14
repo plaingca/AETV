@@ -522,7 +522,7 @@ class MainWindow(QMainWindow):
         self._refresh_station_label()
         if not codec_changed:
             self._log(
-                "V8 A/V transport enabled"
+                f"{self.settings.mode} A/V transport enabled"
                 if self.settings.waveform_mode == "analog_av"
                 else "video-only transport enabled"
             )
@@ -573,7 +573,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_station_label(self) -> None:
         backend = self.settings.cat_backend if not self.settings.audio_only else "audio-only"
-        mode_label = "V8 A/V" if self.settings.waveform_mode == "analog_av" else self.settings.mode
+        mode_label = f"{self.settings.mode} A/V" if self.settings.waveform_mode == "analog_av" else self.settings.mode
         self.station_label.setText(f"  {self.settings.callsign}  {mode_label}  ")
         if backend == "none":
             self.rig_label.setText("CAT off")

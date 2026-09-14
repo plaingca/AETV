@@ -1056,7 +1056,7 @@ class ReceivePanel(QWidget):
         self.preview.enqueue_rgb(
             video,
             fps=mode.fps,
-            prebuffer_frames=(2 if mode.name == "AC16" else 1) * mode.gop_frames,
+            prebuffer_frames=(2 if mode.name == "AC16" and self.station.settings.waveform_mode != "analog_av" else 1) * mode.gop_frames,
             boundary_blend_frames=0 if mode.name == "AC16" else 4,
             max_queue_frames=(4 if mode.name == "AC16" else 2) * mode.gop_frames,
         )
@@ -1141,7 +1141,7 @@ class ReceivePanel(QWidget):
         self.preview.enqueue_rgb(
             video,
             fps=mode.fps,
-            prebuffer_frames=(2 if mode.name == "AC16" else 1) * mode.gop_frames,
+            prebuffer_frames=(2 if mode.name == "AC16" and self.station.settings.waveform_mode != "analog_av" else 1) * mode.gop_frames,
             boundary_blend_frames=0 if mode.name == "AC16" else 4,
             max_queue_frames=(4 if mode.name == "AC16" else 2) * mode.gop_frames,
         )

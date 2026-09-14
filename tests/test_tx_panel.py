@@ -400,3 +400,17 @@ def test_open_saved_video_directory_uses_configured_receive_path(
 
     assert receive_dir.is_dir()
     assert opened == [receive_dir.resolve()]
+
+
+def test_ac16_av_selection_uses_ac16_checkpoint_and_exposes_audio_controls():
+    requested = []
+    panel = SimpleNamespace(
+        station=SimpleNamespace(settings=StationSettings(mode='AC16')),
+        mode=SimpleNamespace(currentData=lambda: 'AC16_AV'),
+        modeRequested=SimpleNamespace(emit=requested.append),
+        _restart_preview=lambda _: None,
+    )
+    TransmitPanel._on_mode_changed(panel, 0)
+    assert requested == ['AC16']
+    assert TransmitPanel._selected_mode_name(panel) == 'AC16'
+    assert panel.station.settings.waveform_mode == 'analog_av'

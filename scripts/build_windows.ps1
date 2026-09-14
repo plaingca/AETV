@@ -196,6 +196,9 @@ try {
         & ".\AETV-Benchmark.exe" --mode AC16 --device $Ac16Device --warmup 0 --repeats 1 `
             --json (Join-Path $AppDir 'ac16-build-smoke.json')
         if ($LASTEXITCODE -ne 0) { throw 'Packaged AC16 inference check failed' }
+        & ".\AETV-Benchmark.exe" --mode AC16 --device $Ac16Device --av-smoke `
+            --av-output (Join-Path $AppDir 'ac16-av-smoke.mp4') --json (Join-Path $AppDir 'ac16-av-smoke.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged AC16 audio/video RF check failed' }
         $GuiSmoke = Start-Process -FilePath ".\AETV.exe" `
             -ArgumentList @("--smoke-test", "--video-smoke-output", $VideoSmoke) `
             -PassThru -WindowStyle Hidden

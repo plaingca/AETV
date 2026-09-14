@@ -17,6 +17,8 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+from .analog_av import waveform_center_hz, waveform_sample_rate
+
 import numpy as np
 
 from .audio_io import StreamResampler, resample_ratio
@@ -180,6 +182,8 @@ class SDRCapture:
             self._decimator = IQDecimator(self.rate // 960000)
         self.conversion_rate = 960000 if self._decimator else self.rate
         self.preview = IQPreview(self.rate, settings.sdr_frequency_mhz * 1e6, mode)
+        if settings.waveform_mode == "analog_av":
+            self.preview.bandwidth_hz = 2 * waveform_center_hz(settings)
         self._stop = threading.Event()
         self._radio = None
         self._process = None
@@ -283,8 +287,8 @@ class SDRCapture:
 
     def _convert(self):
         offset = -100000 + self.settings.sdr_rx_correction_hz
-        adapter = IQToModem(self.conversion_rate, offset, self.mode.geometry.fcenter_hz)
-        resample = StreamResampler(*resample_ratio(48000, self.mode.geometry.fs))
+        adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
+        resample = StreamResampler(*resample_ratio(48000, waveform_sample_rate(self.settings)))
         calibration = []
         estimates = []
         auto = self.settings.sdr_auto_correct and self.mode.name == "AC16"
@@ -300,14 +304,15 @@ class SDRCapture:
                     continue
                 try:
                     measured = estimate_signal_offset(
-                        np.concatenate(calibration[-10:]), self.conversion_rate
+                        np.concatenate(calibration[-10:]), self.conversion_rate,
+                        **({"composite": True} if self.settings.waveform_mode == "analog_av" else {}),
                     )
                 except ValueError:
                     estimates.clear()
                     continue
                 # Partial preambles have biased spectral centers. Require five
                 # stable payload-like spectra before committing to a correction.
-                if not 14400 <= measured["obw99_hz"] <= 15600:
+                if not 14400 <= measured.get("video_width_hz", measured.get("obw99_hz", 0)) <= 15600:
                     estimates.clear()
                     continue
                 estimates.append(measured["offset_hz"])
@@ -315,9 +320,9 @@ class SDRCapture:
                 if len(estimates) < 5 or np.ptp(estimates) > 150:
                     continue
                 offset = float(np.median(estimates))
-                adapter = IQToModem(self.conversion_rate, offset, self.mode.geometry.fcenter_hz)
+                adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
                 resample = StreamResampler(
-                    *resample_ratio(48000, self.mode.geometry.fs)
+                    *resample_ratio(48000, waveform_sample_rate(self.settings))
                 )
                 iq = np.concatenate(calibration)
                 auto = False
@@ -369,9 +374,7 @@ def transmit_pluto(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 pass
 
     def produce():
-        from .config import AETV_MODES
-
-        adapter = ModemToIQ(center_hz=AETV_MODES[settings.mode].geometry.fcenter_hz)
+        adapter = ModemToIQ(center_hz=waveform_center_hz(settings))
         resample = StreamResampler(*resample_ratio(fs, 48000))
         try:
             for audio in chunks:

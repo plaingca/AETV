@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 from scipy.signal import firwin, lfilter, upfirdn, welch
+from scipy.ndimage import median_filter
 
 
 class IQDecimator:
@@ -37,13 +38,15 @@ class ModemToIQ:
     Mixing by -8 kHz and filtering at 8 kHz rejects its negative-frequency image.
     sqrt(2) preserves the real-modem power in complex IQ. This causal adapter
     adds 522/48000 seconds of FIR delay without changing the wire geometry.
+    AC16 A/V instead uses a 10 kHz center for its complete 20 kHz composite.
     """
 
     def __init__(self, sample_rate=2400000, offset_hz=100000, center_hz=8000):
         if (
             sample_rate % 48000
             or sample_rate <= 48000
-            or abs(offset_hz) + 8000 >= sample_rate / 2
+            or not 0 < center_hz < 24000
+            or abs(offset_hz) + center_hz >= sample_rate / 2
         ):
             raise ValueError("Invalid hardware sample rate or LO offset")
         self.sample_rate, self.offset_hz = sample_rate, offset_hz
@@ -92,7 +95,7 @@ class ModemToIQ:
         return result.astype(np.complex64)
 
 
-def estimate_signal_offset(iq, sample_rate=960000, nominal_hz=-100000):
+def estimate_signal_offset(iq, sample_rate=960000, nominal_hz=-100000, *, composite=False):
     """Estimate a strong AC16 signal's center from received spectrum only.
 
     This is coarse radio calibration, before ordinary modem acquisition. The
@@ -105,6 +108,8 @@ def estimate_signal_offset(iq, sample_rate=960000, nominal_hz=-100000):
     f, power = welch(iq, fs=sample_rate, nperseg=65536, return_onesided=False)
     order = np.argsort(f)
     f, power = f[order], power[order]
+    if composite:
+        return _composite_video_offset(f, power, nominal_hz)
     selected = abs(f - nominal_hz) < 25000
     f, power = f[selected], power[selected]
     noise = np.median(power[abs(f - nominal_hz) > 18000])
@@ -131,13 +136,55 @@ def estimate_signal_offset(iq, sample_rate=960000, nominal_hz=-100000):
     )
 
 
+def _composite_video_offset(f, power, nominal_hz):
+    """Find the broad video slice independently of speech level or silence.
+
+    AC16 A/V places the unchanged carrier bank 2 kHz above the RF center.
+    Median filtering removes narrow audio tones. The 3.3–4.2 kHz guard
+    separates even broadband speech from the video plateau. Whole-composite
+    power percentiles would incorrectly move the dial as people speak.
+    """
+    selected = abs(f - nominal_hz) < 45000
+    f, power = f[selected], power[selected]
+    noise = float(np.median(power[abs(f - nominal_hz) > 37000]))
+    step = float(f[1] - f[0])
+    smooth = median_filter(np.maximum(power - noise, 0), size=2 * round(150 / step) + 1)
+    # A broad 8 kHz window fits wholly inside the video bank but cannot fit
+    # inside the 3.3 kHz audio band. This reference survives audio-dominant
+    # power settings without treating a speech peak as the video threshold.
+    windows = np.lib.stride_tricks.sliding_window_view(smooth, max(3, round(8000 / step)))
+    level = float(np.percentile(windows, 25, axis=-1).max())
+    if level < 6 * max(noise, 1e-20):
+        raise ValueError("Signal too weak for A/V frequency calibration")
+    threshold = .2 * level
+    occupied = smooth > threshold
+    edges = np.diff(np.r_[False, occupied, False].astype(int))
+    candidates = []
+    for start, stop in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        if start == 0 or stop == len(f):
+            continue
+        low = np.interp(threshold, smooth[start-1:start+1], f[start-1:start+1])
+        high = np.interp(threshold, smooth[stop-1:stop+1][::-1], f[stop-1:stop+1][::-1])
+        width = high - low
+        center = (low + high) / 2 - 2000
+        if 14400 <= width <= 15600 and abs(center - nominal_hz) <= 25000:
+            candidates.append((center, width, float(np.mean(power[start:stop]))))
+    if len(candidates) != 1:
+        raise ValueError("No isolated AC16 A/V video plateau for frequency calibration")
+    center, width, inband = candidates[0]
+    return dict(offset_hz=float(round(center / 50) * 50),
+                spectral_center_hz=float(center), video_width_hz=float(width),
+                inband_over_noise_db=float(10 * np.log10(inband / max(noise, 1e-20))),
+                method="Received-only AC16 A/V video edges; speech excluded; rounded to 50 Hz")
+
+
 class IQToModem:
     """Integer polyphase decimation with persistent FIR and oscillator state."""
 
     def __init__(self, sample_rate=960000, signal_offset_hz=-100000, center_hz=8000):
         if sample_rate < 48000 or sample_rate % 48000:
             raise ValueError("Radio rate must be an integer multiple of 48000")
-        if abs(signal_offset_hz) + 8000 >= sample_rate / 2:
+        if not 0 < center_hz < 24000 or abs(signal_offset_hz) + center_hz >= sample_rate / 2:
             raise ValueError("Signal falls outside the sampled band")
         self.sample_rate = sample_rate
         self.offset_hz = signal_offset_hz

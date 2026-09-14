@@ -9,8 +9,8 @@ and SHA-256 before installation. Existing V8 and V7 defaults remain available.
 AC16 carries 256×144 RGB at 10 fps, with one I frame and nine P frames per GOP.
 The separate 48 ksample/s modem uses 19,200 real coordinates and a guarded
 16 kHz waveform. This waveform requires an appropriately wide radio channel;
-it is not an ordinary narrow SSB audio mode. Audio/video composite mode is
-currently restricted to V8.
+it is not an ordinary narrow SSB audio mode. **AC16 A/V** adds analog audio
+in a separate 20 kHz composite mode; it uses the same AC16 model download.
 
 ## Operating the radio
 
@@ -64,6 +64,57 @@ For a source installation, install `aetv[gui]`, libiio and the `rtl-sdr` tools.
 Physical Windows SDR operation has not been validated on this Linux host.
 Pluto network URIs can be used without a USB transport to the host.
 
+## AC16 audio + video (20 kHz)
+
+Select **AC16 A/V · 20 kHz** in the Transmit mode picker or Station settings
+on **both ends**. This also selects the receive waveform. No extra checkpoint
+is needed. The video remains 256×144 at 10 fps and 19,200 real coordinates per
+one-second GOP.
+
+| Composite audio frequency | Content |
+|---|---|
+| 0–3.3 kHz | Mono analog program audio (flat to 3.2 kHz, filtered by 3.3 kHz) |
+| 3.3–4.2 kHz | Guard band |
+| 4.2–20 kHz | Filtered AC16 video; carriers at 4.5–19.55 kHz |
+
+The composite runs at 48 ksample/s. The SDR **RF center** dial is the middle
+of the complete 20 kHz waveform: at 439.000 MHz it spans nominally
+438.990–439.010 MHz. Audio occupies the bottom of that RF interval. Frequency
+auto-correction measures the broad video slice independently of audio level,
+so silence and speech do not move the estimated center.
+
+Use the existing **video/audio power** fader and **clip/microphone mix** controls.
+A video file or prepared clip supplies its audio track; webcam and screen
+sources use the selected microphone. Choose **Program audio to** in Receive
+for speaker output. Clean/channel loopback plays the recovered audio, and
+**Save video** and autosave include the recovered mono track.
+
+As with V8 A/V, transmitted audio is delayed by one GOP and the transmitter
+sends an extra second at the end, including for a silent track. AC16 receive
+waits for the matching complete audio interval before releasing each video
+GOP and audio block together. Pairing uses received payload sample positions,
+including after reacquisition; it does not use transmitter frames or latents.
+The A/V view starts with one paired GOP instead of the video-only two-GOP
+buffer. Device playback latency can still affect live lip synchronization.
+
+Pluto and HackRF transmit, and Pluto/RTL-SDR/HackRF receive, use the complete
+20 kHz waveform. A soundcard path needs 48 ksample/s capture/playback and a
+radio passband that actually passes 20 kHz. Native Flex audio and Kiwi's
+12 kHz IQ stream cannot carry this mode and are rejected in settings. The
+legacy V8 A/V mode keeps its original 2.2 kHz audio and 5 kHz channel layout.
+HackRF remains hardware-untested; this A/V addition has software RF validation,
+not a new physical over-the-air qualification.
+
+Portable builds run **frames → AC16 encoder → composite → signed 9.6 MS/s IQ
+→ receiver DSP → AC16 decoder → saved MP4 with audio**, without opening a
+radio. The report and clip are `ac16-av-smoke.json` and `ac16-av-smoke.mp4`
+inside each package. To repeat the same check:
+
+```bash
+AETV-Benchmark --mode AC16 --device cpu --av-smoke \
+  --av-output received-av.mp4 --json received-av.json
+```
+
 ## Runtime and validation
 
 The native selected checkpoint is `ac16-best-inference.pt`, SHA-256
@@ -84,7 +135,7 @@ thread, independently of the hardware DMA consumer. RX captures IQ separately
 from its conversion and demodulation. AC16 startup also verifies the received
 mode-header boundary and disambiguates neighboring repeated-preamble peaks;
 periodic payload pilots alone cannot establish the correct GOP phase.
-AC16 GUI playback uses two GOPs of
+AC16 video-only GUI playback uses two GOPs of
 startup buffering and a four-GOP queue cap to accommodate acquisition bursts;
 there is no extra cross-GOP image blending. Throughput and startup latency
 are separate properties.

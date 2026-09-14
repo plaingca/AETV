@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from aetv.config import AETV_MODES
+from aetv.analog_av import composite_profile
 
 MIN_DBFS = -140.0
 MAX_DBFS = 3.0
@@ -118,8 +119,9 @@ class Waterfall(QWidget):
     def set_mode(self, mode_name: str, composite: bool = False) -> None:
         mode = AETV_MODES[mode_name]
         if composite:
-            self._fs = 12_000
-            self._band_lo, self._band_hi = 0.0, 5_000.0
+            profile = composite_profile(mode_name)
+            self._fs = profile.fs
+            self._band_lo, self._band_hi = 0.0, profile.bandwidth_hz
         else:
             self._fs = mode.geometry.fs
             self._band_lo, self._band_hi = mode.geometry.tx_bandpass
