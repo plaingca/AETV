@@ -229,3 +229,13 @@ focused on operating the software. Start with the
 
 AETV is released under the [Artistic License 2.0](LICENSE). Third-party notices
 are collected in [NOTICE](NOTICE).
+
+## AC16 and direct SDR trial
+
+AC16 (256×144 at 10 fps) is available through Model Manager. **AC16 A/V** adds
+mono audio in the first 3.3 kHz of a 20 kHz waveform using the same checkpoint.
+Direct SDR support includes Pluto transmit
+and Pluto/RTL-SDR receive, plus experimental HackRF transmit/receive, an RF IQ
+waterfall, frequency dial, and separate gain
+controls. See [AC16 and SDR operation](docs/ac16-gui-and-sdr.md) for setup and
+portable-runtime details.

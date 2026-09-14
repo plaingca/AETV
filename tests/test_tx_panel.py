@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PySide6.QtWidgets import QDialog
 
 from aetv.config import AETV_MODES
@@ -27,6 +28,7 @@ class _Preview:
 def _panel(*, emulating: bool):
     return SimpleNamespace(
         transmitting=lambda: True,
+        station=SimpleNamespace(settings=SimpleNamespace(tx_backend="audio")),
         cam_radio=SimpleNamespace(isChecked=lambda: True),
         emulating=lambda: emulating,
         preview=_Preview(),
@@ -331,9 +333,9 @@ def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
 
     panel = SimpleNamespace(
         station=SimpleNamespace(
-            settings=SimpleNamespace(gops=10),
+            settings=SimpleNamespace(gops=10, waveform_mode="video"),
             require_codec=lambda: SimpleNamespace(
-                mode=SimpleNamespace(fps=6, gop_frames=2)
+                mode=SimpleNamespace(name="V8", fps=6, gop_frames=2)
             ),
         ),
         preview=Preview(),
@@ -354,9 +356,11 @@ def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
     assert np.array_equal(panel._emulated_video[2:], last)
 
 
-def test_loopback_save_passes_recovered_audio_to_mp4_writer():
+@pytest.mark.parametrize('complete_recording', [False, True])
+def test_loopback_save_passes_recovered_audio_to_mp4_writer(complete_recording):
     captured = {}
     audio = np.ones(8000, dtype=np.float32)
+    retained = np.ones((10, 2, 3, 3), dtype=np.uint8) if complete_recording else None
 
     class Engine:
         def save_video(self, video, **kwargs):
@@ -366,7 +370,8 @@ def test_loopback_save_passes_recovered_audio_to_mp4_writer():
 
     panel = SimpleNamespace(
         _emulated_video=np.zeros((2, 2, 3, 3), dtype=np.uint8),
-        station=SimpleNamespace(loopback_audio=audio, loopback_audio_rate=8000),
+        station=SimpleNamespace(loopback_audio=audio, loopback_audio_rate=8000,
+                                loopback_video=retained),
         engine=Engine(),
         status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
         logMessage=SimpleNamespace(emit=lambda _message: None),
@@ -376,6 +381,7 @@ def test_loopback_save_passes_recovered_audio_to_mp4_writer():
 
     assert np.array_equal(captured["audio"], audio)
     assert captured["audio_rate"] == 8000
+    assert captured['video'] is (retained if complete_recording else panel._emulated_video)
     assert panel.status.text == "saved loopback.mp4"
 
 
@@ -399,3 +405,17 @@ def test_open_saved_video_directory_uses_configured_receive_path(
 
     assert receive_dir.is_dir()
     assert opened == [receive_dir.resolve()]
+
+
+def test_ac16_av_selection_uses_ac16_checkpoint_and_exposes_audio_controls():
+    requested = []
+    panel = SimpleNamespace(
+        station=SimpleNamespace(settings=StationSettings(mode='AC16')),
+        mode=SimpleNamespace(currentData=lambda: 'AC16_AV'),
+        modeRequested=SimpleNamespace(emit=requested.append),
+        _restart_preview=lambda _: None,
+    )
+    TransmitPanel._on_mode_changed(panel, 0)
+    assert requested == ['AC16']
+    assert TransmitPanel._selected_mode_name(panel) == 'AC16'
+    assert panel.station.settings.waveform_mode == 'analog_av'

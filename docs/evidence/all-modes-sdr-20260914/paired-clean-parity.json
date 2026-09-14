@@ -1,0 +1,42 @@
+[
+  {
+    "mode": "V8",
+    "before": 88,
+    "after": 88,
+    "same_samples": true,
+    "latent_max_difference": 0.0,
+    "weight_max_difference": 0.0
+  },
+  {
+    "mode": "V7",
+    "before": 88,
+    "after": 88,
+    "same_samples": true,
+    "latent_max_difference": 0.0,
+    "weight_max_difference": 0.0
+  },
+  {
+    "mode": "AC16",
+    "before": 88,
+    "after": 88,
+    "same_samples": true,
+    "latent_max_difference": 0.0,
+    "weight_max_difference": 0.0
+  },
+  {
+    "mode": "V8_AV",
+    "before": 88,
+    "after": 88,
+    "same_samples": true,
+    "latent_max_difference": 0.0,
+    "weight_max_difference": 0.0
+  },
+  {
+    "mode": "AC16_AV",
+    "before": 88,
+    "after": 88,
+    "same_samples": true,
+    "latent_max_difference": 0.0,
+    "weight_max_difference": 0.0
+  }
+]

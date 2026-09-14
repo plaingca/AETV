@@ -1,0 +1,492 @@
+{
+  "release": "trial-ac16-gui-0.1.20rc2",
+  "binary_commit": "35c85db1e31a2300d3d6e84ef86480e6efb877a2",
+  "build_run": "https://github.com/plaingca/AETV/actions/runs/34791671892",
+  "ci_run": "https://github.com/plaingca/AETV/actions/runs/34791673942",
+  "local_tests": {
+    "passed": 348,
+    "skipped": 2
+  },
+  "all_four_package_builds_passed": true,
+  "packaging_checks": {
+    "windows-cpu-verification": {
+      "asset": "AETV-windows-x64-cpu.zip",
+      "sha256": "4c72c36caf473eb897960446c2be65e0a84a8de7c8f67a4677c7a068e75ccbf7",
+      "size": 276227642,
+      "native_files_match_pinned_upstream": true,
+      "setup_tools_present": true,
+      "reports": {
+        "sdr-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        },
+        "sdr-gui-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        }
+      }
+    },
+    "windows-gpu-verification": {
+      "asset": "AETV-windows-x64-gpu.zip",
+      "sha256": "c00d449f9a3b43f541f70546be819e922c7ea4e4be41b6b6968451b7fa8ab8f0",
+      "size": 287876064,
+      "native_files_match_pinned_upstream": true,
+      "setup_tools_present": true,
+      "reports": {
+        "sdr-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        },
+        "sdr-gui-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        }
+      }
+    },
+    "linux-cpu-archive-verification": {
+      "runtime": "cpu",
+      "required_files_present": true,
+      "reports": {
+        "sdr-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+          "rtl_help_returncode": 1,
+          "libiio": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/libiio.so.0",
+          "libiio_version": [
+            0,
+            23,
+            "v0.23"
+          ],
+          "libiio_backends": [
+            "local",
+            "xml",
+            "ip",
+            "usb"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        },
+        "sdr-gui-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+          "rtl_help_returncode": 1,
+          "libiio": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/libiio.so.0",
+          "libiio_version": [
+            0,
+            23,
+            "v0.23"
+          ],
+          "libiio_backends": [
+            "local",
+            "xml",
+            "ip",
+            "usb"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        }
+      }
+    },
+    "linux-gpu-archive-verification": {
+      "runtime": "gpu",
+      "required_files_present": true,
+      "reports": {
+        "sdr-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+          "rtl_help_returncode": 1,
+          "libiio": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/libiio.so.0",
+          "libiio_version": [
+            0,
+            23,
+            "v0.23"
+          ],
+          "libiio_backends": [
+            "local",
+            "xml",
+            "ip",
+            "usb"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        },
+        "sdr-gui-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+          "rtl_help_returncode": 1,
+          "libiio": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/libiio.so.0",
+          "libiio_version": [
+            0,
+            23,
+            "v0.23"
+          ],
+          "libiio_backends": [
+            "local",
+            "xml",
+            "ip",
+            "usb"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true
+        }
+      }
+    },
+    "linux-cpu-extracted-smoke": {
+      "passed": true,
+      "frozen": true,
+      "rtl_executable": "/pool0/AETV-runs/sdr-portable-0.1.20rc2/extracted/cpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+      "rtl_help_returncode": 1,
+      "libiio": "/pool0/AETV-runs/sdr-portable-0.1.20rc2/extracted/cpu/AETV/_internal/libiio.so.0",
+      "libiio_version": [
+        0,
+        23,
+        "v0.23"
+      ],
+      "libiio_backends": [
+        "local",
+        "xml",
+        "ip",
+        "usb"
+      ],
+      "pluto_class": "adi.ad936x.Pluto",
+      "xml_context": true
+    },
+    "linux-cpu-appimage-smoke": {
+      "passed": true,
+      "frozen": true,
+      "rtl_executable": "/pool0/AETV-runs/sdr-portable-0.1.20rc2/tmp/appimage_extracted_671b031e2ead432585c5cdb9f914c271/usr/lib/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+      "rtl_help_returncode": 1,
+      "libiio": "/pool0/AETV-runs/sdr-portable-0.1.20rc2/tmp/appimage_extracted_671b031e2ead432585c5cdb9f914c271/usr/lib/AETV/_internal/libiio.so.0",
+      "libiio_version": [
+        0,
+        23,
+        "v0.23"
+      ],
+      "libiio_backends": [
+        "local",
+        "xml",
+        "ip",
+        "usb"
+      ],
+      "pluto_class": "adi.ad936x.Pluto",
+      "xml_context": true
+    },
+    "linux-gpu-appimage-smoke": {
+      "passed": true,
+      "frozen": true,
+      "rtl_executable": "/pool0/AETV-runs/sdr-portable-0.1.20rc2/tmp/appimage_extracted_c0bd67ce93d2d4edd153d4d045084772/usr/lib/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+      "rtl_help_returncode": 1,
+      "libiio": "/pool0/AETV-runs/sdr-portable-0.1.20rc2/tmp/appimage_extracted_c0bd67ce93d2d4edd153d4d045084772/usr/lib/AETV/_internal/libiio.so.0",
+      "libiio_version": [
+        0,
+        23,
+        "v0.23"
+      ],
+      "libiio_backends": [
+        "local",
+        "xml",
+        "ip",
+        "usb"
+      ],
+      "pluto_class": "adi.ad936x.Pluto",
+      "xml_context": true
+    }
+  },
+  "windows_frozen_code_checks": [
+    {
+      "runtime": "cpu",
+      "executable": "AETV.exe",
+      "function": "aetv.sdr.rtl_executable",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV.exe",
+      "function": "aetv.sdr.sdr_runtime_smoke",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV.exe",
+      "function": "aetv.sdr._rtl_process_options",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV.exe",
+      "function": "aetv.codec._init_onnx",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.sdr.rtl_executable",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.sdr.sdr_runtime_smoke",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.sdr._rtl_process_options",
+      "matches_source": true
+    },
+    {
+      "runtime": "cpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.codec._init_onnx",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV.exe",
+      "function": "aetv.sdr.rtl_executable",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV.exe",
+      "function": "aetv.sdr.sdr_runtime_smoke",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV.exe",
+      "function": "aetv.sdr._rtl_process_options",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV.exe",
+      "function": "aetv.codec._init_onnx",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.sdr.rtl_executable",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.sdr.sdr_runtime_smoke",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.sdr._rtl_process_options",
+      "matches_source": true
+    },
+    {
+      "runtime": "gpu",
+      "executable": "AETV-Benchmark.exe",
+      "function": "aetv.codec._init_onnx",
+      "matches_source": true
+    }
+  ],
+  "assets": [
+    {
+      "name": "AETV-linux-x64-cpu.AppImage",
+      "size": 246553080,
+      "sha256": "bc7418354753cc0aa5dac4ae8044df6ec489b597e7a3aec2fecd2b2c2bb10b3d"
+    },
+    {
+      "name": "AETV-linux-x64-cpu.tar.gz",
+      "size": 268891342,
+      "sha256": "2a5f3f9809882caff3b73a8ecfe52213f197ed2a7a04d52dbe3c2aad5f2fde22"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.AppImage",
+      "size": 1784498680,
+      "sha256": "20c6bf524213d1b31e4c238c6d5b0740f52bbf417b43ae1d4a4a5be3281a7984"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.tar.gz",
+      "size": 1908312207,
+      "sha256": "87a4dcb9200c36ce3eaef83a28ac33c1bf5a518f8e281bfdbfb24adb580e0b67"
+    },
+    {
+      "name": "AETV-windows-x64-cpu.zip",
+      "size": 276227642,
+      "sha256": "4c72c36caf473eb897960446c2be65e0a84a8de7c8f67a4677c7a068e75ccbf7"
+    },
+    {
+      "name": "AETV-windows-x64-gpu.zip",
+      "size": 287876064,
+      "sha256": "c00d449f9a3b43f541f70546be819e922c7ea4e4be41b6b6968451b7fa8ab8f0"
+    }
+  ],
+  "hardware_trials": [
+    {
+      "name": "linux-cpu-rtlsdr",
+      "passed": true,
+      "packaged": true,
+      "radio": {
+        "rx_source": "rtlsdr",
+        "sdr_frequency_mhz": 439.0,
+        "pluto_uri": "ip:192.168.2.1",
+        "rtl_serial": "1001",
+        "pluto_tx_gain": -10.0,
+        "pluto_rx_gain": 37.2,
+        "rtl_rx_gain": 37.2,
+        "sdr_auto_correct": true,
+        "sdr_rx_correction_hz": 0.0
+      },
+      "gops": 10,
+      "displayed_frames": 100,
+      "correct_chronology": true,
+      "minimum_latent_cosine": 0.9543470144271851,
+      "errors": [],
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "fps": 9.996046116173986,
+      "environment": {
+        "PATH": ""
+      }
+    },
+    {
+      "name": "linux-cpu-pluto",
+      "passed": false,
+      "packaged": true,
+      "radio": {
+        "rx_source": "pluto",
+        "sdr_frequency_mhz": 439.0,
+        "pluto_uri": "ip:192.168.2.1",
+        "rtl_serial": "1001",
+        "pluto_tx_gain": -10.0,
+        "pluto_rx_gain": 40.0,
+        "rtl_rx_gain": 40.0,
+        "sdr_auto_correct": true,
+        "sdr_rx_correction_hz": 0.0
+      },
+      "gops": 10,
+      "displayed_frames": 89,
+      "correct_chronology": true,
+      "minimum_latent_cosine": 0.9575569033622742,
+      "errors": [],
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "fps": 9.713836878763646,
+      "environment": {
+        "PATH": ""
+      }
+    },
+    {
+      "name": "linux-cpu-pluto-repeat",
+      "passed": true,
+      "packaged": true,
+      "radio": {
+        "rx_source": "pluto",
+        "sdr_frequency_mhz": 439.0,
+        "pluto_uri": "ip:192.168.2.1",
+        "rtl_serial": "1001",
+        "pluto_tx_gain": -10.0,
+        "pluto_rx_gain": 40.0,
+        "rtl_rx_gain": 40.0,
+        "sdr_auto_correct": true,
+        "sdr_rx_correction_hz": 0.0
+      },
+      "gops": 10,
+      "displayed_frames": 100,
+      "correct_chronology": true,
+      "minimum_latent_cosine": 0.9574211239814758,
+      "errors": [],
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "fps": 9.998433624039176,
+      "environment": {
+        "PATH": "",
+        "OPENBLAS_NUM_THREADS": "2",
+        "OMP_NUM_THREADS": "8"
+      }
+    }
+  ],
+  "hardware_final": {
+    "tx_powerdown": "1",
+    "tx_gain": -89.75,
+    "rtl_process_count": 0
+  },
+  "limitations": [
+    "Physical Windows SDR devices and USB installer execution were not tested. Windows runtime loading was tested in CI, and ZIP contents were verified locally.",
+    "An initial Pluto RX trial recovered all 10 GOPs but displayed only 89 frames. A repeat with explicit OpenBLAS/OMP thread limits displayed 100/100; this does not establish causality or universal real-time performance.",
+    "USB driver binding or Linux device permissions remain a one-time host setup step."
+  ],
+  "source_frames_sha256": "85f201e2c51902c864e5f2dcd15dea2aa4ddbe51ff8796a47092cc10125d9fdb"
+}

@@ -165,7 +165,7 @@ def test_aetv_modes_specs():
     assert AETV_MODES["V8"].height == 108
     assert AETV_MODES["V8"].fps == 6.0
     assert AETV_MODES["V8"].geometry.tx_bandpass[1] <= 3000.0
-    assert RELEASE_MODES == ("V8", "V7")
+    assert RELEASE_MODES == ("V8", "V7", "AC16")
 
 
 def test_v8_transmit_waveform_stays_inside_nominal_3khz_channel():
@@ -368,7 +368,9 @@ def test_soundcard_tracking_realigns_after_endpoint_buffer_insertion():
     realignments = [
         event for event in events if event["event"] == "tracking_realign"
     ]
-    assert any(event["shift_samples"] == 375 for event in realignments)
+    # Analytic CP timing can select a nearby point within the same safe
+    # prefix; payload identity/quality above is the actual recovery gate.
+    assert any(abs(event["shift_samples"] - 375) <= 4 for event in realignments)
     assert not any(event["event"] == "tracking_lost" for event in events)
 
 
@@ -660,8 +662,8 @@ def test_pilot_denoising_reduces_noise_without_erasing_multipath(delay_ms):
     assert np.array_equal(_denoise_pilot_channels(clean, 1e-12), clean)
 
 
-@pytest.mark.parametrize("mode_name", ["V0", "V8", "V7"])
-@pytest.mark.parametrize("offset", [0.4, -75.0, 120.0])
+@pytest.mark.parametrize("mode_name", ["V0", "V8", "V7", "AC16"])
+@pytest.mark.parametrize("offset", [0.4, -75.0, 120.0, -12.5, 12.5])
 def test_blind_acquisition_corrects_cfo_on_quiet_late_entry(mode_name, offset):
     mode = AETV_MODES[mode_name]
     rng = np.random.default_rng(906)

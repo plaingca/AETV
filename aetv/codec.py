@@ -23,11 +23,18 @@ from .tls import download_ssl_context
 DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-face-gan.pt"
 MODE_DEFAULT_CHECKPOINTS = {
     "V7": Path("models") / "v8-flex8k-ota-rxfix.pt",
+    "AC16": Path("models") / "ac16-best-inference.pt",
 }
 DEFAULT_MODE = "V8"
 HF_MODEL_REPO = "AETV/AETV"
+HF_MODE_REVISIONS = {"AC16": "6f3a4cd4df1e8b261141da75988f3df2750666db"}
 HF_MODEL_REVISION = "7ed90b4a902937248c4408d9e02c29b876b07a75"
 RELEASE_CHECKPOINTS = {
+    "AC16": {
+        "filename": "ac16-best-inference.pt",
+        "bytes": 77314707,
+        "sha256": "ff451787feb2708310eebac4a47151cb0fef654c071af463022d8be2f1c618cb",
+    },
     "V7": {
         "filename": "v8-flex8k-ota-rxfix.pt",
         "bytes": 215759999,
@@ -40,6 +47,20 @@ RELEASE_CHECKPOINTS = {
     },
 }
 RELEASE_RUNTIME_FILES = {
+    "AC16": {
+        "ac16-v4.runtime.json": {
+            "bytes": 371,
+            "sha256": "a44cb440a6343c71010f6af4c7f58b62a19f05080d4a7c92714b9a7cc98a0fce",
+        },
+        "ac16-v4.encoder.onnx": {
+            "bytes": 21519698,
+            "sha256": "20743bb73d80ecf68ad0eeec31211f8d44493d2a1fe5fe2b6189a62e83432064",
+        },
+        "ac16-v4.decoder.onnx": {
+            "bytes": 60018433,
+            "sha256": "91ea48e2508f8318caa7a620151e820fe50c562d8e430b741d0d4012687adbea",
+        },
+    },
     "V7": {
         "v8-flex8k-ota-rxfix.runtime.json": {
             "bytes": 265,
@@ -231,7 +252,7 @@ def download_default_checkpoint(
         )
         url = (
             f"https://huggingface.co/{HF_MODEL_REPO}/resolve/"
-            f"{quote(HF_MODEL_REVISION, safe='')}/{quote(release['filename'])}?download=true"
+            f"{quote(HF_MODE_REVISIONS.get(mode, HF_MODEL_REVISION), safe='')}/{quote(release['filename'])}?download=true"
         )
         digest = hashlib.sha256()
         downloaded = 0
@@ -303,7 +324,7 @@ def download_runtime_bundle(
             )
             url = (
                 f"https://huggingface.co/{HF_MODEL_REPO}/resolve/"
-                f"{quote(HF_RUNTIME_REVISION, safe='')}/{quote(filename)}?download=true"
+                f"{quote(HF_MODE_REVISIONS.get(mode, HF_RUNTIME_REVISION), safe='')}/{quote(filename)}?download=true"
             )
             digest = hashlib.sha256()
             downloaded = 0
@@ -506,32 +527,73 @@ class AETVCodec:
                 raise FileNotFoundError(f"runtime model component not found: {model_path}")
 
         requested = str(device or "auto").lower()
+        # The GUI historically stores its generic GPU choice as "cuda" on
+        # both platforms; Windows fulfills that choice through DirectML.
+        if requested.startswith("cuda") and not {"CUDAExecutionProvider", "DmlExecutionProvider"}.intersection(ort.get_available_providers()):
+            raise RuntimeError("GPU inference is unavailable in this ONNX runtime. Install the GPU package or select CPU.")
+        if requested not in {"cpu", "cpu:0", "dml"} and "CUDAExecutionProvider" in ort.get_available_providers():
+            if hasattr(ort, "preload_dlls"):
+                ort.preload_dlls(directory="")
         available = ort.get_available_providers()
-        use_dml = requested not in {"cpu", "cpu:0"} and "DmlExecutionProvider" in available
+        use_cuda = requested not in {"cpu", "cpu:0", "dml"} and "CUDAExecutionProvider" in available
+        use_dml = not use_cuda and requested not in {"cpu", "cpu:0"} and "DmlExecutionProvider" in available
         providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_cuda else
             ["DmlExecutionProvider", "CPUExecutionProvider"]
             if use_dml
             else ["CPUExecutionProvider"]
         )
         options = ort.SessionOptions()
-        configured_threads = os.environ.get("AETV_CPU_THREADS")
+        configured_threads = os.environ.get("AETV_CPU_THREADS") or ("8" if mode_name == "AC16" else None)
         if configured_threads and not use_dml:
             options.intra_op_num_threads = max(1, int(configured_threads))
-        self._encoder_session = ort.InferenceSession(
-            str(encoder_path), sess_options=options, providers=providers
-        )
-        self._decoder_session = ort.InferenceSession(
-            str(decoder_path), sess_options=options, providers=providers
-        )
+        self.runtime_validation = None
+        self.runtime_notice = ""
+        if use_dml and mode_name == "AC16":
+            from .runtime_validation import qualified_directml_sessions
+            sessions, self.runtime_validation = qualified_directml_sessions(
+                ort, encoder_path, decoder_path, AETV_MODES[mode_name],
+                max(1, int(configured_threads or 8)),
+            )
+            self._encoder_session, self._decoder_session = sessions
+            profile = self.runtime_validation["selected"]
+            if profile == "cpu":
+                use_dml = False
+                options.intra_op_num_threads = max(1, int(configured_threads or 8))
+                self.runtime_notice = (
+                    "DirectML failed the AC16 color accuracy check; using CPU. "
+                    "Details are in the model tooltip and benchmark report."
+                )
+            else:
+                self.runtime_notice = f"DirectML AC16 color accuracy check passed ({profile} GPU settings)."
+        else:
+            self._encoder_session = ort.InferenceSession(
+                str(encoder_path), sess_options=options, providers=providers
+            )
+            self._decoder_session = ort.InferenceSession(
+                str(decoder_path), sess_options=options, providers=providers
+            )
+        if use_cuda and any("CUDAExecutionProvider" not in session.get_providers()
+                            for session in (self._encoder_session, self._decoder_session)):
+            if requested != "auto":
+                raise RuntimeError("CUDA provider could not initialize. Install the GPU runtime dependencies or select CPU.")
+            use_cuda = False
         self.backend = "onnxruntime"
         self.backend_version = ort.__version__
-        self.device = RuntimeDevice("dml" if use_dml else "cpu", "DirectML" if use_dml else "CPU")
+        self.device = RuntimeDevice("cuda" if use_cuda else "dml" if use_dml else "cpu", "CUDA" if use_cuda else "DirectML" if use_dml else "CPU")
         self.cpu_threads = options.intra_op_num_threads or None
         self.checkpoint_path = manifest_path
         self.mode = AETV_MODES[mode_name]
         self.step = metadata.get("step")
         self.args = metadata
         self.model = None
+        if use_cuda:
+            # CUDA's first inference includes kernel selection and allocation.
+            # Pay that cost in the model-loading worker before live capture,
+            # instead of stalling the first transmitted and received GOPs.
+            frames = np.zeros((self.mode.gop_frames, self.mode.height, self.mode.width, 3), np.uint8)
+            latent = self.encode_gop(frames)
+            self.decode_gop(latent, np.ones_like(latent))
 
     def _init_torch(
         self,
@@ -556,7 +618,7 @@ class AETVCodec:
         self.backend_version = torch.__version__
         self.cpu_threads: int | None = None
         if self.device.type == "cpu":
-            configured_threads = os.environ.get("AETV_CPU_THREADS")
+            configured_threads = os.environ.get("AETV_CPU_THREADS") or ("8" if mode == "AC16" else None)
             logical_threads = (
                 int(configured_threads) if configured_threads else (os.cpu_count() or 1)
             )
@@ -574,13 +636,24 @@ class AETVCodec:
         self.mode: AETVModeSpec = AETV_MODES[mode_name]
         self.step = payload.get("step")
         self.args = args
-        self.model = AETVAutoencoder(
-            mode=self.mode,
-            width=int(args.get("model_width", 128)),
-            latent_channels=int(args.get("latent_channels", 3)),
-            compact=bool(args.get("compact", False)),
-            causal=self.mode.causal,
-        ).to(self.device)
+        self.ac16 = payload.get("architecture") == "ac16-asymmetric-context-v4"
+        self.inference_amp = self.ac16 and self.device.type == "cuda"
+        if self.ac16:
+            if mode not in (None, "AC16"):
+                raise ValueError("AC16 checkpoint conflicts with requested mode")
+            from .ac16 import AsymmetricContextCodecV4
+            self.mode = AETV_MODES["AC16"]
+            self.model = AsymmetricContextCodecV4(**payload["model_config"]).to(self.device)
+        elif mode_name == "AC16":
+            raise ValueError("AC16 requires its asymmetric-context-v4 checkpoint")
+        else:
+            self.model = AETVAutoencoder(
+                mode=self.mode,
+                width=int(args.get("model_width", 128)),
+                latent_channels=int(args.get("latent_channels", 3)),
+                compact=bool(args.get("compact", False)),
+                causal=self.mode.causal,
+            ).to(self.device)
         state = payload.get("model_state_dict") or payload.get("model")
         if state is None:
             raise KeyError(f"{self.checkpoint_path} has no model_state_dict")
@@ -597,8 +670,8 @@ class AETVCodec:
         video = _to_nchw(frames, self.mode).to(self.device)
         # This is the hot live path; the station model is never mutated.
         # inference_mode also removes autograd's view/version bookkeeping.
-        with torch.inference_mode():
-            latents = self.model.encoder(video)
+        with torch.inference_mode(), torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.inference_amp):
+            latents = self.model.encode_gop(video) if self.ac16 else self.model.encoder(video)
         return latents.squeeze(0).float().cpu().numpy()
 
     def decode_gop(
@@ -621,12 +694,11 @@ class AETVCodec:
             w = torch.ones_like(z)
         else:
             w = torch.from_numpy(np.asarray(weights, dtype=np.float32))[None].to(self.device)
-        with torch.inference_mode():
-            recon = self.model.decoder(
-                z,
-                w,
-                output_shape=(self.mode.gop_frames, self.mode.height, self.mode.width),
-            )
+        with torch.inference_mode(), torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.inference_amp):
+            if self.ac16:
+                recon, _ = self.model.decode_gop(z, w)
+            else:
+                recon = self.model.decoder(z, w, output_shape=(self.mode.gop_frames, self.mode.height, self.mode.width))
         return _to_uint8(recon.squeeze(0))
 
     def synchronize(self) -> None:

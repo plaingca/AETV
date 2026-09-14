@@ -23,10 +23,16 @@ $HamlibDir = Join-Path $BuildRoot "hamlib"
 
 uv venv (Join-Path $BuildRoot "runtime-venv") --python 3.12 --clear
 $Python = Join-Path $BuildRoot "runtime-venv\Scripts\python.exe"
-uv pip install --python $Python "$RepoRoot[gui]" pyinstaller
+uv pip install --python $Python "$RepoRoot[gui]" pyinstaller zstandard
+$SdrDir = Join-Path $BuildRoot "sdr"
+if (Test-Path -LiteralPath $SdrDir) { Remove-Item -LiteralPath $SdrDir -Recurse -Force }
+& $Python (Join-Path $RepoRoot "scripts\fetch_sdr_windows.py") --output $SdrDir
+if ($LASTEXITCODE -ne 0) { throw "SDR runtime download failed" }
 if ($PackageRuntime -eq "gpu") {
     uv pip uninstall --python $Python onnxruntime
-    uv pip install --python $Python onnxruntime-directml
+    # Match the application's ORT 1.23 release family instead of silently
+    # replacing its <1.24 runtime constraint with the latest DirectML wheel.
+    uv pip install --python $Python 'onnxruntime-directml==1.23.0'
 }
 $RuntimeModelDir = Join-Path $BuildRoot "models"
 & $Python (Join-Path $RepoRoot "scripts\fetch_release_runtime.py") `
@@ -46,6 +52,8 @@ $Common = @(
     "--workpath", $WorkPath,
     "--specpath", $SpecPath,
     "--distpath", $DistRoot,
+    "--paths", $RepoRoot,
+    "--runtime-hook", (Join-Path $RepoRoot "scripts\pyi_rth_sdr.py"),
     "--exclude-module", "torch",
     "--exclude-module", "torchvision",
     "--exclude-module", "aetv.models",
@@ -56,6 +64,11 @@ $Common = @(
     "--add-data", "$(Join-Path $RepoRoot 'aetv\assets');aetv/assets",
     "--add-data", "$HamlibDir;aetv/bin"
 )
+foreach ($Backend in @('rtlsdr', 'pluto', 'hackrf')) {
+    foreach ($Binary in (Get-ChildItem -LiteralPath (Join-Path $SdrDir "runtime\$Backend") -File)) {
+        $Common += @("--add-binary", "$($Binary.FullName);aetv/bin/$Backend")
+    }
+}
 foreach ($Model in $RuntimeModels) {
     $Common += @("--add-data", "$($Model.FullName);models")
 }
@@ -63,9 +76,11 @@ foreach ($Model in $RuntimeModels) {
 & $Python -m PyInstaller @Common --windowed --name AETV `
     --icon (Join-Path $RepoRoot "aetv\assets\aetv.ico") `
     (Join-Path $RepoRoot "aetv\gui\app.py")
+if ($LASTEXITCODE -ne 0) { throw "GUI packaging failed" }
 
 & $Python -m PyInstaller @Common --console --name AETV-Benchmark `
     (Join-Path $RepoRoot "scripts\benchmark_inference.py")
+if ($LASTEXITCODE -ne 0) { throw "Benchmark packaging failed" }
 
 & $Python -m PyInstaller --noconfirm --clean --onefile --console `
     --workpath $WorkPath --specpath $SpecPath --distpath $DistRoot `
@@ -73,6 +88,22 @@ foreach ($Model in $RuntimeModels) {
     (Join-Path $RepoRoot "scripts\audio_helper.py")
 
 $AppDir = Join-Path $DistRoot "AETV"
+# Hamlib ships older DLLs with the same process-wide basenames. PyInstaller
+# copies them both beside rigctl and into _internal. Normalize every copy,
+# including the transitive dependencies it discovered, before running smoke
+# checks. This also makes library load order independent of CAT selection.
+foreach ($Name in @('libusb-1.0.dll', 'libwinpthread-1.dll')) {
+    $Pinned = Join-Path $SdrDir "runtime\hackrf\$Name"
+    $PinnedHash = (Get-FileHash -LiteralPath $Pinned -Algorithm SHA256).Hash
+    $Copies = @(Get-ChildItem -LiteralPath (Join-Path $AppDir '_internal') -Recurse -File -Filter $Name)
+    if ($Copies.Count -eq 0) { throw "Missing packaged dependency: $Name" }
+    foreach ($Copy in $Copies) {
+        Copy-Item -LiteralPath $Pinned -Destination $Copy.FullName -Force
+        if ((Get-FileHash -LiteralPath $Copy.FullName -Algorithm SHA256).Hash -ne $PinnedHash) {
+            throw "Conflicting packaged dependency: $($Copy.FullName)"
+        }
+    }
+}
 # Qt uses the Windows ICU compatibility layer. PyInstaller can discover and
 # bundle an unrelated third-party icuuc.dll from the build host, which then
 # shadows the compatible Windows DLL and prevents PySide6.QtCore from loading.
@@ -93,6 +124,40 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "NOTICE") -Destination $AppDir
 Copy-Item -LiteralPath (Join-Path $RepoRoot "FFMPEG-NOTICE.txt") -Destination $AppDir
+New-Item -ItemType Directory -Force -Path (Join-Path $AppDir "docs") | Out-Null
+Copy-Item -LiteralPath (Join-Path $RepoRoot "docs\ac16-gui-and-sdr.md") -Destination (Join-Path $AppDir "docs")
+Copy-Item -LiteralPath (Join-Path $RepoRoot "docs\sdr-portable-setup.md") -Destination (Join-Path $AppDir "docs")
+Copy-Item -LiteralPath (Join-Path $RepoRoot "SDR-NOTICE.txt") -Destination $AppDir
+Copy-Item -LiteralPath (Join-Path $SdrDir 'drivers') -Destination $AppDir -Recurse
+foreach ($Folder in @('licenses', 'sources')) {
+    Copy-Item -LiteralPath (Join-Path $SdrDir $Folder) -Destination (Join-Path $AppDir "drivers\$Folder") -Recurse
+}
+Copy-Item -LiteralPath (Join-Path $SdrDir 'dependencies.json') -Destination (Join-Path $AppDir 'drivers')
+
+# Test the actual frozen GUI and console entry points with no PATH-installed
+# rtl_sdr or libiio. This requires no SDR and performs no RF operations.
+$PreviousPath = $env:PATH
+try {
+    $env:PATH = ''
+    $SdrReport = Join-Path $AppDir 'sdr-gui-smoke.json'
+    $SdrProcess = Start-Process -FilePath (Join-Path $AppDir 'AETV.exe') `
+        -ArgumentList @('--sdr-smoke', "`"$SdrReport`"") -PassThru -WindowStyle Hidden
+    if (-not $SdrProcess.WaitForExit(180000)) {
+        Stop-Process -Id $SdrProcess.Id -Force -ErrorAction SilentlyContinue
+        throw 'Packaged GUI SDR runtime check timed out'
+    }
+    if ($SdrProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $SdrReport)) {
+        throw 'Packaged GUI SDR runtime check failed'
+    }
+    & (Join-Path $AppDir 'AETV-Benchmark.exe') --sdr-smoke --json (Join-Path $AppDir 'sdr-smoke.json')
+    if ($LASTEXITCODE -ne 0) { throw 'Packaged SDR runtime check failed' }
+    $RigModels = & (Join-Path $AppDir '_internal\aetv\bin\rigctl.exe') -l
+    if ($LASTEXITCODE -ne 0 -or -not ($RigModels -match 'Dummy')) {
+        throw 'Packaged Hamlib discovery failed with the shared SDR dependencies'
+    }
+} finally {
+    $env:PATH = $PreviousPath
+}
 
 $PreviousOffline = $env:AETV_OFFLINE
 $PreviousQtPlatform = $env:QT_QPA_PLATFORM
@@ -124,6 +189,16 @@ try {
         if ($TestDirectML -and $SmokeResult.device -ne "DirectML") {
             throw "Packaged GPU benchmark did not select DirectML"
         }
+        # Exercise AC16 with the GPU package's actual provider selection. Hosts
+        # without a usable DirectML adapter must record explicit CPU fallback;
+        # hosts with one also run the CPU-reference color qualification.
+        $Ac16Device = if ($PackageRuntime -eq 'gpu') { 'auto' } else { 'cpu' }
+        & ".\AETV-Benchmark.exe" --mode AC16 --device $Ac16Device --warmup 0 --repeats 1 `
+            --json (Join-Path $AppDir 'ac16-build-smoke.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged AC16 inference check failed' }
+        & ".\AETV-Benchmark.exe" --mode AC16 --device $Ac16Device --av-smoke `
+            --av-output (Join-Path $AppDir 'ac16-av-smoke.mp4') --json (Join-Path $AppDir 'ac16-av-smoke.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Packaged AC16 audio/video RF check failed' }
         $GuiSmoke = Start-Process -FilePath ".\AETV.exe" `
             -ArgumentList @("--smoke-test", "--video-smoke-output", $VideoSmoke) `
             -PassThru -WindowStyle Hidden

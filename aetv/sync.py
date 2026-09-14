@@ -6,6 +6,7 @@ Supports fast preamble acquisition and blind pilot-based acquisition for join-in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy import signal
@@ -48,6 +49,13 @@ class Acquisition:
     preamble_start: int  # index of first preamble sample
     freq_offset: float  # Hz
     metric: float  # correlation confidence 0..1
+
+
+@lru_cache(maxsize=len(BANDS))
+def _acquisition_template(band: str) -> np.ndarray:
+    template = preamble_template(band)
+    template.setflags(write=False)
+    return template
 
 
 def _autocorr_metric(z: np.ndarray, m: int, w: int) -> tuple[np.ndarray, np.ndarray]:
@@ -106,7 +114,7 @@ def acquire(
     # filter. At severe SNR the repeated-symbol autocorrelation still gives a
     # useful fractional-CFO estimate, but its largest timing peak is often a
     # noise sample. The full known preamble has much greater processing gain.
-    tmpl = preamble_template(band)
+    tmpl = _acquisition_template(band)
     best_bin = 0
     best_score = -1.0
     best_offset = 0

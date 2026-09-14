@@ -32,6 +32,7 @@ from aetv.gui.model_manager import ModelInventoryThread, ModelManagerDialog
 from aetv.gui.settings_dialog import SettingsDialog
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.gui.waterfall import Waterfall
+from aetv.gui.radio_panel import RadioPanel
 from aetv.gui.widgets import LogPane, PttLamp
 
 
@@ -74,6 +75,10 @@ def _rx_runtime_config(settings: StationSettings) -> tuple:
     """Settings captured by an active receive engine rather than read live."""
     return (
         settings.rx_source,
+        settings.sdr_frequency_mhz, settings.pluto_uri, settings.rtl_serial,
+        settings.pluto_rx_gain, settings.rtl_rx_gain,
+        settings.hackrf_serial, settings.hackrf_rx_lna_gain, settings.hackrf_rx_vga_gain,
+        settings.sdr_rx_correction_hz, settings.sdr_auto_correct,
         settings.audio_input,
         getattr(settings, "audio_playback_output", ""),
         getattr(settings, "waveform_mode", "video"),
@@ -152,11 +157,17 @@ class MainWindow(QMainWindow):
         panes.setStretchFactor(1, 1)
 
         stack = QSplitter(Qt.Orientation.Vertical)
+        self.radio = RadioPanel(self.settings)
+        self.radio.applyRequested.connect(self._apply_rf_settings)
+        self.rx.source.currentIndexChanged.connect(
+            lambda: self.radio.set_receive_source(self.rx.source.currentData()))
+        stack.addWidget(self.radio)
         stack.addWidget(self.waterfall)
         stack.addWidget(panes)
         stack.setStretchFactor(0, 0)
-        stack.setStretchFactor(1, 1)
-        stack.setSizes([170, 520])
+        stack.setStretchFactor(1, 0)
+        stack.setStretchFactor(2, 1)
+        stack.setSizes([140, 170, 520])
         self.setCentralWidget(stack)
 
         self.log = LogPane()
@@ -289,15 +300,24 @@ class MainWindow(QMainWindow):
         with self.station.codec_lock:
             self.station.codec = codec
         self.model_label.setText(text)
+        validation = getattr(codec, "runtime_validation", None) or {}
+        runtime_details = "\n".join(
+            [getattr(codec, "runtime_notice", "")]
+            + [f"{attempt['profile']}: {attempt['reason']}"
+               for attempt in validation.get("attempts", []) if not attempt["passed"]]
+        )
         self.model_label.setToolTip(
             f"Model: {self.station.codec.checkpoint_path}\n"
             "Install or inspect release models with File > Model Manager."
+            + ("\n" + runtime_details if runtime_details else "")
         )
         self.tx.send_button.setEnabled(True)
         self.tx.model_ready()
         self.rx.start_button.setEnabled(True)
         _configure_waterfall(self.waterfall, self.settings)
         self._log(f"codec ready: {text}")
+        if getattr(codec, "runtime_notice", ""):
+            self._log(codec.runtime_notice)
         if self._resume_rx_after_codec_reload:
             self._resume_rx_after_codec_reload = False
             self._log(f"restarting receive with {self.settings.mode}")
@@ -406,10 +426,31 @@ class MainWindow(QMainWindow):
         self.station.settings = self.settings
         self.rx.sync_from_config()
         self.tx.sync_from_config()
+        self.radio.sync(self.settings)
         _configure_waterfall(self.waterfall, self.settings)
         self._refresh_station_label()
         if not codec_matches:
             self._load_codec()
+
+    def _apply_rf_settings(self, values) -> None:
+        if self.tx.transmitting():
+            return
+        from dataclasses import replace
+        candidate = replace(self.settings, **values)
+        candidate.rx_source = self.rx.source.currentData()
+        problems = candidate.validate(radio_tx=True, receive=True)
+        if problems:
+            self.rx.status.setText(problems[0])
+            return
+        for name, value in values.items():
+            setattr(self.settings, name, value)
+        self.settings.rx_source = candidate.rx_source
+        save_settings(self.settings)
+        self.radio.sync(self.settings)
+        self._log(f"RF settings applied: {self.settings.sdr_frequency_mhz:.6f} MHz")
+        if self.rx.listening():
+            self._restart_rx_after_settings_stop = True
+            self.rx.stop()
 
     def open_settings(self) -> None:
         if self.tx.transmitting():
@@ -427,6 +468,7 @@ class MainWindow(QMainWindow):
         self.station.settings = self.settings
         self.rx.sync_from_config()
         self.tx.sync_from_config()
+        self.radio.sync(self.settings)
         _configure_waterfall(self.waterfall, self.settings)
         self._refresh_station_label()
         self._log("settings saved")
@@ -480,7 +522,7 @@ class MainWindow(QMainWindow):
         self._refresh_station_label()
         if not codec_changed:
             self._log(
-                "V8 A/V transport enabled"
+                f"{self.settings.mode} A/V transport enabled"
                 if self.settings.waveform_mode == "analog_av"
                 else "video-only transport enabled"
             )
@@ -531,7 +573,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_station_label(self) -> None:
         backend = self.settings.cat_backend if not self.settings.audio_only else "audio-only"
-        mode_label = "V8 A/V" if self.settings.waveform_mode == "analog_av" else self.settings.mode
+        mode_label = f"{self.settings.mode} A/V" if self.settings.waveform_mode == "analog_av" else self.settings.mode
         self.station_label.setText(f"  {self.settings.callsign}  {mode_label}  ")
         if backend == "none":
             self.rig_label.setText("CAT off")
@@ -544,13 +586,18 @@ class MainWindow(QMainWindow):
             self.rig_label.setText(f"{backend} {self.settings.serial_port}")
 
     def _on_tx_started(self) -> None:
+        self.radio.setEnabled(False)
         self._tx_finished_while_stopping_rx = False
         emulating = self.tx.emulating()
         self._emulation_active = emulating
         if emulating:
             key = self.tx.selected_channel_profile()
             self.rx.prepare_emulator(CHANNEL_PROFILES[key].label)
-        if self.rx.listening() and (emulating or self.settings.rx_source != "kiwi"):
+        simultaneous_rx = self.settings.rx_source == "kiwi" or (
+            self.settings.tx_backend in {"pluto", "hackrf"}
+            and self.settings.rx_source in {"pluto", "rtlsdr", "hackrf"}
+            and not (self.settings.tx_backend == "hackrf" and self.settings.rx_source == "hackrf"))
+        if self.rx.listening() and (emulating or not simultaneous_rx):
             self.rx.stop()
             self._resume_rx = True
             self._tx_waiting_for_rx = True
@@ -574,6 +621,7 @@ class MainWindow(QMainWindow):
             self._resume_or_hold_receive()
 
     def _on_tx_finished(self) -> None:
+        self.radio.setEnabled(True)
         self.ptt_lamp.set_keyed(False)
         if getattr(self, "_resume_rx", False):
             if self._tx_waiting_for_rx:
@@ -642,6 +690,27 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
+    if "--sdr-smoke" in args:
+        import json
+        from aetv.sdr import sdr_runtime_smoke
+
+        index = args.index("--sdr-smoke")
+        if index + 1 >= len(args):
+            return 3
+        Path(args[index + 1]).write_text(
+            json.dumps(sdr_runtime_smoke(), indent=2) + "\n", encoding="utf-8"
+        )
+        return 0
+    validation = None
+    validation_settings = None
+    if "--ota-validation" in args:
+        from aetv.gui.ota_validation import load_validation
+        index = args.index("--ota-validation")
+        validation, validation_settings = load_validation(args[index+1])
+        # Test mode selections, output devices and long durations must not
+        # replace the operator's normal station profile.
+        os.environ["AETV_SETTINGS_PATH"] = str(Path(validation["output"]).with_suffix(".settings.json"))
+        del args[index:index+2]
     smoke_test = "--smoke-test" in args
     if smoke_test:
         args.remove("--smoke-test")
@@ -668,9 +737,12 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName("AETV")
     if APP_ICON.is_file():
         app.setWindowIcon(QIcon(str(APP_ICON)))
-    window = MainWindow(StationSettings() if smoke_test else None)
+    window = MainWindow(validation_settings or (StationSettings() if smoke_test else None))
     window._smoke_test = smoke_test
     window.show()
+    if validation is not None:
+        from aetv.gui.ota_validation import install_validation
+        install_validation(window, app, validation)
     if smoke_test:
         result = {"code": 2, "finished": False}
 

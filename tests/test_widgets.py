@@ -34,3 +34,22 @@ def test_receive_playout_does_not_blend_gops_by_default():
     ].default
 
     assert default == 0
+
+
+def test_short_transmission_plays_without_filling_prebuffer():
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    view = VideoView()
+    shown = []
+    view._show_frame = lambda frame: shown.append(int(frame[0, 0, 0]))
+    frames = np.stack([np.full((2, 2, 3), n, np.uint8) for n in (20, 30)])
+    view.enqueue_rgb(frames, fps=1000, prebuffer_frames=20)
+    assert shown == []
+    QTest.qWait(60)
+    assert shown == [20, 30]
+    view.clear()
+    assert not view._prebuffer_timer.isActive()
+    view.close()
+    app.processEvents()

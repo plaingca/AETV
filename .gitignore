@@ -1,5 +1,6 @@
 .venv/
 .build/
+/.build
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -7,6 +8,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 dist/
+/dist
 build/
 
 # Local weights, captures, and training output

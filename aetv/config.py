@@ -7,6 +7,7 @@ over 8 kHz soundcard audio on HF SSB channels.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 
 FS = 8000  # audio sample rate, Hz
 
@@ -184,7 +185,18 @@ BAND_U = AETVBandGeometry(
     fs=FS_U,
 )
 
-BANDS = {"N": BAND_N, "W": BAND_W, "U": BAND_U}
+# AC16 is a separate guarded 16 kHz waveform. Slot 300 is reserved (zero
+# during data); slot 301 is the beacon. Neither carries video side information.
+BAND_A = AETVBandGeometry(
+    name="A", carriers=302, carrier0_hz=500, fcenter_hz=8000,
+    beacon_carrier=301, latent_carriers=300,
+    latents_per_frame=300 * 4 * 2, latents_per_gop=300 * 4 * 2 * 8,
+    tx_bandpass=(250.0, 15800.0),
+    pilot_quadrants=tuple(random.Random(20260911).choices(range(4), k=302)),
+    fs=48000,
+)
+
+BANDS = {"N": BAND_N, "W": BAND_W, "U": BAND_U, "A": BAND_A}
 
 
 
@@ -327,11 +339,18 @@ AETV_MODES: dict[str, AETVModeSpec] = {
 }
 
 
+AETV_MODES["AC16"] = AETVModeSpec(
+    name="AC16", index=11, band="A", width=256, height=144, fps=10.0,
+    gop_frames=10, latents_per_gop=BAND_A.latents_per_gop, causal=True,
+    description="Experimental asymmetric context I/P: 256x144 @ 10 fps, 16 kHz",
+)
+
 # Modes with pinned, checksum-verified release checkpoints. Historical modes
 # remain decodable at the protocol layer, but are intentionally hidden from the
 # release GUI until they have validated weights of their own.
-RELEASE_MODES: tuple[str, ...] = ("V8", "V7")
+RELEASE_MODES: tuple[str, ...] = ("V8", "V7", "AC16")
 RELEASE_MODE_LABELS = {
+    "AC16": "AC16 · 16 kHz — 256×144 @ 10 fps",
     "V8": "Standard channel — 192×108 @ 6 fps",
     "V7": "Wide 8 kHz — 256×144 @ 12 fps",
 }

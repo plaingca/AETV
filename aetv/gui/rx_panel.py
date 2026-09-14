@@ -417,7 +417,8 @@ class ReceivePanel(QWidget):
         try:
             path = (
                 self.engine.save_video(
-                    self._emulated_video,
+                    (self.station.loopback_video if self.station.loopback_video is not None
+                     else self._emulated_video),
                     audio=self.station.loopback_audio,
                     audio_rate=self.station.loopback_audio_rate,
                 )
@@ -454,6 +455,9 @@ class ReceivePanel(QWidget):
         self.source.addItem("Soundcard", "soundcard")
         self.source.addItem("FlexRadio (network)", "flex")
         self.source.addItem("Public KiwiSDR", "kiwi")
+        self.source.addItem("PlutoSDR", "pluto")
+        self.source.addItem("RTL-SDR", "rtlsdr")
+        self.source.addItem("HackRF (experimental)", "hackrf")
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
         self.playback_label = QLabel("Program audio to")
@@ -1045,6 +1049,8 @@ class ReceivePanel(QWidget):
     def _on_error(self, message: str) -> None:
         self.status.setText(message)
         self.logMessage.emit(message)
+        if self.station.settings.rx_source in {"pluto", "rtlsdr", "hackrf"} and self.listening():
+            self.stop()
 
     def _show_video(self, video, state: RxState) -> None:
         mode = self.station.require_codec().mode
@@ -1052,8 +1058,12 @@ class ReceivePanel(QWidget):
             video,
             fps=mode.fps,
             prebuffer_frames=mode.gop_frames,
-            boundary_blend_frames=4,
-            max_queue_frames=2 * mode.gop_frames,
+            boundary_blend_frames=0 if mode.name == "AC16" else 4,
+            max_queue_frames=(
+                mode.gop_frames + max(1, round(.2 * mode.fps))
+                if self.station.settings.waveform_mode == "analog_av"
+                else (4 if mode.name == "AC16" else 2) * mode.gop_frames
+            ),
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
@@ -1121,6 +1131,7 @@ class ReceivePanel(QWidget):
         self.preview.clear()
         self._emulated_video = None
         self.station.loopback_audio = None
+        self.station.loopback_video = None
         self.status.setText(f"Waiting for {label} loopback…")
         self.statusChanged.emit(self.status.text())
         self.progress.setValue(0)
@@ -1137,8 +1148,12 @@ class ReceivePanel(QWidget):
             video,
             fps=mode.fps,
             prebuffer_frames=mode.gop_frames,
-            boundary_blend_frames=4,
-            max_queue_frames=2 * mode.gop_frames,
+            boundary_blend_frames=0 if mode.name == "AC16" else 4,
+            max_queue_frames=(
+                mode.gop_frames + max(1, round(.2 * mode.fps))
+                if self.station.settings.waveform_mode == "analog_av"
+                else (4 if mode.name == "AC16" else 2) * mode.gop_frames
+            ),
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)

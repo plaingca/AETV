@@ -1,0 +1,310 @@
+[
+  {
+    "mode": "V8",
+    "before": 294,
+    "after": 293,
+    "paired": 293,
+    "identical": 293,
+    "different": 0,
+    "weak_paired": 100,
+    "weak_identical": 100,
+    "changed_rows": [],
+    "alignment": "Known continuous source order before injected faults, anchored at independently decoded initial preamble; no transmitter data enters tuning or decoding"
+  },
+  {
+    "mode": "V7",
+    "before": 293,
+    "after": 293,
+    "paired": 293,
+    "identical": 293,
+    "different": 0,
+    "weak_paired": 100,
+    "weak_identical": 100,
+    "changed_rows": [],
+    "alignment": "Known continuous source order before injected faults, anchored at independently decoded initial preamble; no transmitter data enters tuning or decoding"
+  },
+  {
+    "mode": "V8_AV",
+    "before": 294,
+    "after": 294,
+    "paired": 294,
+    "identical": 245,
+    "different": 49,
+    "weak_paired": 100,
+    "weak_identical": 55,
+    "changed_rows": [
+      {
+        "source_gop": 245,
+        "before_mse": 0.006379651400959534,
+        "after_mse": 0.006261436664185296
+      },
+      {
+        "source_gop": 246,
+        "before_mse": 0.015979750924449233,
+        "after_mse": 0.0153966832722088
+      },
+      {
+        "source_gop": 247,
+        "before_mse": 0.016618880451633303,
+        "after_mse": 0.01650009341400295
+      },
+      {
+        "source_gop": 248,
+        "before_mse": 0.0025806979229129456,
+        "after_mse": 0.0024558369149725572
+      },
+      {
+        "source_gop": 249,
+        "before_mse": 0.0025118292403233113,
+        "after_mse": 0.0026234422456884524
+      },
+      {
+        "source_gop": 250,
+        "before_mse": 0.01307098011428811,
+        "after_mse": 0.013145897386530664
+      },
+      {
+        "source_gop": 251,
+        "before_mse": 0.014540750977056413,
+        "after_mse": 0.014728217454811883
+      },
+      {
+        "source_gop": 252,
+        "before_mse": 0.0029271501553296215,
+        "after_mse": 0.0030844131566865967
+      },
+      {
+        "source_gop": 253,
+        "before_mse": 0.0026266063401408873,
+        "after_mse": 0.002619395225746771
+      },
+      {
+        "source_gop": 254,
+        "before_mse": 0.03278876529497729,
+        "after_mse": 0.034288856360445416
+      },
+      {
+        "source_gop": 255,
+        "before_mse": 0.034271098635364476,
+        "after_mse": 0.0344249256478594
+      },
+      {
+        "source_gop": 256,
+        "before_mse": 0.004038175771532422,
+        "after_mse": 0.003908368460822022
+      },
+      {
+        "source_gop": 257,
+        "before_mse": 0.0040809818978561055,
+        "after_mse": 0.004075213566692983
+      },
+      {
+        "source_gop": 258,
+        "before_mse": 0.01163617184834207,
+        "after_mse": 0.012011578754662789
+      },
+      {
+        "source_gop": 259,
+        "before_mse": 0.011511022135426967,
+        "after_mse": 0.011794808907384465
+      },
+      {
+        "source_gop": 260,
+        "before_mse": 0.01783641525378811,
+        "after_mse": 0.017919770852879737
+      },
+      {
+        "source_gop": 261,
+        "before_mse": 0.016837854666665614,
+        "after_mse": 0.01756333141429196
+      },
+      {
+        "source_gop": 262,
+        "before_mse": 0.007233888589594907,
+        "after_mse": 0.007230486963505648
+      },
+      {
+        "source_gop": 263,
+        "before_mse": 0.008223614277100872,
+        "after_mse": 0.007887398071940253
+      },
+      {
+        "source_gop": 264,
+        "before_mse": 0.008047999948183905,
+        "after_mse": 0.007408297419703512
+      },
+      {
+        "source_gop": 265,
+        "before_mse": 0.007919438967826029,
+        "after_mse": 0.007485351158201789
+      },
+      {
+        "source_gop": 266,
+        "before_mse": 0.010167670142036749,
+        "after_mse": 0.010230206227068411
+      },
+      {
+        "source_gop": 267,
+        "before_mse": 0.010321069309168839,
+        "after_mse": 0.010462141717414797
+      },
+      {
+        "source_gop": 268,
+        "before_mse": 0.0013689723246677837,
+        "after_mse": 0.001203808522521411
+      },
+      {
+        "source_gop": 269,
+        "before_mse": 0.0011687736567501472,
+        "after_mse": 0.0013367922883938804
+      },
+      {
+        "source_gop": 270,
+        "before_mse": 0.005346511646227656,
+        "after_mse": 0.005414380841836183
+      },
+      {
+        "source_gop": 271,
+        "before_mse": 0.005439919345215964,
+        "after_mse": 0.005495175713915034
+      },
+      {
+        "source_gop": 272,
+        "before_mse": 0.020718563979560463,
+        "after_mse": 0.020665347004344116
+      },
+      {
+        "source_gop": 273,
+        "before_mse": 0.011275626429227652,
+        "after_mse": 0.011213076417796468
+      },
+      {
+        "source_gop": 274,
+        "before_mse": 0.02494561592657989,
+        "after_mse": 0.024472577295967208
+      },
+      {
+        "source_gop": 275,
+        "before_mse": 0.023185285776640197,
+        "after_mse": 0.0234866123131654
+      },
+      {
+        "source_gop": 276,
+        "before_mse": 0.025570957494189476,
+        "after_mse": 0.02539873753974545
+      },
+      {
+        "source_gop": 277,
+        "before_mse": 0.025618455828295437,
+        "after_mse": 0.0255308488455295
+      },
+      {
+        "source_gop": 278,
+        "before_mse": 0.01629123038305938,
+        "after_mse": 0.01598555773862169
+      },
+      {
+        "source_gop": 279,
+        "before_mse": 0.017368595891616552,
+        "after_mse": 0.01753591445386891
+      },
+      {
+        "source_gop": 280,
+        "before_mse": 0.004115730901615871,
+        "after_mse": 0.003999520701123183
+      },
+      {
+        "source_gop": 281,
+        "before_mse": 0.004460301586811868,
+        "after_mse": 0.004353275269971083
+      },
+      {
+        "source_gop": 282,
+        "before_mse": 0.01192995332530118,
+        "after_mse": 0.012010939293950992
+      },
+      {
+        "source_gop": 283,
+        "before_mse": 0.01269895934196724,
+        "after_mse": 0.012023817711308143
+      },
+      {
+        "source_gop": 284,
+        "before_mse": 0.0054094539865826635,
+        "after_mse": 0.005460950845446169
+      },
+      {
+        "source_gop": 285,
+        "before_mse": 0.00543813293425711,
+        "after_mse": 0.0053252909447353
+      },
+      {
+        "source_gop": 286,
+        "before_mse": 0.00820224817246084,
+        "after_mse": 0.007948935576442847
+      },
+      {
+        "source_gop": 287,
+        "before_mse": 0.008738616198449577,
+        "after_mse": 0.008169156163030048
+      },
+      {
+        "source_gop": 288,
+        "before_mse": 0.021316139190687974,
+        "after_mse": 0.021102150214661025
+      },
+      {
+        "source_gop": 289,
+        "before_mse": 0.026516411034006655,
+        "after_mse": 0.026683675579957905
+      },
+      {
+        "source_gop": 290,
+        "before_mse": 0.004607976674121328,
+        "after_mse": 0.004463481420567904
+      },
+      {
+        "source_gop": 291,
+        "before_mse": 0.0040871729652887535,
+        "after_mse": 0.004253525744094943
+      },
+      {
+        "source_gop": 292,
+        "before_mse": 0.01391135517909119,
+        "after_mse": 0.014498434005215362
+      },
+      {
+        "source_gop": 293,
+        "before_mse": 0.014845342595031773,
+        "after_mse": 0.0143914984159833
+      }
+    ],
+    "alignment": "Known continuous source order before injected faults, anchored at independently decoded initial preamble; no transmitter data enters tuning or decoding",
+    "changed_before_psnr_db": 19.217601784332633,
+    "changed_after_psnr_db": 19.22350617964431
+  },
+  {
+    "mode": "AC16_AV",
+    "before": 293,
+    "after": 293,
+    "paired": 293,
+    "identical": 293,
+    "different": 0,
+    "weak_paired": 100,
+    "weak_identical": 100,
+    "changed_rows": [],
+    "alignment": "Known continuous source order before injected faults, anchored at independently decoded initial preamble; no transmitter data enters tuning or decoding"
+  },
+  {
+    "mode": "AC16",
+    "before": 293,
+    "after": 293,
+    "paired": 293,
+    "identical": 293,
+    "different": 0,
+    "weak_paired": 100,
+    "weak_identical": 100,
+    "changed_rows": [],
+    "alignment": "Known continuous source order before injected faults, anchored at independently decoded initial preamble; no transmitter data enters tuning or decoding"
+  }
+]

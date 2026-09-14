@@ -178,7 +178,7 @@ class TransmitPanel(QWidget):
     def sync_from_config(self) -> None:
         settings = self.station.settings
         previous = self.mode.blockSignals(True)
-        selected = "V8_AV" if settings.waveform_mode == "analog_av" else settings.mode
+        selected = f"{settings.mode}_AV" if settings.waveform_mode == "analog_av" else settings.mode
         self.mode.setCurrentIndex(max(0, self.mode.findData(selected)))
         self.mode.blockSignals(previous)
         self.gops.setValue(settings.gops)
@@ -313,6 +313,7 @@ class TransmitPanel(QWidget):
             f"V8 A/V — {v8.width}×{v8.height} @ {v8.fps:g} fps + analog audio",
             "V8_AV",
         )
+        self.mode.addItem("AC16 A/V · 20 kHz — 256×144 @ 10 fps + 3.3 kHz audio", "AC16_AV")
         self.gops = QSpinBox()
         self.gops.setRange(1, 300)
         self.gops.setSuffix(" s")
@@ -886,7 +887,7 @@ class TransmitPanel(QWidget):
         settings = self.station.settings
         settings.mode = self._selected_mode_name()
         settings.waveform_mode = (
-            "analog_av" if self.mode.currentData() == "V8_AV" else "video"
+            "analog_av" if self.mode.currentData() in {"V8_AV", "AC16_AV"} else "video"
         )
         settings.gops = int(self.gops.value())
         settings.tx_level = float(10 ** (self.level_db.value() / 20.0))
@@ -912,17 +913,17 @@ class TransmitPanel(QWidget):
         self.send_button.setText("Run loopback" if testing else "Send")
 
     def _selected_mode_name(self) -> str:
-        return "V8" if self.mode.currentData() == "V8_AV" else (
+        return self.mode.currentData().removesuffix("_AV") if self.mode.currentData() in {"V8_AV", "AC16_AV"} else (
             self.mode.currentData() or self.station.settings.mode
         )
 
     def _on_mode_changed(self, index: int) -> None:
         selected = self.mode.currentData()
-        base_mode = "V8" if selected == "V8_AV" else (
+        base_mode = selected.removesuffix("_AV") if selected in {"V8_AV", "AC16_AV"} else (
             selected or self.station.settings.mode
         )
         waveform_mode = (
-            "analog_av" if selected == "V8_AV" else "video"
+            "analog_av" if selected in {"V8_AV", "AC16_AV"} else "video"
         )
         self.station.settings.waveform_mode = waveform_mode
         if hasattr(self, "_sync_av_controls"):
@@ -940,7 +941,7 @@ class TransmitPanel(QWidget):
         self.modeRequested.emit(base_mode)
 
     def _sync_av_controls(self) -> None:
-        visible = self.mode.currentData() == "V8_AV"
+        visible = self.mode.currentData() in {"V8_AV", "AC16_AV"}
         for index in range(self.av_row.count()):
             widget = self.av_row.itemAt(index).widget()
             if widget is not None:
@@ -1024,6 +1025,7 @@ class TransmitPanel(QWidget):
             self.transmitting()
             and (self.cam_radio.isChecked() or self.screen_radio.isChecked())
             and not self.emulating()
+            and self.station.settings.tx_backend not in {"pluto", "hackrf"}
         ):
             return
         self.preview.set_rgb(frames)

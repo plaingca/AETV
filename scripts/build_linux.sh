@@ -2,8 +2,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build_root="$repo_root/.build/linux-cpu"
-dist_root="$repo_root/dist/linux-cpu"
+runtime="${AETV_RUNTIME:-cpu}"
+case "$runtime" in cpu|gpu) ;; *) echo "AETV_RUNTIME must be cpu or gpu" >&2; exit 1 ;; esac
+build_root="$repo_root/.build/linux-$runtime"
+dist_root="$repo_root/dist/linux-$runtime"
 
 case "$build_root" in
   "$repo_root"/.build/*) ;;
@@ -17,7 +19,7 @@ esac
 mkdir -p "$build_root"
 hamlib_dir="$build_root/hamlib"
 mkdir -p "$hamlib_dir"
-cp "$(command -v rigctl)" "$hamlib_dir/rigctl"
+cp "${AETV_RIGCTL:-$(command -v rigctl)}" "$hamlib_dir/rigctl"
 hamlib_library="$(ldconfig -p | awk '/libhamlib\.so\.4/ && !found {found=$NF} END {print found}')"
 if [[ -z "$hamlib_library" ]]; then
   echo "libhamlib.so.4 is not installed" >&2
@@ -26,11 +28,19 @@ fi
 cp -L "$hamlib_library" "$hamlib_dir/libhamlib.so.4"
 cp /usr/share/common-licenses/LGPL-2.1 "$hamlib_dir/COPYING.LIB.txt"
 cp /usr/share/common-licenses/GPL-2 "$hamlib_dir/COPYING.txt"
-cp /usr/share/doc/libhamlib4t64/copyright "$hamlib_dir/HAMLIB-COPYRIGHT.txt"
+for copyright in /usr/share/doc/libhamlib4t64/copyright /usr/share/doc/libhamlib4/copyright; do
+  if [[ -f "$copyright" ]]; then cp "$copyright" "$hamlib_dir/HAMLIB-COPYRIGHT.txt"; break; fi
+done
 
-uv venv "$build_root/runtime-venv" --python 3.12 --clear
+uv venv "$build_root/runtime-venv" --managed-python --python 3.12 --clear
 python_bin="$build_root/runtime-venv/bin/python"
 uv pip install --python "$python_bin" "$repo_root[gui]" pyinstaller
+hackrf_dir="$build_root/hackrf"
+"$python_bin" "$repo_root/scripts/build_hackrf_linux.py" --output "$hackrf_dir"
+if [[ "$runtime" == gpu ]]; then
+  uv pip uninstall --python "$python_bin" onnxruntime
+  uv pip install --python "$python_bin" 'onnxruntime-gpu[cuda,cudnn]>=1.20,<1.24'
+fi
 runtime_models="$build_root/models"
 "$python_bin" "$repo_root/scripts/fetch_release_runtime.py" --output "$runtime_models"
 
@@ -43,6 +53,11 @@ common=(
   --workpath "$work_path"
   --specpath "$spec_path"
   --distpath "$dist_root"
+  --paths "$repo_root"
+  --runtime-hook "$repo_root/scripts/pyi_rth_sdr.py"
+  --add-binary "/usr/bin/rtl_sdr:aetv/bin/rtlsdr"
+  --add-binary "$(ldconfig -p | awk '/libiio\.so\.0/ && !found {found=$NF} END {print found}'):."
+  --add-binary "$hackrf_dir/libhackrf.so.0:."
   --exclude-module torch
   --exclude-module torchvision
   --exclude-module aetv.models
@@ -53,6 +68,9 @@ common=(
   --add-data "$repo_root/aetv/assets:aetv/assets"
   --add-data "$hamlib_dir:aetv/bin"
 )
+if [[ "$runtime" == gpu ]]; then
+  common+=(--collect-all nvidia.cuda_runtime --collect-all nvidia.cublas --collect-all nvidia.cudnn)
+fi
 for model in "$runtime_models"/*; do
   common+=(--add-data "$model:models")
 done
@@ -74,14 +92,36 @@ chmod 755 "$app_dir/ffmpeg"
 cp "$dist_root/AETV-Benchmark/AETV-Benchmark" "$app_dir/AETV-Benchmark"
 cp "$repo_root/README.md" "$repo_root/LICENSE" "$repo_root/NOTICE" \
   "$repo_root/FFMPEG-NOTICE.txt" "$app_dir/"
+mkdir -p "$app_dir/docs"
+cp "$repo_root/docs/ac16-gui-and-sdr.md" "$app_dir/docs/"
+cp "$repo_root/docs/sdr-portable-setup.md" "$app_dir/docs/"
+cp "$repo_root/SDR-NOTICE.txt" "$app_dir/"
+mkdir -p "$app_dir/drivers/udev"
+cp /lib/udev/rules.d/60-librtlsdr0.rules "$app_dir/drivers/udev/"
+cp "$repo_root/scripts/60-aetv-pluto.rules" "$app_dir/drivers/udev/"
+cp "$hackrf_dir/53-hackrf.rules" "$app_dir/drivers/udev/"
+mkdir -p "$app_dir/drivers/sources" "$app_dir/drivers/licenses"
+cp "$hackrf_dir/hackrf-2026.01.3.zip" "$app_dir/drivers/sources/"
+cp "$hackrf_dir/libhackrf-BSD-header.h" "$hackrf_dir/HackRF-COPYING.txt" "$app_dir/drivers/licenses/"
+for dependency in libiio0 rtl-sdr librtlsdr0 libusb-1.0-0 libserialport0 libxml2; do
+  if [[ -f "/usr/share/doc/$dependency/copyright" ]]; then
+    cp "/usr/share/doc/$dependency/copyright" "$app_dir/$dependency-COPYRIGHT.txt"
+  fi
+done
 
 (
   cd "$app_dir"
+  PATH='' ./AETV-Benchmark --sdr-smoke --json sdr-smoke.json
+  PATH='' QT_QPA_PLATFORM=offscreen ./AETV --sdr-smoke sdr-gui-smoke.json
   ./AETV-Benchmark --video-save-smoke "$build_root/saved-video-smoke.mp4"
   test -s "$build_root/saved-video-smoke.mp4"
   XDG_CACHE_HOME="$build_root/smoke-cache" \
     AETV_OFFLINE=1 ./AETV-Benchmark \
     --mode V8 --device cpu --warmup 0 --repeats 1 --json build-smoke.json
+  AETV_CPU_THREADS=8 AETV_OFFLINE=1 ./AETV-Benchmark \
+    --mode AC16 --device cpu --warmup 1 --repeats 1 --json ac16-build-smoke.json
+  AETV_CPU_THREADS=8 AETV_OFFLINE=1 ./AETV-Benchmark \
+    --mode AC16 --device cpu --av-smoke --av-output ac16-av-smoke.mp4 --json ac16-av-smoke.json
   XDG_CACHE_HOME="$build_root/smoke-cache" \
     XDG_CONFIG_HOME="$build_root/smoke-config" \
     QT_QPA_PLATFORM=offscreen AETV_OFFLINE=1 ./AETV --smoke-test \
@@ -126,11 +166,11 @@ Categories=AudioVideo;HamRadio;
 EOF
 cp "$repo_root/aetv/assets/aetv-logo.png" "$appimage_dir/aetv.png"
 
-appimage="$dist_root/AETV-linux-x64-cpu.AppImage"
+appimage="$dist_root/AETV-linux-x64-$runtime.AppImage"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimage_tool" "$appimage_dir" "$appimage"
 chmod 755 "$appimage"
 
-archive="$dist_root/AETV-linux-x64-cpu.tar.gz"
+archive="$dist_root/AETV-linux-x64-$runtime.tar.gz"
 tar -czf "$archive" -C "$dist_root" AETV
 echo "Portable AETV Linux build: $archive"
 echo "AETV Linux AppImage: $appimage"

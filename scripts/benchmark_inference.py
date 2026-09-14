@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from aetv.codec import AETVCodec
+from aetv.config import RELEASE_MODES
 from aetv.source import write_video_smoke_test
 
 
@@ -30,19 +31,33 @@ def _measure(call, synchronize, repeats: int) -> list[float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("V7", "V8"), default="V8")
+    parser.add_argument("--mode", choices=RELEASE_MODES, default="V8")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threads", type=int, default=0, help="CPU threads; 0 keeps the backend default")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--json", type=Path, help="also write machine-readable results")
+    parser.add_argument("--sdr-smoke", action="store_true", help="check bundled RTL-SDR, Pluto and HackRF transports without opening hardware")
     parser.add_argument(
         "--video-save-smoke",
         type=Path,
         help="exercise the packaged Save video FFmpeg path and exit",
     )
+    parser.add_argument("--av-smoke", action="store_true", help="validate AC16 frames through the 20 kHz A/V waveform and simulated signed RF IQ")
+    parser.add_argument("--av-output", type=Path, help="save the recovered A/V validation MP4")
+    parser.add_argument("--av-source", type=Path, help="optional RGB .npy frames for A/V validation")
     args = parser.parse_args()
+
+    if args.sdr_smoke:
+        from aetv.sdr import sdr_runtime_smoke
+
+        result = sdr_runtime_smoke()
+        text = json.dumps(result, indent=2) + "\n"
+        print(text, end="")
+        if args.json:
+            args.json.write_text(text, encoding="utf-8")
+        return
 
     if args.video_save_smoke is not None:
         write_video_smoke_test(args.video_save_smoke)
@@ -52,6 +67,14 @@ def main() -> None:
     if args.threads:
         os.environ["AETV_CPU_THREADS"] = str(args.threads)
     codec = AETVCodec(args.checkpoint, device=args.device, mode=args.mode)
+    if args.av_smoke:
+        from aetv.ac16_av_smoke import av_smoke
+        result = av_smoke(codec, output=args.av_output, source=args.av_source)
+        text = json.dumps(result, indent=2) + "\n"
+        print(text, end="")
+        if args.json:
+            args.json.write_text(text, encoding="utf-8")
+        return
     rng = np.random.default_rng(20260824)
     frames = rng.integers(
         0,
@@ -77,6 +100,7 @@ def main() -> None:
         "backend": codec.backend,
         "backend_version": codec.backend_version,
         "backend_threads": codec.cpu_threads,
+        "runtime_validation": getattr(codec, "runtime_validation", None),
         "encode_median_ms": round(statistics.median(encode) * 1000, 2),
         "decode_median_ms": round(statistics.median(decode) * 1000, 2),
         "cycle_median_ms": round(statistics.median(cycle) * 1000, 2),

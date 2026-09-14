@@ -1,0 +1,317 @@
+[
+  {
+    "case": "final-AC16-1000-join7",
+    "mode": "AC16",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 36,
+    "first_decoded_s": 10.1,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16-1001-join187",
+    "mode": "AC16",
+    "join_s": 187.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5400 Hz"
+  },
+  {
+    "case": "final-AC16-1001-join315",
+    "mode": "AC16",
+    "join_s": 315.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 9.1,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16-1001-join525",
+    "mode": "AC16",
+    "join_s": 525.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 9.1,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16-1001-join7",
+    "mode": "AC16",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 40,
+    "first_decoded_s": 6.1,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16-1003-join7",
+    "mode": "AC16",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 36,
+    "first_decoded_s": 10.1,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16-1004-join7",
+    "mode": "AC16",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 36,
+    "first_decoded_s": 9.6,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1000-join7",
+    "mode": "AC16_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 9.1,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1001-join187",
+    "mode": "AC16_AV",
+    "join_s": 187.137,
+    "input_s": 45.0,
+    "decoded": 33,
+    "first_decoded_s": 12.6,
+    "correction": "SDR received-only frequency correction: -5650 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1001-join315",
+    "mode": "AC16_AV",
+    "join_s": 315.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 9.1,
+    "correction": "SDR received-only frequency correction: -5450 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1001-join525",
+    "mode": "AC16_AV",
+    "join_s": 525.137,
+    "input_s": 45.0,
+    "decoded": 38,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1001-join7",
+    "mode": "AC16_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 34,
+    "first_decoded_s": 11.6,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1003-join7",
+    "mode": "AC16_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-AC16_AV-1004-join7",
+    "mode": "AC16_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-V7-1000-join7",
+    "mode": "V7",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.6,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V7-1001-join187",
+    "mode": "V7",
+    "join_s": 187.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 6.6,
+    "correction": "SDR received-only frequency correction: -5525 Hz"
+  },
+  {
+    "case": "final-V7-1001-join315",
+    "mode": "V7",
+    "join_s": 315.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V7-1001-join525",
+    "mode": "V7",
+    "join_s": 525.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V7-1001-join7",
+    "mode": "V7",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 34,
+    "first_decoded_s": 11.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V7-1003-join7",
+    "mode": "V7",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V7-1004-join7",
+    "mode": "V7",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V8-1000-join7",
+    "mode": "V8",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V8-1001-join187",
+    "mode": "V8",
+    "join_s": 187.137,
+    "input_s": 45.0,
+    "decoded": 40,
+    "first_decoded_s": 6.6,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-V8-1001-join315",
+    "mode": "V8",
+    "join_s": 315.137,
+    "input_s": 45.0,
+    "decoded": 38,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5500 Hz"
+  },
+  {
+    "case": "final-V8-1001-join525",
+    "mode": "V8",
+    "join_s": 525.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 9.1,
+    "correction": "SDR received-only frequency correction: -5525 Hz"
+  },
+  {
+    "case": "final-V8-1001-join7",
+    "mode": "V8",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 35,
+    "first_decoded_s": 11.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V8-1003-join7",
+    "mode": "V8",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V8-1004-join7",
+    "mode": "V8",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5475 Hz"
+  },
+  {
+    "case": "final-V8_AV-1000-join7",
+    "mode": "V8_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5550 Hz"
+  },
+  {
+    "case": "final-V8_AV-1001-join187",
+    "mode": "V8_AV",
+    "join_s": 187.137,
+    "input_s": 45.0,
+    "decoded": 34,
+    "first_decoded_s": 12.1,
+    "correction": "SDR received-only frequency correction: -5625 Hz"
+  },
+  {
+    "case": "final-V8_AV-1001-join315",
+    "mode": "V8_AV",
+    "join_s": 315.137,
+    "input_s": 45.0,
+    "decoded": 38,
+    "first_decoded_s": 8.6,
+    "correction": "SDR received-only frequency correction: -5550 Hz"
+  },
+  {
+    "case": "final-V8_AV-1001-join525",
+    "mode": "V8_AV",
+    "join_s": 525.137,
+    "input_s": 45.0,
+    "decoded": 37,
+    "first_decoded_s": 9.1,
+    "correction": "SDR received-only frequency correction: -5600 Hz"
+  },
+  {
+    "case": "final-V8_AV-1001-join7",
+    "mode": "V8_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 35,
+    "first_decoded_s": 11.1,
+    "correction": "SDR received-only frequency correction: -5550 Hz"
+  },
+  {
+    "case": "final-V8_AV-1003-join7",
+    "mode": "V8_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5550 Hz"
+  },
+  {
+    "case": "final-V8_AV-1004-join7",
+    "mode": "V8_AV",
+    "join_s": 7.137,
+    "input_s": 45.0,
+    "decoded": 39,
+    "first_decoded_s": 7.1,
+    "correction": "SDR received-only frequency correction: -5550 Hz"
+  }
+]

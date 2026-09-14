@@ -1,0 +1,898 @@
+[
+  {
+    "mode": "V8",
+    "decoded": 572,
+    "displayed": 3431,
+    "packaged": false,
+    "errors": [],
+    "portaudio_underflows": 0,
+    "audio_queue_drops": 0,
+    "av_queue_drops": 0,
+    "ring_overruns": 0,
+    "iq_overruns": 1,
+    "iq_discarded_samples": 7680000,
+    "tx_starvations": 1,
+    "source_dropped_frames": 11,
+    "raw_recorder": {
+      "queue_high_water": 1,
+      "dropped_blocks": 0,
+      "write_max_ms": 2.0292289555072784
+    },
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1409,
+        "write_max_ms": 1.0431865230202675,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 373248,
+        "write_max_ms": 0.44811610132455826,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "steady_iq_queue_max_s": 0.1,
+    "steady_rx_backlog_max_s": 0.1,
+    "rss_early_mib": 1518.787109375,
+    "rss_late_mib": 1745.544921875,
+    "phases": [
+      {
+        "phase": "strong",
+        "seconds": 165,
+        "decoded": 165,
+        "beacon_aligned": 165,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.401271087168784,
+        "cosine": {
+          "p50": 0.9706002473831177,
+          "p95": 0.973339319229126,
+          "max": 0.9741606712341309
+        },
+        "snr_db": {
+          "p50": 34.65561359332432,
+          "p95": 37.07408043618303,
+          "max": 37.449703221850385
+        },
+        "presentation_latency_s": {
+          "p50": 2.981750584207475,
+          "p95": 2.982877059839666,
+          "max": 2.9834543904289603
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 1
+      },
+      {
+        "phase": "weak",
+        "seconds": 105,
+        "decoded": 105,
+        "beacon_aligned": 105,
+        "ambiguous": 0,
+        "pooled_psnr_db": 19.243073332490994,
+        "cosine": {
+          "p50": 0.7235630750656128,
+          "p95": 0.7388717055320739,
+          "max": 0.7416971921920776
+        },
+        "snr_db": {
+          "p50": 0.6580724344798892,
+          "p95": 1.3554407678111946,
+          "max": 1.8584651663101492
+        },
+        "presentation_latency_s": {
+          "p50": 3.069799058139324,
+          "p95": 3.070816792920232,
+          "max": 3.0723355961963534
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "recovered",
+        "seconds": 55,
+        "decoded": 55,
+        "beacon_aligned": 55,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.776075323164356,
+        "cosine": {
+          "p50": 0.9707925915718079,
+          "p95": 0.9731191873550415,
+          "max": 0.9740073680877686
+        },
+        "snr_db": {
+          "p50": 33.9009836689006,
+          "p95": 37.10693274276655,
+          "max": 37.56041924627239
+        },
+        "presentation_latency_s": {
+          "p50": 3.0343944123014808,
+          "p95": 3.0351563595235347,
+          "max": 3.0355134727433324
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "overload",
+        "seconds": 20,
+        "decoded": 20,
+        "beacon_aligned": 20,
+        "ambiguous": 0,
+        "pooled_psnr_db": 20.933295557113752,
+        "cosine": {
+          "p50": 0.9669976234436035,
+          "p95": 0.9697679966688156,
+          "max": 0.9704918265342712
+        },
+        "snr_db": {
+          "p50": 28.257158882546904,
+          "p95": 37.14359818708158,
+          "max": 38.2052745962488
+        },
+        "presentation_latency_s": {
+          "p50": 3.03440964827314,
+          "p95": 3.034969748836011,
+          "max": 3.0352625297382474
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "final",
+        "seconds": 60,
+        "decoded": 60,
+        "beacon_aligned": 60,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.51491585571533,
+        "cosine": {
+          "p50": 0.9709126651287079,
+          "p95": 0.9729534924030304,
+          "max": 0.9741722941398621
+        },
+        "snr_db": {
+          "p50": 32.523847394861846,
+          "p95": 37.17198455149438,
+          "max": 37.520137412032724
+        },
+        "presentation_latency_s": {
+          "p50": 4.319324208889157,
+          "p95": 4.320183803606779,
+          "max": 4.320794102735817
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 1
+      }
+    ],
+    "audio_pitch_error_hz": null
+  },
+  {
+    "mode": "V7",
+    "decoded": 574,
+    "displayed": 6873,
+    "packaged": true,
+    "errors": [],
+    "portaudio_underflows": 0,
+    "audio_queue_drops": 0,
+    "av_queue_drops": 0,
+    "ring_overruns": 0,
+    "iq_overruns": 1,
+    "iq_discarded_samples": 7680000,
+    "tx_starvations": 1,
+    "source_dropped_frames": 12,
+    "raw_recorder": {
+      "queue_high_water": 1,
+      "dropped_blocks": 0,
+      "write_max_ms": 7.083185017108917
+    },
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1416,
+        "write_max_ms": 1.1866996064782143,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1327104,
+        "write_max_ms": 1.0543661192059517,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "steady_iq_queue_max_s": 0.0,
+    "steady_rx_backlog_max_s": 0.2,
+    "rss_early_mib": 1895.173828125,
+    "rss_late_mib": 2255.578125,
+    "phases": [
+      {
+        "phase": "strong",
+        "seconds": 165,
+        "decoded": 165,
+        "beacon_aligned": 165,
+        "ambiguous": 0,
+        "pooled_psnr_db": 22.834299250250734,
+        "cosine": {
+          "p50": 0.9645777940750122,
+          "p95": 0.9661244511604309,
+          "max": 0.9674726724624634
+        },
+        "snr_db": {
+          "p50": 37.286771393001715,
+          "p95": 37.8169868309647,
+          "max": 37.95810577829093
+        },
+        "presentation_latency_s": {
+          "p50": 3.0916924979537725,
+          "p95": 3.09238245934248,
+          "max": 3.092688356526196
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "weak",
+        "seconds": 105,
+        "decoded": 105,
+        "beacon_aligned": 105,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.191422395247198,
+        "cosine": {
+          "p50": 0.7365161776542664,
+          "p95": 0.7539774060249329,
+          "max": 0.7657669186592102
+        },
+        "snr_db": {
+          "p50": 5.924873172104418,
+          "p95": 6.529942997910169,
+          "max": 6.958082238322501
+        },
+        "presentation_latency_s": {
+          "p50": 3.306672033853829,
+          "p95": 3.3074512751773,
+          "max": 3.309074370190501
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "recovered",
+        "seconds": 55,
+        "decoded": 55,
+        "beacon_aligned": 55,
+        "ambiguous": 0,
+        "pooled_psnr_db": 23.229073894421663,
+        "cosine": {
+          "p50": 0.965071976184845,
+          "p95": 0.9658843636512756,
+          "max": 0.9662476778030396
+        },
+        "snr_db": {
+          "p50": 36.58167296996615,
+          "p95": 37.769026131321986,
+          "max": 38.00312545260839
+        },
+        "presentation_latency_s": {
+          "p50": 3.62799259275198,
+          "p95": 3.629381703864783,
+          "max": 3.631397794932127
+        },
+        "rx_backlog_max_s": 0.2,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "overload",
+        "seconds": 20,
+        "decoded": 20,
+        "beacon_aligned": 20,
+        "ambiguous": 0,
+        "pooled_psnr_db": 22.407907273923712,
+        "cosine": {
+          "p50": 0.9619459211826324,
+          "p95": 0.9645408898591995,
+          "max": 0.9661035537719727
+        },
+        "snr_db": {
+          "p50": 39.59227814957867,
+          "p95": 39.98705866787604,
+          "max": 40.09643983325162
+        },
+        "presentation_latency_s": {
+          "p50": 3.628046260215342,
+          "p95": 3.6293464500457047,
+          "max": 3.62981912586838
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "final",
+        "seconds": 60,
+        "decoded": 60,
+        "beacon_aligned": 60,
+        "ambiguous": 0,
+        "pooled_psnr_db": 22.973618697561136,
+        "cosine": {
+          "p50": 0.9648824334144592,
+          "p95": 0.9659255802631378,
+          "max": 0.9660410284996033
+        },
+        "snr_db": {
+          "p50": 34.878254254939975,
+          "p95": 37.655602785845204,
+          "max": 37.814853514559246
+        },
+        "presentation_latency_s": {
+          "p50": 4.563274887390435,
+          "p95": 4.563980372622609,
+          "max": 4.564380096271634
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      }
+    ],
+    "audio_pitch_error_hz": null
+  },
+  {
+    "mode": "AC16",
+    "decoded": 568,
+    "displayed": 5632,
+    "packaged": true,
+    "errors": [],
+    "portaudio_underflows": 0,
+    "audio_queue_drops": 0,
+    "av_queue_drops": 0,
+    "ring_overruns": 0,
+    "iq_overruns": 1,
+    "iq_discarded_samples": 7680000,
+    "tx_starvations": 1,
+    "source_dropped_frames": 11,
+    "raw_recorder": {
+      "queue_high_water": 1,
+      "dropped_blocks": 0,
+      "write_max_ms": 3.37784830480814
+    },
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1412,
+        "write_max_ms": 1.7920564860105515,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1105920,
+        "write_max_ms": 2.192332409322262,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "steady_iq_queue_max_s": 0.1,
+    "steady_rx_backlog_max_s": 7.5,
+    "rss_early_mib": 2725.49609375,
+    "rss_late_mib": 3162.19140625,
+    "phases": [
+      {
+        "phase": "strong",
+        "seconds": 165,
+        "decoded": 165,
+        "beacon_aligned": 165,
+        "ambiguous": 0,
+        "pooled_psnr_db": 23.93628468950213,
+        "cosine": {
+          "p50": 0.9584972858428955,
+          "p95": 0.9596581935882569,
+          "max": 0.9602762460708618
+        },
+        "snr_db": {
+          "p50": 36.191430815306184,
+          "p95": 36.6574377179798,
+          "max": 36.71493597974766
+        },
+        "presentation_latency_s": {
+          "p50": 3.3291031178086996,
+          "p95": 3.3295681084971873,
+          "max": 3.331289691850543
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 1
+      },
+      {
+        "phase": "weak",
+        "seconds": 105,
+        "decoded": 105,
+        "beacon_aligned": 105,
+        "ambiguous": 0,
+        "pooled_psnr_db": 22.67226746537184,
+        "cosine": {
+          "p50": 0.8547844290733337,
+          "p95": 0.8595234632492066,
+          "max": 0.86116623878479
+        },
+        "snr_db": {
+          "p50": 12.532072652237066,
+          "p95": 12.833205444213036,
+          "max": 12.946183013051948
+        },
+        "presentation_latency_s": {
+          "p50": 3.329175354912877,
+          "p95": 3.465719464421272,
+          "max": 3.467918301001191
+        },
+        "rx_backlog_max_s": 0.3,
+        "iq_queue_max": 1
+      },
+      {
+        "phase": "recovered",
+        "seconds": 55,
+        "decoded": 59,
+        "beacon_aligned": 52,
+        "ambiguous": 0,
+        "pooled_psnr_db": 24.188691937026384,
+        "cosine": {
+          "p50": 0.9587040543556213,
+          "p95": 0.9610333800315857,
+          "max": 0.9617519378662109
+        },
+        "snr_db": {
+          "p50": 35.08082626631493,
+          "p95": 36.59071128343846,
+          "max": 36.65153296935593
+        },
+        "presentation_latency_s": {
+          "p50": 6.190461781807244,
+          "p95": 6.191351384203881,
+          "max": 10.691114915534854
+        },
+        "rx_backlog_max_s": 7.5,
+        "iq_queue_max": 1
+      },
+      {
+        "phase": "overload",
+        "seconds": 20,
+        "decoded": 20,
+        "beacon_aligned": 20,
+        "ambiguous": 0,
+        "pooled_psnr_db": 23.31167952236823,
+        "cosine": {
+          "p50": 0.954057514667511,
+          "p95": 0.9570949733257293,
+          "max": 0.9572649598121643
+        },
+        "snr_db": {
+          "p50": 37.15663510946625,
+          "p95": 37.64806324254015,
+          "max": 37.69193058409193
+        },
+        "presentation_latency_s": {
+          "p50": 6.190534669905901,
+          "p95": 6.19120159340091,
+          "max": 6.191422522068024
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "final",
+        "seconds": 60,
+        "decoded": 60,
+        "beacon_aligned": 60,
+        "ambiguous": 0,
+        "pooled_psnr_db": 24.07055959716714,
+        "cosine": {
+          "p50": 0.9588038921356201,
+          "p95": 0.9597984254360199,
+          "max": 0.960257351398468
+        },
+        "snr_db": {
+          "p50": 36.41666689083194,
+          "p95": 36.68255601383646,
+          "max": 36.754859142838
+        },
+        "presentation_latency_s": {
+          "p50": 3.841623703017831,
+          "p95": 3.8419283335562797,
+          "max": 3.843711025081575
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      }
+    ],
+    "audio_pitch_error_hz": null
+  },
+  {
+    "mode": "V8_AV",
+    "decoded": 572,
+    "displayed": 3425,
+    "packaged": false,
+    "errors": [],
+    "portaudio_underflows": 0,
+    "audio_queue_drops": 0,
+    "av_queue_drops": 0,
+    "ring_overruns": 0,
+    "iq_overruns": 1,
+    "iq_discarded_samples": 7680000,
+    "tx_starvations": 1,
+    "source_dropped_frames": 17,
+    "raw_recorder": {
+      "queue_high_water": 1,
+      "dropped_blocks": 0,
+      "write_max_ms": 3.8009965792298317
+    },
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1587,
+        "write_max_ms": 0.24109985679388046,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 110,
+        "write_max_ms": 0.26343390345573425,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 373248,
+        "write_max_ms": 0.43564289808273315,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 32000,
+        "write_max_ms": 0.33868756145238876,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "steady_iq_queue_max_s": 0.0,
+    "steady_rx_backlog_max_s": 0.1,
+    "rss_early_mib": 1612.099609375,
+    "rss_late_mib": 1838.05078125,
+    "phases": [
+      {
+        "phase": "strong",
+        "seconds": 165,
+        "decoded": 165,
+        "beacon_aligned": 165,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.399727763405203,
+        "cosine": {
+          "p50": 0.9705587029457092,
+          "p95": 0.9728384733200073,
+          "max": 0.9740918278694153
+        },
+        "snr_db": {
+          "p50": 31.522295982443552,
+          "p95": 35.61942892586664,
+          "max": 36.14576835023214
+        },
+        "presentation_latency_s": {
+          "p50": 3.9127609683200717,
+          "p95": 3.9137321835383774,
+          "max": 3.914268720895052
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "weak",
+        "seconds": 105,
+        "decoded": 105,
+        "beacon_aligned": 93,
+        "ambiguous": 0,
+        "pooled_psnr_db": 19.411004021196998,
+        "cosine": {
+          "p50": 0.7338818311691284,
+          "p95": 0.7497470617294312,
+          "max": 0.7584030032157898
+        },
+        "snr_db": {
+          "p50": 1.1107083194469591,
+          "p95": 1.9477281755006133,
+          "max": 2.64296537809132
+        },
+        "presentation_latency_s": {
+          "p50": 3.913040245883167,
+          "p95": 3.9137281459756195,
+          "max": 3.914154422469437
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "recovered",
+        "seconds": 55,
+        "decoded": 55,
+        "beacon_aligned": 55,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.76939490882857,
+        "cosine": {
+          "p50": 0.9699963927268982,
+          "p95": 0.972736257314682,
+          "max": 0.9738649129867554
+        },
+        "snr_db": {
+          "p50": 33.58737844766134,
+          "p95": 35.81846430188058,
+          "max": 36.59220152679006
+        },
+        "presentation_latency_s": {
+          "p50": 3.907245290465653,
+          "p95": 3.9079616501927377,
+          "max": 3.9082486536353827
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "overload",
+        "seconds": 20,
+        "decoded": 20,
+        "beacon_aligned": 20,
+        "ambiguous": 0,
+        "pooled_psnr_db": 20.92477281279512,
+        "cosine": {
+          "p50": 0.966057538986206,
+          "p95": 0.9680865794420243,
+          "max": 0.9703885316848755
+        },
+        "snr_db": {
+          "p50": 27.391980243068055,
+          "p95": 37.18797563711005,
+          "max": 37.539109729290836
+        },
+        "presentation_latency_s": {
+          "p50": 3.90734577877447,
+          "p95": 3.9079759794753044,
+          "max": 3.9081428023055196
+        },
+        "rx_backlog_max_s": 0.1,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "final",
+        "seconds": 60,
+        "decoded": 60,
+        "beacon_aligned": 60,
+        "ambiguous": 0,
+        "pooled_psnr_db": 21.516726029543523,
+        "cosine": {
+          "p50": 0.9705706238746643,
+          "p95": 0.9730610907077789,
+          "max": 0.9742622375488281
+        },
+        "snr_db": {
+          "p50": 28.13112227203414,
+          "p95": 33.28504266791392,
+          "max": 34.49084583795428
+        },
+        "presentation_latency_s": {
+          "p50": 5.302830433472991,
+          "p95": 5.303574875043705,
+          "max": 5.304578202776611
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      }
+    ],
+    "audio_pitch_error_hz": {
+      "p95": 0.15664062499999964,
+      "max": 0.26171875
+    }
+  },
+  {
+    "mode": "AC16_AV",
+    "decoded": 565,
+    "displayed": 5638,
+    "packaged": false,
+    "errors": [],
+    "portaudio_underflows": 0,
+    "audio_queue_drops": 0,
+    "av_queue_drops": 0,
+    "ring_overruns": 0,
+    "iq_overruns": 1,
+    "iq_discarded_samples": 7680000,
+    "tx_starvations": 1,
+    "source_dropped_frames": 20,
+    "raw_recorder": {
+      "queue_high_water": 1,
+      "dropped_blocks": 0,
+      "write_max_ms": 3.9584776386618614
+    },
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1602,
+        "write_max_ms": 1.5799505636096,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 110,
+        "write_max_ms": 0.29442179948091507,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1105920,
+        "write_max_ms": 4.858408123254776,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 32000,
+        "write_max_ms": 3.298756666481495,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "steady_iq_queue_max_s": 0.0,
+    "steady_rx_backlog_max_s": 0.5,
+    "rss_early_mib": 2807.41015625,
+    "rss_late_mib": 3233.7890625,
+    "phases": [
+      {
+        "phase": "strong",
+        "seconds": 165,
+        "decoded": 165,
+        "beacon_aligned": 165,
+        "ambiguous": 0,
+        "pooled_psnr_db": 23.94211629389538,
+        "cosine": {
+          "p50": 0.9588612914085388,
+          "p95": 0.9598360061645508,
+          "max": 0.960178017616272
+        },
+        "snr_db": {
+          "p50": 35.76906669373812,
+          "p95": 36.030392853159235,
+          "max": 36.09023512408621
+        },
+        "presentation_latency_s": {
+          "p50": 4.226821529213339,
+          "p95": 4.228811395633966,
+          "max": 4.2307088458910584
+        },
+        "rx_backlog_max_s": 0.2,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "weak",
+        "seconds": 105,
+        "decoded": 105,
+        "beacon_aligned": 105,
+        "ambiguous": 0,
+        "pooled_psnr_db": 22.016787639187655,
+        "cosine": {
+          "p50": 0.7914385795593262,
+          "p95": 0.7995699882507324,
+          "max": 0.8010706305503845
+        },
+        "snr_db": {
+          "p50": 10.198741299106317,
+          "p95": 10.571546926277074,
+          "max": 10.765379896727454
+        },
+        "presentation_latency_s": {
+          "p50": 4.519038522616029,
+          "p95": 4.519936690106988,
+          "max": 4.53210957814008
+        },
+        "rx_backlog_max_s": 0.5,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "recovered",
+        "seconds": 55,
+        "decoded": 55,
+        "beacon_aligned": 55,
+        "ambiguous": 0,
+        "pooled_psnr_db": 24.271963600303742,
+        "cosine": {
+          "p50": 0.9586300253868103,
+          "p95": 0.9600683748722076,
+          "max": 0.9610702991485596
+        },
+        "snr_db": {
+          "p50": 35.47073170470552,
+          "p95": 36.0240828727819,
+          "max": 36.062764100679836
+        },
+        "presentation_latency_s": {
+          "p50": 4.038126191589981,
+          "p95": 4.038811658741906,
+          "max": 4.040109919384122
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "overload",
+        "seconds": 20,
+        "decoded": 20,
+        "beacon_aligned": 20,
+        "ambiguous": 0,
+        "pooled_psnr_db": 23.31746182243649,
+        "cosine": {
+          "p50": 0.9547028243541718,
+          "p95": 0.9568733394145965,
+          "max": 0.9570587277412415
+        },
+        "snr_db": {
+          "p50": 37.23406342015058,
+          "p95": 37.473209902621434,
+          "max": 37.57522344929596
+        },
+        "presentation_latency_s": {
+          "p50": 4.038225688505918,
+          "p95": 4.038846948696301,
+          "max": 4.040664202533662
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      },
+      {
+        "phase": "final",
+        "seconds": 60,
+        "decoded": 60,
+        "beacon_aligned": 60,
+        "ambiguous": 0,
+        "pooled_psnr_db": 24.075323178966105,
+        "cosine": {
+          "p50": 0.959052324295044,
+          "p95": 0.9604228794574737,
+          "max": 0.9609692692756653
+        },
+        "snr_db": {
+          "p50": 33.854123762021835,
+          "p95": 35.46250949395072,
+          "max": 35.655587109430044
+        },
+        "presentation_latency_s": {
+          "p50": 4.551164044067264,
+          "p95": 4.551631674729288,
+          "max": 4.5520672602579
+        },
+        "rx_backlog_max_s": 0.0,
+        "iq_queue_max": 0
+      }
+    ],
+    "audio_pitch_error_hz": {
+      "p95": 0.26171875,
+      "max": 0.37109375
+    }
+  }
+]

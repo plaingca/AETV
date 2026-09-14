@@ -102,7 +102,7 @@ class ModelManagerDialog(QDialog):
         intro = QLabel(
             (
                 "AETV needs a video model before Send and Receive are available. "
-                "Choose one or both checksum-verified release models to download."
+                "Choose the checksum-verified models to download."
                 if first_run
                 else "Install and verify AETV's checksum-pinned release models."
             )

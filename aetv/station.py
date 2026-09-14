@@ -31,12 +31,16 @@ from .audio_io import (
     resample_ratio,
 )
 from .analog_av import (
-    COMPOSITE_FS,
+    AC16CompositeSeparator,
+    ProgramAudio,
+    composite_profile,
+    waveform_sample_rate,
     NATIVE_AETV_FS,
     StreamingCompositeSeparator,
     mix_composite_chunk,
 )
 from .cat import CatConfig, NullPtt, open_ptt
+from .av_playout import PairedAVPlayout
 from .codec import AETVCodec, resolve_checkpoint
 from .clip_cache import prepared_clip_path, load_prepared_clip, save_prepared_clip
 from .config import AETV_MODES, AETVModeSpec
@@ -50,6 +54,7 @@ from .modem import (
     modulate_gop_stream,
 )
 from .ringbuffer import RingBuffer
+from .recording import BufferedWriter
 from .settings import StationSettings
 from .source import (
     PreparedClip,
@@ -87,20 +92,21 @@ class _PcmWaveRecorder:
         self._wave.setnchannels(self.channels)
         self._wave.setsampwidth(2)
         self._wave.setframerate(self.rate)
+        self._writer = BufferedWriter(self._wave.writeframesraw, self._wave.close)
+        self.health = self._writer.health
 
     def write(self, values: np.ndarray) -> None:
         array = np.asarray(values)
         if self.channels == 1:
             array = array.reshape(-1)
-            self.samples += len(array)
         else:
             array = array.reshape(-1, self.channels)
-            self.samples += len(array)
         pcm = np.rint(np.clip(array, -1.0, 1.0) * 32767.0).astype("<i2")
-        self._wave.writeframesraw(pcm.tobytes())
+        if self._writer.write(pcm.tobytes()):
+            self.samples += len(array)
 
     def close(self) -> None:
-        self._wave.close()
+        self._writer.close()
 
 
 class _LiveMicrophoneBuffer:
@@ -221,17 +227,20 @@ class _RecordingSink:
 class _JsonlRecorder:
     def __init__(self, path: Path):
         self.path = Path(path)
-        self._file = self.path.open("w", encoding="utf-8")
-        self._lock = threading.Lock()
+        self._file = self.path.open("wb")
 
-    def write(self, event: dict) -> None:
-        with self._lock:
-            self._file.write(json.dumps(event, allow_nan=True, sort_keys=True) + "\n")
+        def write(data):
+            self._file.write(data)
             self._file.flush()
 
+        self._writer = BufferedWriter(write, self._file.close, max_bytes=1024 * 1024)
+        self.health = self._writer.health
+
+    def write(self, event: dict) -> None:
+        self._writer.write((json.dumps(event, allow_nan=True, sort_keys=True) + "\n").encode("utf-8"))
+
     def close(self) -> None:
-        with self._lock:
-            self._file.close()
+        self._writer.close()
 
 
 class _KiwiIqRecorder:
@@ -321,6 +330,7 @@ class Station:
         self.codec: AETVCodec | None = None
         self.codec_lock = threading.Lock()
         self.loopback_audio: np.ndarray | None = None
+        self.loopback_video: np.ndarray | None = None
         self.loopback_audio_rate = NATIVE_AETV_FS
         self._on_log = lambda _msg: None
 
@@ -407,6 +417,7 @@ class TxEngine:
         self.last_wav: np.ndarray | None = None
         self.last_frames: np.ndarray | None = None
         self.gop_timings: list[dict] = []
+        self.sdr_health = {}
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -476,11 +487,14 @@ class TxEngine:
     def transmit(self, source: str | ScreenCaptureSpec | PreparedClip) -> bool:
         self._cancel.clear()
         self.gop_timings = []
+        self.sdr_health = {}
         self.station.loopback_audio = None
+        self.station.loopback_video = None
         settings = self.station.settings
         tx_recorder: _PcmWaveRecorder | None = None
         tx_metadata: dict = {}
         tx_prefix: Path | None = None
+        self._loopback_playback = None
         try:
             codec = self.station.require_codec()
             n_gops = settings.gops
@@ -582,7 +596,7 @@ class TxEngine:
                     # fader only has meaning when a clip track exists.
                     clip_audio = None
                 chunks = self._composite_chunks(chunks, clip_audio, n_gops)
-                transmit_rate = COMPOSITE_FS
+                transmit_rate = waveform_sample_rate(settings)
             else:
                 transmit_rate = codec.mode.geometry.fs
             channel_profile = settings.tx_channel_profile
@@ -638,18 +652,41 @@ class TxEngine:
                     yield audio
 
             if channel_profile != "radio":
+                if settings.waveform_mode == "analog_av":
+                    self._loopback_playback = AudioPlaybackStream(NATIVE_AETV_FS, settings.audio_playback_output or None)
                 return self._emulated_send_stream(
                     leveled_chunks(), transmit_rate, n_gops, codec,
                     channel_profile, tx_recorder,
                 )
+            if settings.tx_backend in {"pluto", "hackrf"}:
+                from .sdr import transmit_pluto
+                from .hackrf import transmit_hackrf
+                transport = transmit_hackrf if settings.tx_backend == "hackrf" else transmit_pluto
+                label = "HackRF" if settings.tx_backend == "hackrf" else "Pluto"
+                self._set(TxPhase.ENCODING, 0.0, f"Preparing {label} transmit")
+                complete = transport(
+                    leveled_chunks(), transmit_rate, settings, self._cancel,
+                    lambda progress: self._set(TxPhase.SENDING, progress, f"{label} transmitting"),
+                    max_seconds=n_gops + (1.65 if settings.waveform_mode == "analog_av" else 0.65),
+                    **({"diagnostics": self.sdr_health} if settings.tx_backend == "pluto" else {}),
+                )
+                self._set(TxPhase.DONE if complete else TxPhase.CANCELLED,
+                          1.0 if complete else self.state.progress,
+                          f"{label} off · sent" if complete else f"{label} off · cancelled")
+                return complete
             return self._keyed_send_stream(leveled_chunks(), transmit_rate, n_gops)
         except Exception as error:
             self._on_error(str(error))
             self._set(TxPhase.FAILED, self.state.progress, str(error))
             return False
         finally:
+            if self._loopback_playback is not None:
+                self._loopback_playback.close()
+                self._loopback_playback = None
             if tx_recorder is not None:
                 tx_recorder.close()
+                tx_metadata["sdr_health"] = self.sdr_health
+                tx_metadata["recording_health"] = dict(tx_recorder.health)
                 tx_metadata["samples"] = tx_recorder.samples
                 tx_metadata["duration_s"] = tx_recorder.samples / tx_recorder.rate
                 tx_metadata["stopped_at"] = time.time()
@@ -664,20 +701,25 @@ class TxEngine:
         video_chunks,
         clip_audio: np.ndarray | None,
         n_gops: int,
+        *,
+        capture_microphone: bool = True,
     ):
         """Add delayed microphone/program audio while polling the live faders."""
+        profile = composite_profile(self.station.settings.mode)
+        mix_options = {"profile": profile} if self.station.settings.mode == "AC16" else {}
         delay = np.zeros(NATIVE_AETV_FS, dtype=np.float32)
         microphone = _LiveMicrophoneBuffer(NATIVE_AETV_FS)
         input_stream = None
-        try:
-            input_stream, _native_rate = open_input_stream(
-                self.station.settings.microphone_input or None,
-                microphone,
-                NATIVE_AETV_FS,
-                on_error=lambda message: self.station.log(f"TX microphone: {message}"),
-            )
-        except Exception as error:
-            self.station.log(f"TX microphone unavailable; using clip audio only: {error}")
+        if capture_microphone:
+            try:
+                input_stream, _native_rate = open_input_stream(
+                    self.station.settings.microphone_input or None,
+                    microphone,
+                    NATIVE_AETV_FS,
+                    on_error=lambda message: self.station.log(f"TX microphone: {message}"),
+                )
+            except Exception as error:
+                self.station.log(f"TX microphone unavailable; using clip audio only: {error}")
         try:
             for index, video in enumerate(video_chunks):
                 settings = self.station.settings
@@ -738,7 +780,7 @@ class TxEngine:
                         )
 
                 native_video = np.asarray(video, dtype=np.float32).reshape(-1)
-                source_voice = np.zeros(len(native_video), dtype=np.float32)
+                source_voice = np.zeros(round(len(native_video) * NATIVE_AETV_FS / profile.video_fs), dtype=np.float32)
                 trailing = int(round(0.1 * NATIVE_AETV_FS)) if index == n_gops - 1 else 0
                 start = max(0, len(source_voice) - trailing - NATIVE_AETV_FS)
                 take = min(NATIVE_AETV_FS, len(source_voice) - start)
@@ -750,6 +792,7 @@ class TxEngine:
                     native_video,
                     delayed,
                     video_power=float(settings.av_video_power),
+                    **mix_options,
                 )
         finally:
             if input_stream is not None:
@@ -757,11 +800,12 @@ class TxEngine:
                 input_stream.close()
 
         # Drain the one-GOP voice delay after the final video payload.
-        if delay.size and np.max(np.abs(delay)) > 1e-8:
+        if delay.size and (self.station.settings.mode == "AC16" or np.max(np.abs(delay)) > 1e-8):
             yield mix_composite_chunk(
-                np.zeros(len(delay), dtype=np.float32),
+                np.zeros(round(len(delay) * profile.video_fs / NATIVE_AETV_FS), dtype=np.float32),
                 delay,
                 video_power=float(self.station.settings.av_video_power),
+                **mix_options,
             )
 
     def _report_transmit_output_levels(self, audio: np.ndarray) -> None:
@@ -798,12 +842,59 @@ class TxEngine:
         block_samples = max(1, fs // 10)
         stream_started: float | None = None
         delivered_samples = 0
-        separator = StreamingCompositeSeparator() if fs == COMPOSITE_FS else None
+        composite = self.station.settings.waveform_mode == "analog_av"
+        av_profile = composite_profile(codec.mode.name) if composite else None
+        separator = (AC16CompositeSeparator() if codec.mode.name == "AC16"
+                     else StreamingCompositeSeparator()) if composite else None
         loopback_voice: list[np.ndarray] = []
         video_resampler = (
-            StreamResampler(*resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS))
+            StreamResampler(*resample_ratio(fs, av_profile.video_fs))
             if separator is not None else None
         )
+        av_program = ProgramAudio(codec.mode.name) if composite else None
+        voice_resampler = StreamResampler(*resample_ratio(fs, NATIVE_AETV_FS)) if av_program is not None else None
+        paired_voice = []
+        paired_video = []
+        av_playout = PairedAVPlayout() if av_program is not None else None
+        playback = getattr(self, "_loopback_playback", None)
+        def drain_playout():
+            item = av_playout.pop() if av_playout is not None else None
+            if item is not None:
+                decoded, voice, state = item
+                if playback is not None:
+                    playback.write(voice, on_start=lambda: self._on_loopback(decoded, state))
+                else:
+                    self._on_loopback(decoded, state)
+
+        def publish(decoded, result, voice=None):
+            nonlocal decoded_count
+            decoded_count += 1
+            if voice is not None:
+                paired_voice.append(voice)
+                paired_video.append(decoded)
+            state = RxState(
+                listening=False,
+                source="emulator",
+                gops=decoded_count,
+                frames=decoded_count * codec.mode.gop_frames,
+                freq_offset=result.freq_offset,
+                sync_metric=result.sync_metric,
+                snr_db=result.snr_db,
+                callsign=result.callsign,
+                message=(
+                    f"{profile.label} loopback  {decoded_count}/{n_gops} GOP  "
+                    f"SNR {result.snr_db:.1f} dB"
+                ),
+            )
+            if av_playout is not None:
+                av_playout.push((decoded, voice, state))
+            else:
+                self._on_loopback(decoded, state)
+            self._set(
+                TxPhase.SENDING,
+                decoded_count / max(1, n_gops),
+                state.message,
+            )
         for clean in chunks:
             if self._cancel.is_set():
                 self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
@@ -836,40 +927,33 @@ class TxEngine:
                 if separator is not None:
                     voice_12k, native_12k = separator.process(modem_audio)
                     loopback_voice.append(voice_12k)
+                    if av_program is not None:
+                        av_program.voice.write(voice_resampler(voice_12k))
                     modem_audio = video_resampler(native_12k)
                 results = demodulator.feed(modem_audio)
                 for result in results:
                     for latents, weights in zip(result.gops_latents, result.gops_weights):
                         with self.station.codec_lock:
                             decoded = codec.decode_gop(latents, weights)
-                        decoded_count += 1
-                        state = RxState(
-                            listening=False,
-                            source="emulator",
-                            gops=decoded_count,
-                            frames=decoded_count * codec.mode.gop_frames,
-                            freq_offset=result.freq_offset,
-                            sync_metric=result.sync_metric,
-                            snr_db=result.snr_db,
-                            callsign=result.callsign,
-                            message=(
-                                f"{profile.label} loopback  {decoded_count}/{n_gops} GOP  "
-                                f"SNR {result.snr_db:.1f} dB"
-                            ),
-                        )
-                        self._on_loopback(decoded, state)
-                        self._set(
-                            TxPhase.SENDING,
-                            decoded_count / max(1, n_gops),
-                            state.message,
-                        )
+                        if av_program is not None:
+                            av_program.add(result, (decoded, result))
+                        else:
+                            publish(decoded, result)
+                if av_program is not None:
+                    for (decoded, result), voice in av_program.ready():
+                        publish(decoded, result, voice)
+                    drain_playout()
         if transmitted_chunks == 0:
             raise SyncError("modulator produced no loopback audio")
         if decoded_count == 0:
             raise SyncError(f"{profile.label} loopback recovered no GOPs")
-        if loopback_voice:
+        if paired_voice:
+            self.station.loopback_audio = np.concatenate(paired_voice)
+            self.station.loopback_video = np.concatenate(paired_video)
+            self.station.loopback_audio_rate = NATIVE_AETV_FS
+        elif loopback_voice:
             voice = resample_audio(
-                np.concatenate(loopback_voice), COMPOSITE_FS, NATIVE_AETV_FS
+                np.concatenate(loopback_voice), fs, NATIVE_AETV_FS
             )
             wanted = n_gops * NATIVE_AETV_FS
             # Continuous framing adds 0.55 s acquisition before the first
@@ -883,6 +967,11 @@ class TxEngine:
                 voice = np.pad(voice, (0, wanted - len(voice)))
             self.station.loopback_audio = voice.astype(np.float32, copy=False)
             self.station.loopback_audio_rate = NATIVE_AETV_FS
+        while av_playout is not None and len(av_playout):
+            if self._cancel.wait(0.02):
+                self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+                return False
+            drain_playout()
         self._set(
             TxPhase.DONE,
             1.0,
@@ -1061,7 +1150,7 @@ class TxEngine:
         ):
             tx_geometry = AETV_MODES[settings.mode].geometry
             filter_low = 0 if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[0])
-            filter_high = 5000 if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[1])
+            filter_high = int(composite_profile(settings.mode).bandwidth_hz) if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[1])
             self.station.log(
                 f"Flex {settings.mode} TX mask: "
                 f"{filter_low}-{filter_high} Hz"
@@ -1390,6 +1479,7 @@ class RxEngine:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._stream = None
+        self._sdr = None
         self._kiwi: KiwiCapture | None = None
         self._flex: FlexVitaSession | None = None
         self.ring: RingBuffer | None = None
@@ -1409,6 +1499,10 @@ class RxEngine:
         self._composite_voice_resampler: StreamResampler | None = None
         self._audio_playback: AudioPlaybackStream | None = None
         self._voice_history: RingBuffer | None = None
+        self._av_program: ProgramAudio | None = None
+        self._av_playout: PairedAVPlayout | None = None
+        self.health = {}
+        self._last_health = 0.0
 
     @property
     def listening(self) -> bool:
@@ -1421,24 +1515,30 @@ class RxEngine:
         settings = self.station.settings
         self._stop.clear()
         self._shown_gops = 0
+        self.health = dict(ring_overruns=0, source_discontinuities=0, rx_backlog_max_s=0.,
+                           demod_max_ms=0., decode_max_ms=0., audio_dropped=0)
+        self._last_health = 0.0
         self.last_video = None
         self.last_audio = None
         self._last_result = None
         composite = settings.waveform_mode == "analog_av"
-        capture_rate = COMPOSITE_FS if composite else codec.mode.geometry.fs
+        capture_rate = waveform_sample_rate(settings)
         self.ring = RingBuffer(settings.buffer_seconds, capture_rate)
         if composite:
-            self._composite_separator = StreamingCompositeSeparator()
+            self._composite_separator = (AC16CompositeSeparator() if settings.mode == "AC16"
+                                         else StreamingCompositeSeparator())
             self._composite_video_resampler = StreamResampler(
-                *resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS)
+                *resample_ratio(capture_rate, codec.mode.geometry.fs)
             )
             self._composite_voice_resampler = StreamResampler(
-                *resample_ratio(COMPOSITE_FS, NATIVE_AETV_FS)
+                *resample_ratio(capture_rate, NATIVE_AETV_FS)
             )
             self._audio_playback = AudioPlaybackStream(
                 NATIVE_AETV_FS, settings.audio_playback_output or None
             )
             self._voice_history = RingBuffer(4.0, NATIVE_AETV_FS)
+            self._av_program = ProgramAudio(settings.mode)
+            self._av_playout = PairedAVPlayout()
         if settings.debug_capture:
             prefix = _debug_prefix(settings, f"rx_{settings.rx_source}")
             self._debug_log = _JsonlRecorder(prefix.with_suffix(".modem.jsonl"))
@@ -1457,20 +1557,46 @@ class RxEngine:
                     },
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
-            elif settings.rx_source == "soundcard":
+            elif settings.rx_source in {"soundcard", "pluto", "rtlsdr", "hackrf"}:
                 self._soundcard_recorder = _PcmWaveRecorder(
                     prefix.with_suffix(".audio.wav"), capture_rate
                 )
                 self.station.log(
-                    f"RX soundcard debug: {self._soundcard_recorder.path}"
+                    f"RX {settings.rx_source} audio debug: {self._soundcard_recorder.path}"
                 )
         self._stream_decoder = self._new_demodulator(codec.mode)
         self._source_discontinuity.clear()
         self._read_cursor = 0
         self._on_ring(self.ring)
-        self.state = RxState(listening=True, source=settings.rx_source, message="starting")
+        self.state = RxState(
+            listening=True, source=settings.rx_source,
+            message=f"Listening; searching for {codec.mode.name} synchronization",
+        )
         self._on_state(self.state)
-        if settings.rx_source == "kiwi":
+        self._record_modem_debug({
+            "event": "rx_started", "time": time.time(),
+            "mode": codec.mode.name, "source": settings.rx_source,
+            "sample_rate": capture_rate,
+            "frequency_mhz": settings.sdr_frequency_mhz,
+            "auto_frequency_correction": settings.sdr_auto_correct,
+            "manual_frequency_correction_hz": settings.sdr_rx_correction_hz,
+        })
+        if settings.rx_source in {"pluto", "rtlsdr", "hackrf"}:
+            from .sdr import SDRCapture
+            sink = (
+                _RecordingSink(self.ring, self._soundcard_recorder)
+                if self._soundcard_recorder is not None else self.ring
+            )
+            self._sdr = SDRCapture(settings, codec.mode, sink,
+                                   on_error=self._on_error, on_status=self._on_sdr_status,
+                                   on_discontinuity=self._source_discontinuity.set)
+            try:
+                self._sdr.start()
+            except Exception:
+                self.stop()
+                raise
+            self._on_ring(self._sdr.preview)
+        elif settings.rx_source == "kiwi":
             self._kiwi = KiwiCapture(
                 host=settings.kiwi_host,
                 dial_mhz=settings.kiwi_dial_mhz,
@@ -1492,7 +1618,7 @@ class RxEngine:
                 mode=settings.require_mode or "DIGU",
                 power=settings.flex_power,
                 filter_low=0 if composite else int(codec.mode.geometry.tx_bandpass[0]),
-                filter_high=5000 if composite else int(codec.mode.geometry.tx_bandpass[1]),
+                filter_high=int(composite_profile(settings.mode).bandwidth_hz) if composite else int(codec.mode.geometry.tx_bandpass[1]),
             )
             if capture_rate == 24000:
                 write_flex = self.ring.write
@@ -1527,6 +1653,12 @@ class RxEngine:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._sdr is not None:
+            try:
+                self._sdr.stop()
+            except Exception as error:
+                self._on_error(str(error))
+            self._sdr = None
         if self._kiwi is not None:
             self._kiwi.stop()
             self._kiwi = None
@@ -1554,6 +1686,8 @@ class RxEngine:
         self._composite_video_resampler = None
         self._composite_voice_resampler = None
         self._voice_history = None
+        self._av_program = None
+        self._av_playout = None
         if self.station.settings.autosave and self.last_video is not None and self._last_result is not None:
             self._autosave(self.last_video, self._last_result)
         self.ring = None
@@ -1575,6 +1709,12 @@ class RxEngine:
         self.state.source = "kiwi"
         self._on_state(self.state)
 
+    def _on_sdr_status(self, message: str) -> None:
+        self.station.log(message)
+        self._record_modem_debug({
+            "event": "sdr_status", "time": time.time(), "message": message,
+        })
+
     def _record_kiwi_iq(self, iq: np.ndarray, rate: float, sequence: int) -> None:
         if self._iq_recorder is not None:
             self._iq_recorder.write(iq, rate, sequence)
@@ -1593,6 +1733,22 @@ class RxEngine:
     def _record_modem_debug(self, event: dict) -> None:
         if self._debug_log is not None:
             self._debug_log.write(event)
+        kind = event.get("event")
+        if not self.state.listening or (self._shown_gops and kind != "tracking_phase_pending"):
+            return
+        message = {
+            "tracking_phase_pending": "Rechecking video boundary after a sample discontinuity",
+            "preamble_candidate": "Checking signal framing",
+            "candidate_rejected": "Receiving samples; searching for synchronization",
+            "blind_search_started": "Searching for a matching station beacon",
+            "blind_candidate_rejected": (
+                f"Searching for synchronization: {event.get('reason', '')}"
+            ),
+            "gop_accepted": "Signal synchronized; decoding first video GOP",
+        }.get(kind)
+        if message and message != self.state.message:
+            self.state.message = message
+            self._on_state(self.state)
 
     def _new_demodulator(self, mode: AETVModeSpec) -> StreamingDemodulator:
         return StreamingDemodulator(
@@ -1605,7 +1761,8 @@ class RxEngine:
             # Kiwi already has an exact-rate I/Q resampler upstream. Both
             # sources still need guarded correction of waveform timing jumps.
             timing_tracking=self.station.settings.rx_source == "soundcard",
-            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard"},
+            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard", "pluto", "rtlsdr", "hackrf"},
+            verify_gap_phase=self.station.settings.rx_source in {"kiwi", "pluto", "rtlsdr", "hackrf"},
         )
 
     def _loop(self) -> None:
@@ -1619,9 +1776,19 @@ class RxEngine:
             ring = self.ring
             if ring is None:
                 break
+            self._report_buffer_health()
             if self._source_discontinuity.is_set():
+                self.health["source_discontinuities"] += 1
                 self._source_discontinuity.clear()
                 self._stream_decoder = self._new_demodulator(codec.mode)
+                if self._av_program is not None:
+                    self._av_program = ProgramAudio(codec.mode.name)
+                    self._av_playout.clear()
+                    self._composite_separator = (AC16CompositeSeparator() if codec.mode.name == "AC16"
+                                                 else StreamingCompositeSeparator())
+                    capture_rate = waveform_sample_rate(self.station.settings)
+                    self._composite_video_resampler = StreamResampler(*resample_ratio(capture_rate, codec.mode.geometry.fs))
+                    self._composite_voice_resampler = StreamResampler(*resample_ratio(capture_rate, NATIVE_AETV_FS))
                 # Drop every sample written before the reset. The interrupted
                 # GOP cannot be repaired live; the next independently framed
                 # GOP will provide a fresh preamble and mode header.
@@ -1634,9 +1801,24 @@ class RxEngine:
                 continue
             audio, self._read_cursor, overrun = ring.read_since(self._read_cursor)
             if overrun:
+                self.health["ring_overruns"] += 1
+                self._record_modem_debug({"event": "ring_overrun", "time": time.time(),
+                                          "count": self.health["ring_overruns"]})
                 self._stream_decoder = self._new_demodulator(codec.mode)
+                if self._av_program is not None:
+                    self._av_program = ProgramAudio(codec.mode.name)
+                    self._av_playout.clear()
+                    self._composite_separator = (AC16CompositeSeparator() if codec.mode.name == "AC16"
+                                                 else StreamingCompositeSeparator())
+                    capture_rate = waveform_sample_rate(self.station.settings)
+                    self._composite_video_resampler = StreamResampler(*resample_ratio(capture_rate, codec.mode.geometry.fs))
+                    self._composite_voice_resampler = StreamResampler(*resample_ratio(capture_rate, NATIVE_AETV_FS))
                 self.state.message = "receive buffer overrun; reacquiring"
             if audio.size == 0:
+                try:
+                    self._drain_av_playout()
+                except Exception as error:
+                    self._on_error(str(error))
                 continue
             raw_audio = audio
             try:
@@ -1650,7 +1832,9 @@ class RxEngine:
                     filtered_voice = voice
                     if self._voice_history is not None and voice.size:
                         self._voice_history.write(voice)
-                    if self._audio_playback is not None and voice.size:
+                    if self._av_program is not None:
+                        self._av_program.voice.write(voice)
+                    elif self._audio_playback is not None and voice.size:
                         self._audio_playback.write(voice)
                 self._report_received_audio_levels(raw_audio, filtered_voice)
                 demodulator = self._stream_decoder
@@ -1659,6 +1843,7 @@ class RxEngine:
                 demod_started = time.perf_counter()
                 results = demodulator.feed(audio)
                 demod_s = time.perf_counter() - demod_started
+                self.health["demod_max_ms"] = max(self.health["demod_max_ms"], 1000*demod_s)
                 received = [
                     (result, latents, weights)
                     for result in results
@@ -1679,6 +1864,7 @@ class RxEngine:
                     with self.station.codec_lock:
                         decoded = codec.decode_gop(latents, weights)
                     decode_s = time.perf_counter() - decode_started
+                    self.health["decode_max_ms"] = max(self.health["decode_max_ms"], 1000*decode_s)
                     with ring.lock:
                         backlog_s = max(
                             0.0,
@@ -1694,17 +1880,14 @@ class RxEngine:
                             "rx_backlog_s": backlog_s,
                         }
                     )
-                    self._shown_gops += 1
-                    self._last_result = result
-                    if self.last_video is None:
-                        self.last_video = decoded
+                    if self._av_program is not None:
+                        self._av_program.add(result, (result, decoded))
                     else:
-                        self.last_video = np.concatenate([self.last_video, decoded], axis=0)
-                        max_frames = codec.mode.gop_frames * 300
-                        self.last_video = self.last_video[-max_frames:]
-                    if audio_gop is not None:
-                        self._append_received_audio(audio_gop)
-                    self._update_from_result(result, decoded)
+                        self._deliver_received(result, decoded, audio_gop)
+                if self._av_program is not None:
+                    for (result, decoded), audio_gop in self._av_program.ready():
+                        self._deliver_received(result, decoded, audio_gop)
+                    self._drain_av_playout()
             except SyncError as error:
                 self.state.message = str(error)
                 self._on_state(self.state)
@@ -1714,6 +1897,81 @@ class RxEngine:
                 continue
             if next_poll < time.monotonic():
                 next_poll = time.monotonic()
+
+    def _report_buffer_health(self):
+        now = time.monotonic()
+        ring = self.ring
+        if ring is None:
+            return
+        with ring.lock:
+            backlog = max(0., (ring.total_written - self._read_cursor) / ring.fs)
+        self.health["rx_backlog_max_s"] = max(self.health["rx_backlog_max_s"], backlog)
+        if now - self._last_health < 1.0:
+            return
+        self._last_health = now
+        report = dict(self.health, event="buffer_health", time=time.time(), rx_backlog_s=backlog)
+        if self._sdr is not None:
+            report.update(self._sdr.health)
+            report["iq_queue_blocks"] = self._sdr._queue.qsize()
+        if self._av_playout is not None:
+            report.update(av_queued_gops=len(self._av_playout), av_dropped_gops=self._av_playout.dropped)
+        if self._audio_playback is not None:
+            report["audio_queue_blocks"] = self._audio_playback._queue.qsize()
+            report.update({f"audio_{key}": value for key, value in self._audio_playback.health.items()})
+        for label, recorder in (("modem_log", self._debug_log), ("receive_wav", self._soundcard_recorder)):
+            if recorder is not None:
+                report[label] = dict(recorder.health)
+                if recorder.health["error"] and not getattr(recorder, "_reported_error", False):
+                    recorder._reported_error = True
+                    self.station.log(recorder.health["error"])
+        self._record_modem_debug(report)
+
+    def _deliver_received(self, result, decoded, audio_gop):
+        self._shown_gops += 1
+        self._last_result = result
+        if self.last_video is None:
+            self.last_video = decoded
+        else:
+            self.last_video = np.concatenate([self.last_video, decoded], axis=0)
+            max_frames = self.station.require_codec().mode.gop_frames * 300
+            self.last_video = self.last_video[-max_frames:]
+        if audio_gop is not None:
+            self._append_received_audio(audio_gop)
+        if self._av_playout is not None and audio_gop is not None:
+            # Retain every correctly paired GOP for saving; trim only live
+            # presentation, with the same decision for audio and video.
+            self._update_from_result(result, None)
+            self._av_playout.push((decoded, audio_gop, self.state))
+        else:
+            self._update_from_result(result, decoded)
+
+    def _drain_av_playout(self):
+        item = self._av_playout.pop() if self._av_playout is not None else None
+        if item is not None:
+            decoded, audio, state = item
+            if self._audio_playback is not None:
+                try:
+                    # Present the paired pictures when this block reaches
+                    # the output worker, not while it is waiting behind audio.
+                    # The callback uses the same thread-safe GUI signal as RX.
+                    accepted = self._audio_playback.write(
+                        audio, on_start=lambda: self._on_video(decoded, state)
+                        if not self._stop.is_set() else None)
+                    if accepted:
+                        return
+                except Exception as error:
+                    # Loss of a speaker should not stop a working SDR/video
+                    # receiver. Saved, paired audio is retained independently.
+                    self.station.log(f"Program audio output stopped: {error}. Video reception continues; restart receive after selecting an output.")
+                    playback, self._audio_playback = self._audio_playback, None
+                    threading.Thread(target=playback.close, daemon=True, name="audio-close").start()
+                    accepted = True
+                if accepted is False:
+                    self.health["audio_dropped"] = self.health.get("audio_dropped", 0) + 1
+                    if self.health["audio_dropped"] == 1:
+                        self.station.log("Program audio output is falling behind; dropping complete live A/V pairs. Recordings retain all decoded pairs.")
+                    return
+            self._on_video(decoded, state)
 
     def _report_received_audio_levels(
         self,

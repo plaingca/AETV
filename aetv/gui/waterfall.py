@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from aetv.config import AETV_MODES
+from aetv.analog_av import composite_profile
 
 MIN_DBFS = -140.0
 MAX_DBFS = 3.0
@@ -50,7 +51,7 @@ def reduce_to_width(row: np.ndarray, width: int) -> np.ndarray:
     if row.size > width:
         # Peak-hold so a one-bin carrier is not sampled away.
         edges = np.linspace(0, row.size, width + 1).astype(int)
-        return np.array([row[edges[i] : edges[i + 1]].max() if edges[i + 1] > edges[i] else 0.0 for i in range(width)], dtype=np.float32)
+        return np.maximum.reduceat(row, edges[:-1]).astype(np.float32)
     x = np.linspace(0, row.size - 1, width)
     return np.interp(x, np.arange(row.size), row).astype(np.float32)
 
@@ -110,6 +111,7 @@ class Waterfall(QWidget):
 
     def set_ring(self, ring) -> None:
         self._ring = ring
+        self._clip_latched = False
         self._reset_scaling()
         if ring is not None:
             self._fs = ring.fs
@@ -117,8 +119,9 @@ class Waterfall(QWidget):
     def set_mode(self, mode_name: str, composite: bool = False) -> None:
         mode = AETV_MODES[mode_name]
         if composite:
-            self._fs = 12_000
-            self._band_lo, self._band_hi = 0.0, 5_000.0
+            profile = composite_profile(mode_name)
+            self._fs = profile.fs
+            self._band_lo, self._band_hi = 0.0, profile.bandwidth_hz
         else:
             self._fs = mode.geometry.fs
             self._band_lo, self._band_hi = mode.geometry.tx_bandpass
@@ -163,20 +166,32 @@ class Waterfall(QWidget):
         if ring is None or self._image.isNull():
             self.update()
             return
-        nfft = 1024
+        rf = hasattr(ring, "frequency_hz")
+        nfft = 32768 if rf else 1024
         samples = ring.tail(nfft)
         if samples.size < 32:
             self.update()
             return
-        mag, _ = spectrum_dbfs(samples)
-        freqs = np.fft.rfftfreq(len(samples), 1.0 / self._fs)
-        usable = mag[freqs <= self._fs / 2]
+        if rf:
+            window = np.hanning(len(samples))
+            amplitudes = np.abs(np.fft.fftshift(np.fft.fft(samples * window))) / window.sum()
+            mag = 20 * np.log10(np.maximum(amplitudes, 1e-12))
+            freqs = np.fft.fftshift(np.fft.fftfreq(len(samples), 1 / ring.fs)) + ring.lo_hz - ring.frequency_hz
+            selected = abs(freqs) <= 48000
+            mag, freqs = mag[selected], freqs[selected]
+            usable = mag
+            low, high = -ring.bandwidth_hz/2, ring.bandwidth_hz/2
+        else:
+            mag, _ = spectrum_dbfs(samples)
+            freqs = np.fft.rfftfreq(len(samples), 1.0 / self._fs)
+            usable = mag[freqs <= self._fs / 2]
+            low, high = self._band_lo, self._band_hi
         width = self._image.width()
         meter_w = max(8, int(round(12 * self.devicePixelRatio())))
         row = reduce_to_width(usable.astype(np.float32), max(1, width - meter_w))
         # Scale from the useful modem passband. The robust percentiles keep
         # Flex AGC noise dark while allowing carriers to reach the highlights.
-        in_band = mag[(freqs >= self._band_lo) & (freqs <= self._band_hi)]
+        in_band = mag[(freqs >= low) & (freqs <= high)]
         target_floor, target_ceiling = automatic_levels(in_band if in_band.size else usable)
         if self._display_floor is None or self._display_ceiling is None:
             self._display_floor, self._display_ceiling = target_floor, target_ceiling
@@ -189,8 +204,8 @@ class Waterfall(QWidget):
         span = max(self._display_ceiling - self._display_floor, MIN_DISPLAY_RANGE_DB)
         norm = np.clip((row - self._display_floor) / span, 0.0, 1.0)
         norm = np.power(norm, 1.35)  # reserve yellow/white for actual signals
-        pixel_freqs = np.linspace(0.0, self._fs / 2.0, row.size)
-        outside = (pixel_freqs < self._band_lo) | (pixel_freqs > self._band_hi)
+        pixel_freqs = np.linspace(-48000, 48000, row.size) if rf else np.linspace(0.0, self._fs / 2.0, row.size)
+        outside = (pixel_freqs < low) | (pixel_freqs > high)
         norm[outside] *= 0.45
         colors = COLORMAP[np.rint(norm * 255).astype(np.uint8)]
         shifted = QImage(self._image.size(), QImage.Format.Format_RGB32)
@@ -200,11 +215,17 @@ class Waterfall(QWidget):
         painter.drawImage(0, 1, self._image)
         painter.end()
         self._image = shifted
-        for x, rgb in enumerate(colors):
-            self._image.setPixel(x, 0, QColor(int(rgb[0]), int(rgb[1]), int(rgb[2])).rgb())
+        # A Python/QColor call per display pixel held the interpreter lock
+        # thousands of times per tick, competing with live USB capture. Write
+        # identical RGB32 pixels in one array operation instead.
+        pixels = np.frombuffer(self._image.bits(), dtype=np.uint32,
+                               count=self._image.bytesPerLine() // 4)
+        rgb = colors.astype(np.uint32)
+        pixels[:len(rgb)] = 0xff000000 | (rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2]
         peak = float(np.max(np.abs(samples))) if samples.size else 0.0
         self._peak = 0.85 * self._peak + 0.15 * peak
-        self._clipping = peak >= 0.99
+        component_peak = max(np.max(abs(samples.real)), np.max(abs(samples.imag))) if rf else peak
+        self._clipping = component_peak >= 0.995 if rf else peak >= 0.99
         if self._clipping:
             self._clip_latched = True
         self.update()
@@ -222,6 +243,14 @@ class Waterfall(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Start receiving to see the waterfall")
 
     def _draw_band_markers(self, painter: QPainter) -> None:
+        if hasattr(self._ring, "frequency_hz"):
+            for offset in (-40000, -20000, 0, 20000, 40000):
+                x = int((offset + 48000) / 96000 * (self.width()-12))
+                painter.setPen(QPen(QColor(255, 255, 255, 80), 1, Qt.PenStyle.DotLine))
+                painter.drawLine(x, 0, x, self.height())
+                painter.setPen(QColor(230, 230, 230))
+                painter.drawText(x + 3, 15, f"{(self._ring.frequency_hz+offset)/1e6:.3f} MHz")
+            return
         width = self.width()
         meter_w = 12
         span = self._fs / 2

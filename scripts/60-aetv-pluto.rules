@@ -1,0 +1,2 @@
+# ADALM-PLUTO normal operation (not DFU); no system iio_info is required.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0456", ATTR{idProduct}=="b673", MODE="0660", GROUP="plugdev", TAG+="uaccess"

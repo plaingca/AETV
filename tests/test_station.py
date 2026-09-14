@@ -41,12 +41,61 @@ def test_rx_demodulator_uses_loaded_mode_as_one_atomic_configuration():
     assert demodulator.expected_mode.name == "V8"
 
 
-@pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex"])
+@pytest.mark.parametrize("source", ["rtlsdr", "pluto"])
+def test_sdr_debug_records_modem_waveform_and_reports_acquisition(monkeypatch, tmp_path, source):
+    settings = StationSettings(mode="AC16", rx_source=source, receive_dir=str(tmp_path))
+    station = Station(settings)
+    station.codec = SimpleNamespace(mode=AETV_MODES["AC16"])
+    samples = np.linspace(-0.2, 0.2, 4800, dtype=np.float32)
+
+    class Capture:
+        def __init__(self, _settings, _mode, sink, **_kwargs):
+            self.sink = sink
+            self.preview = object()
+
+        def start(self):
+            self.sink.write(samples)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("aetv.sdr.SDRCapture", Capture)
+    messages = []
+    engine = RxEngine(station, on_state=lambda state: messages.append(state.message))
+    monkeypatch.setattr(engine, "_loop", lambda: engine._stop.wait(2))
+    try:
+        engine.start()
+        assert "searching" in engine.state.message
+        engine._record_modem_debug({"event": "blind_search_started"})
+        assert "beacon" in engine.state.message
+        engine._record_modem_debug({"event": "gop_accepted"})
+        assert "decoding first" in engine.state.message
+    finally:
+        engine.stop()
+    paths = list(tmp_path.glob("debug/*.audio.wav"))
+    assert len(paths) == 1
+    with wave.open(str(paths[0])) as recording:
+        assert recording.getframerate() == 48000
+        saved = np.frombuffer(recording.readframes(recording.getnframes()), dtype="<i2")
+    np.testing.assert_allclose(saved / 32767.0, samples, atol=1 / 32767)
+
+
+@pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex", "rtlsdr", "pluto", "hackrf"])
 def test_rx_timing_policy_matches_source(source):
     engine = RxEngine(Station(StationSettings(mode="V8", rx_source=source)))
     demodulator = engine._new_demodulator(AETV_MODES["V8"])
-    assert demodulator.boundary_tracking == (source in {"kiwi", "soundcard"})
+    assert demodulator.boundary_tracking == (source != "flex")
     assert demodulator.timing_tracking == (source == "soundcard")
+    assert demodulator.verify_gap_phase == (source in {"kiwi", "rtlsdr", "pluto", "hackrf"})
+
+
+def test_sdr_phase_reverification_is_visible_after_video_has_started():
+    messages = []
+    engine = RxEngine(Station(), on_state=lambda state: messages.append(state.message))
+    engine.state.listening = True
+    engine._shown_gops = 20
+    engine._record_modem_debug({"event": "tracking_phase_pending"})
+    assert messages == ["Rechecking video boundary after a sample discontinuity"]
 
 
 def test_stale_codec_cannot_start_a_new_mode_receive():
@@ -862,16 +911,9 @@ def test_receive_audio_meter_reports_raw_and_filtered_peaks_and_clipping():
 
 
 def test_composite_loopback_retains_received_program_audio(monkeypatch):
+    from aetv.config import AETV_MODES
+    from aetv.modem import modulate_continuous_chunks
     from aetv.station import Station
-
-    result = SimpleNamespace(
-        gops_latents=[np.array([1.0])],
-        gops_weights=[np.array([1.0])],
-        freq_offset=0.0,
-        sync_metric=0.9,
-        snr_db=20.0,
-        callsign="N0CALL",
-    )
 
     class FakeChannel:
         def __init__(self, *_args, **_kwargs):
@@ -880,49 +922,26 @@ def test_composite_loopback_retains_received_program_audio(monkeypatch):
         def process(self, audio):
             return audio
 
-    class FakeSeparator:
-        def process(self, audio):
-            values = np.asarray(audio, dtype=np.float32)
-            return np.ones_like(values), values
-
-    class FakeResampler:
-        def __init__(self, *_args):
-            pass
-
-        def __call__(self, audio):
-            return audio
-
-    class FakeDemodulator:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def feed(self, _audio):
-            return [result]
-
     class Codec:
-        mode = SimpleNamespace(name="V8", band="W", gop_frames=1)
+        mode = AETV_MODES["V8"]
 
         def decode_gop(self, *_args):
-            return np.zeros((1, 2, 2, 3), dtype=np.uint8)
+            return np.zeros((6, 2, 2, 3), dtype=np.uint8)
 
     monkeypatch.setattr("aetv.station.StreamingChannelEmulator", FakeChannel)
-    monkeypatch.setattr("aetv.station.StreamingCompositeSeparator", FakeSeparator)
-    monkeypatch.setattr("aetv.station.StreamResampler", FakeResampler)
-    monkeypatch.setattr(
-        "aetv.station.resample_audio",
-        lambda audio, _source_rate, _target_rate: np.asarray(audio, dtype=np.float32),
-    )
-    monkeypatch.setattr("aetv.station.StreamingDemodulator", FakeDemodulator)
     station = Station(StationSettings(mode="V8", waveform_mode="analog_av"))
     engine = TxEngine(station)
-
-    assert engine._emulated_send_stream(
-        [np.ones(24, dtype=np.float32)], COMPOSITE_FS, 1, Codec(), "clean"
+    latent = np.random.default_rng(13).normal(size=(1, 2816)).astype(np.float32)
+    voice = .2 * np.sin(2*np.pi*700*np.arange(8000)/8000)
+    chunks = engine._composite_chunks(
+        modulate_continuous_chunks(latent, "V8", total_gops=1), voice, 1,
+        capture_microphone=False,
     )
-
-    assert station.loopback_audio is not None
-    assert len(station.loopback_audio) == 8000
-    assert np.all(station.loopback_audio[:24] == 1.0)
+    assert engine._emulated_send_stream(chunks, COMPOSITE_FS, 1, Codec(), "clean")
+    assert station.loopback_audio.shape == (8000,)
+    assert station.loopback_video.shape == (6, 2, 2, 3)
+    spectrum = abs(np.fft.rfft(station.loopback_audio))
+    assert abs(np.argmax(spectrum) - 700) <= 1
 
 
 def test_channel_loopback_decodes_without_keying(monkeypatch):
