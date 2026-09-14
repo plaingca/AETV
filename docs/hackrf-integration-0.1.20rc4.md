@@ -28,6 +28,9 @@ release plus libusb 1.0.30 and winpthreads. The Windows Pluto and HackRF copies 
 libusb are identical: HackRF requires new raw-I/O exports, so an older libusb
 with the same DLL basename must not enter the process. Sources, license texts,
 USB permission rules and the existing Windows Zadig installer are bundled.
+The archive audit found older libusb/winpthreads copies from Hamlib, including
+copies PyInstaller placed in its root. The build now replaces every copy with
+the pinned shared version and checks Hamlib model discovery with an empty PATH.
 
 ## Software verification
 

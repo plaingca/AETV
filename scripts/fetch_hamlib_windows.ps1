@@ -39,8 +39,9 @@ Hamlib $Version source and corresponding source archive:
 https://github.com/Hamlib/Hamlib/releases/tag/$Version
 https://github.com/Hamlib/Hamlib/releases/download/$Version/hamlib-$Version.tar.gz
 
-The bundled DLLs and rigctl utility are unmodified official Hamlib release
-binaries. AETV dynamically loads the LGPL library and invokes the GPL rigctl
+The libhamlib DLL and rigctl utility are unmodified official Hamlib release
+binaries. Shared libusb and winpthreads DLLs use the pinned versions described
+in SDR-NOTICE.txt to avoid conflicts with HackRF. AETV dynamically loads the LGPL library and invokes the GPL rigctl
 utility as a separate process for model discovery. You may replace them with
 compatible builds.
 "@ | Set-Content -LiteralPath (Join-Path $Output 'HAMLIB-SOURCE.txt') -Encoding utf8

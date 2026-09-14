@@ -45,6 +45,8 @@ Windows uses checksum-pinned MSYS2 builds of libhackrf 2026.01.3-1, libusb
 include the distribution build recipes. Winpthreads' license text is included.
 Pluto and HackRF share the same libusb 1.0.30 DLL to avoid process-wide DLL
 version conflicts. The original Pluto USB driver installer is unchanged.
+The same pinned libusb and winpthreads replace older Hamlib copies and any
+copies collected into PyInstaller's root. The Hamlib library itself is unchanged.
   https://packages.msys2.org/packages/mingw-w64-x86_64-hackrf
   https://packages.msys2.org/packages/mingw-w64-x86_64-libusb
   https://packages.msys2.org/packages/mingw-w64-x86_64-libwinpthread

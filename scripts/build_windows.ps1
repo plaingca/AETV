@@ -88,6 +88,22 @@ if ($LASTEXITCODE -ne 0) { throw "Benchmark packaging failed" }
     (Join-Path $RepoRoot "scripts\audio_helper.py")
 
 $AppDir = Join-Path $DistRoot "AETV"
+# Hamlib ships older DLLs with the same process-wide basenames. PyInstaller
+# copies them both beside rigctl and into _internal. Normalize every copy,
+# including the transitive dependencies it discovered, before running smoke
+# checks. This also makes library load order independent of CAT selection.
+foreach ($Name in @('libusb-1.0.dll', 'libwinpthread-1.dll')) {
+    $Pinned = Join-Path $SdrDir "runtime\hackrf\$Name"
+    $PinnedHash = (Get-FileHash -LiteralPath $Pinned -Algorithm SHA256).Hash
+    $Copies = @(Get-ChildItem -LiteralPath (Join-Path $AppDir '_internal') -Recurse -File -Filter $Name)
+    if ($Copies.Count -eq 0) { throw "Missing packaged dependency: $Name" }
+    foreach ($Copy in $Copies) {
+        Copy-Item -LiteralPath $Pinned -Destination $Copy.FullName -Force
+        if ((Get-FileHash -LiteralPath $Copy.FullName -Algorithm SHA256).Hash -ne $PinnedHash) {
+            throw "Conflicting packaged dependency: $($Copy.FullName)"
+        }
+    }
+}
 # Qt uses the Windows ICU compatibility layer. PyInstaller can discover and
 # bundle an unrelated third-party icuuc.dll from the build host, which then
 # shadows the compatible Windows DLL and prevents PySide6.QtCore from loading.
@@ -135,6 +151,10 @@ try {
     }
     & (Join-Path $AppDir 'AETV-Benchmark.exe') --sdr-smoke --json (Join-Path $AppDir 'sdr-smoke.json')
     if ($LASTEXITCODE -ne 0) { throw 'Packaged SDR runtime check failed' }
+    $RigModels = & (Join-Path $AppDir '_internal\aetv\bin\rigctl.exe') -l
+    if ($LASTEXITCODE -ne 0 -or -not ($RigModels -match 'Dummy')) {
+        throw 'Packaged Hamlib discovery failed with the shared SDR dependencies'
+    }
 } finally {
     $env:PATH = $PreviousPath
 }
