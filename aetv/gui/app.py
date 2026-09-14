@@ -678,6 +678,17 @@ class MainWindow(QMainWindow):
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
+    if "--sdr-smoke" in args:
+        import json
+        from aetv.sdr import sdr_runtime_smoke
+
+        index = args.index("--sdr-smoke")
+        if index + 1 >= len(args):
+            return 3
+        Path(args[index + 1]).write_text(
+            json.dumps(sdr_runtime_smoke(), indent=2) + "\n", encoding="utf-8"
+        )
+        return 0
     validation = None
     validation_settings = None
     if "--ota-validation" in args:

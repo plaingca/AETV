@@ -42,6 +42,9 @@ Portable packages also include an unmodified FFmpeg executable obtained from
 imageio-ffmpeg. See FFMPEG-NOTICE.txt in each package for license, source, and
 replacement information.
 
+Portable packages include RTL-SDR and Pluto SDR runtimes and USB setup files.
+See SDR-NOTICE.txt for versions, licenses, source archives and attribution.
+
 Do not commit copyrighted test video or third-party model weights.
 Identify every transmission with your callsign; this software does not
 replace a license or a band-plan check.

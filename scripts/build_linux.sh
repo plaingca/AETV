@@ -51,8 +51,9 @@ common=(
   --workpath "$work_path"
   --specpath "$spec_path"
   --distpath "$dist_root"
+  --paths "$repo_root"
   --runtime-hook "$repo_root/scripts/pyi_rth_sdr.py"
-  --add-binary "/usr/bin/rtl_sdr:aetv/bin"
+  --add-binary "/usr/bin/rtl_sdr:aetv/bin/rtlsdr"
   --add-binary "$(ldconfig -p | awk '/libiio\.so\.0/ && !found {found=$NF} END {print found}'):."
   --exclude-module torch
   --exclude-module torchvision
@@ -90,7 +91,12 @@ cp "$repo_root/README.md" "$repo_root/LICENSE" "$repo_root/NOTICE" \
   "$repo_root/FFMPEG-NOTICE.txt" "$app_dir/"
 mkdir -p "$app_dir/docs"
 cp "$repo_root/docs/ac16-gui-and-sdr.md" "$app_dir/docs/"
-for dependency in libiio0 rtl-sdr; do
+cp "$repo_root/docs/sdr-portable-setup.md" "$app_dir/docs/"
+cp "$repo_root/SDR-NOTICE.txt" "$app_dir/"
+mkdir -p "$app_dir/drivers/udev"
+cp /lib/udev/rules.d/60-librtlsdr0.rules "$app_dir/drivers/udev/"
+cp "$repo_root/scripts/60-aetv-pluto.rules" "$app_dir/drivers/udev/"
+for dependency in libiio0 rtl-sdr librtlsdr0 libusb-1.0-0 libserialport0 libxml2; do
   if [[ -f "/usr/share/doc/$dependency/copyright" ]]; then
     cp "/usr/share/doc/$dependency/copyright" "$app_dir/$dependency-COPYRIGHT.txt"
   fi
@@ -98,6 +104,8 @@ done
 
 (
   cd "$app_dir"
+  PATH='' ./AETV-Benchmark --sdr-smoke --json sdr-smoke.json
+  PATH='' QT_QPA_PLATFORM=offscreen ./AETV --sdr-smoke sdr-gui-smoke.json
   ./AETV-Benchmark --video-save-smoke "$build_root/saved-video-smoke.mp4"
   test -s "$build_root/saved-video-smoke.mp4"
   XDG_CACHE_HOME="$build_root/smoke-cache" \

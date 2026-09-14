@@ -1,0 +1,102 @@
+[
+  {
+    "name": "libiio",
+    "url": "https://github.com/analogdevicesinc/libiio/releases/download/v0.26/Windows.zip",
+    "sha256": "4ad4a8c6b3f7145922c122dcfc51d693f0d3f9a0054fb2228814ce58c538a6ca",
+    "members": {
+      "Windows-VS-2022-x64/libiio.dll": "runtime/pluto/libiio.dll",
+      "Windows-VS-2022-x64/libusb-1.0.dll": "runtime/pluto/libusb-1.0.dll",
+      "Windows-VS-2022-x64/libserialport-0.dll": "runtime/pluto/libserialport-0.dll",
+      "Windows-VS-2022-x64/libxml2.dll": "runtime/pluto/libxml2.dll"
+    }
+  },
+  {
+    "name": "rtl-sdr",
+    "url": "https://github.com/rtlsdrblog/rtl-sdr-blog/releases/download/V1.4.0/Release.zip",
+    "sha256": "7ef33f1304647f65e5e0fde43637a73d54f076e91e651a3cecc4f55a17fd9815",
+    "members": {
+      "x64/rtl_sdr.exe": "runtime/rtlsdr/rtl_sdr.exe",
+      "x64/rtlsdr.dll": "runtime/rtlsdr/rtlsdr.dll",
+      "x64/msvcr100.dll": "runtime/rtlsdr/msvcr100.dll",
+      "x64/pthreadVC2.dll": "runtime/rtlsdr/pthreadVC2.dll"
+    }
+  },
+  {
+    "name": "zadig",
+    "url": "https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe",
+    "sha256": "4ecaa95df3da3621486a043aef8b3050b8bafe7c901402871e816229ef82039b",
+    "destination": "drivers/zadig-2.9.exe"
+  },
+  {
+    "name": "pluto-usb",
+    "url": "https://github.com/analogdevicesinc/plutosdr-m2k-drivers-win/releases/download/v0.9/PlutoSDR-M2k-USB-Drivers.exe",
+    "sha256": "c53dac79be6af8e268b2b5460856d46501f3a61c7b820cbfc3fe24288960550d",
+    "destination": "drivers/PlutoSDR-M2k-USB-Drivers.exe"
+  },
+  {
+    "name": "libiio-license",
+    "url": "https://raw.githubusercontent.com/analogdevicesinc/libiio/v0.26/COPYING.txt",
+    "sha256": "102900208eef27b766380135906d431dba87edaa7ec6aa72e6ebd3dd67f3a97b",
+    "destination": "licenses/libiio-LGPL.txt"
+  },
+  {
+    "name": "rtl-sdr-license",
+    "url": "https://raw.githubusercontent.com/rtlsdrblog/rtl-sdr-blog/V1.4.0/COPYING",
+    "sha256": "ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6",
+    "destination": "licenses/rtl-sdr-GPL.txt"
+  },
+  {
+    "name": "zadig-license",
+    "url": "https://raw.githubusercontent.com/pbatard/libwdi/v1.5.1/COPYING",
+    "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+    "destination": "licenses/Zadig-GPL.txt"
+  },
+  {
+    "name": "libwdi-license",
+    "url": "https://raw.githubusercontent.com/pbatard/libwdi/v1.5.1/COPYING-LGPL",
+    "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "destination": "licenses/libwdi-LGPL.txt"
+  },
+  {
+    "name": "pluto-usb-license",
+    "url": "https://raw.githubusercontent.com/analogdevicesinc/plutosdr-m2k-drivers-win/v0.9/LICENSE",
+    "sha256": "a914058ac8f4eb858e93c0050d29f1a95bb7a7abe6e3f4d4d1189b46daa7d888",
+    "destination": "licenses/Pluto-USB-LICENSE.txt"
+  },
+  {
+    "name": "libusb-license",
+    "url": "https://raw.githubusercontent.com/libusb/libusb/v1.0.24/COPYING",
+    "sha256": "5df07007198989c622f5d41de8d703e7bef3d0e79d62e24332ee739a452af62a",
+    "destination": "licenses/libusb-LGPL.txt"
+  },
+  {
+    "name": "libserialport-license",
+    "url": "https://raw.githubusercontent.com/sigrokproject/libserialport/libserialport-0.1.1/COPYING",
+    "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "destination": "licenses/libserialport-LGPL.txt"
+  },
+  {
+    "name": "libxml2-license",
+    "url": "https://raw.githubusercontent.com/GNOME/libxml2/v2.9.10/Copyright",
+    "sha256": "c5c63674f8a83c4d2e385d96d1c670a03cb871ba2927755467017317878574bd",
+    "destination": "licenses/libxml2-Copyright.txt"
+  },
+  {
+    "name": "libiio-source",
+    "url": "https://codeload.github.com/analogdevicesinc/libiio/tar.gz/refs/tags/v0.26",
+    "sha256": "fb445fb860ef1248759f45d4273a4eff360534480ec87af64c6b8db3b99be7e5",
+    "destination": "sources/libiio-v0.26.tar.gz"
+  },
+  {
+    "name": "rtl-sdr-source",
+    "url": "https://codeload.github.com/rtlsdrblog/rtl-sdr-blog/tar.gz/refs/tags/V1.4.0",
+    "sha256": "89520433e63b1a1371b45d8deea198cad9dbd1f0d55cc3a706aafb7b187bd325",
+    "destination": "sources/rtl-sdr-blog-V1.4.0.tar.gz"
+  },
+  {
+    "name": "zadig-source",
+    "url": "https://codeload.github.com/pbatard/libwdi/tar.gz/refs/tags/v1.5.1",
+    "sha256": "a695e93db0977dfdc5c6a99a4ea91b22f9027547d0177b2a0f3075078643c929",
+    "destination": "sources/libwdi-v1.5.1.tar.gz"
+  }
+]

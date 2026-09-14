@@ -1,0 +1,33 @@
+Portable SDR components
+=======================
+
+AETV invokes rtl_sdr as a separate executable and dynamically loads libiio.
+You may replace these components with compatible builds. They are unmodified
+upstream binaries; they retain their own copyrights and licenses.
+
+Windows packages include:
+  RTL-SDR Blog V1.4.0 (GPL-2.0-or-later), including V4/V4L support:
+    https://github.com/rtlsdrblog/rtl-sdr-blog/releases/tag/V1.4.0
+  Analog Devices libiio v0.26 (LGPL-2.1-or-later), with libusb,
+  libserialport (LGPL) and libxml2 (MIT):
+    https://github.com/analogdevicesinc/libiio/releases/tag/v0.26
+    https://github.com/analogdevicesinc/libiio/blob/v0.26/CI/publish_deps.ps1
+  Zadig 2.9 / libwdi v1.5.1 USB setup utility (GPL/LGPL):
+    https://github.com/pbatard/libwdi/releases/tag/v1.5.1
+  Analog Devices Pluto/M2k USB driver installer v0.9 (vendor BSD license):
+    https://github.com/analogdevicesinc/plutosdr-m2k-drivers-win/releases/tag/v0.9
+
+License texts are in drivers/licenses; corresponding RTL-SDR, libiio and
+Zadig/libwdi source archives are in drivers/sources. drivers/dependencies.json
+records the exact upstream URLs and SHA-256 checksums. The USB installers are
+provided for explicit first-time setup; AETV does not install system drivers
+automatically. Microsoft runtime DLLs retain Microsoft's redistribution terms.
+
+Linux packages include the distribution's rtl-sdr and libiio binaries and
+linked dependencies. Their *-COPYRIGHT.txt files include the license texts,
+copyright holders and upstream source locations. Build provenance is Ubuntu
+22.04; the corresponding distribution sources are available at:
+  https://archive.ubuntu.com/ubuntu/pool/universe/r/rtl-sdr/
+  https://archive.ubuntu.com/ubuntu/pool/universe/libi/libiio/
+
+See docs/sdr-portable-setup.md for the one-time operating-system USB setup.

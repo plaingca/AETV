@@ -50,14 +50,14 @@ Pluto TX starts at −30 dB hardware gain by default, with the slider covering
 which selects its supported hardware setting. The amplitude control in the
 Transmit pane and the hardware gain slider are separate adjustments.
 
-Linux portable packages include `rtl_sdr`, libiio, and their linked runtime
-libraries. Release builds use Ubuntu 22.04 as their Linux ABI baseline.
-USB devices still require normal OS device access permissions.
+All Windows and Linux portable packages include `rtl_sdr`, libiio, and their
+linked runtime libraries. Windows packages also include the offline Pluto USB
+installer and Zadig; Linux packages include USB permission rules. See
+[portable SDR setup](sdr-portable-setup.md) for first-time device setup.
+Release builds use Ubuntu 22.04 as their Linux ABI baseline.
 For a source installation, install `aetv[gui]`, libiio and the `rtl-sdr` tools.
-Windows SDR operation requires the vendor libiio runtime and `rtl_sdr.exe` on
-PATH, plus the device's USB driver; physical Windows SDR operation has not been
-validated on this Linux host. Pluto network URIs can be used without a USB
-transport to the host.
+Physical Windows SDR operation has not been validated on this Linux host.
+Pluto network URIs can be used without a USB transport to the host.
 
 ## Runtime and validation
 

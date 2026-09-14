@@ -7,8 +7,11 @@ All receive conversion uses captured IQ; source video is never an input.
 from __future__ import annotations
 
 import queue
+import os
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from dataclasses import replace
@@ -22,13 +25,83 @@ from .sdr_dsp import IQToModem, ModemToIQ, estimate_signal_offset
 
 
 def rtl_executable() -> str:
+    root = Path(__file__).parent / "bin"
+    for folder in (root / "rtlsdr", root):
+        for name in ("rtl_sdr", "rtl_sdr.exe"):
+            bundled = folder / name
+            if bundled.is_file():
+                return str(bundled)
     for name in ("rtl_sdr", "rtl_sdr.exe"):
-        bundled = Path(__file__).parent / "bin" / name
-        if bundled.is_file():
-            return str(bundled)
         if found := shutil.which(name):
             return found
-    raise RuntimeError("RTL-SDR driver not found. Install rtl-sdr (rtl_sdr on PATH).")
+    raise RuntimeError(
+        "RTL-SDR runtime not found. Re-extract the complete portable package; "
+        "for a source installation, install rtl-sdr (rtl_sdr on PATH)."
+    )
+
+
+def _rtl_process_options():
+    options = {}
+    if sys.platform == "win32":
+        environment = os.environ.copy()
+        if getattr(sys, "frozen", False):
+            # DLL search directories registered in Python do not propagate to
+            # rtl_sdr.exe. Let the child find the packaged VC runtime too.
+            environment["PATH"] = (
+                str(sys._MEIPASS) + os.pathsep + environment.get("PATH", "")
+            )
+        options.update(env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+    return options
+
+
+def sdr_runtime_smoke():
+    """Load both native transports without opening a radio or transmitting."""
+    import adi
+    import iio
+
+    executable = rtl_executable()
+    result = subprocess.run(
+        [executable, "-h"], capture_output=True, timeout=15, **_rtl_process_options()
+    )
+    help_text = (result.stdout + result.stderr).decode(errors="replace")
+    if "rtl_sdr" not in help_text.lower() or "sample" not in help_text.lower():
+        raise RuntimeError(
+            f"Bundled rtl_sdr could not start ({result.returncode}): {help_text}"
+        )
+    if not {"usb", "ip", "xml"}.issubset(iio.backends):
+        raise RuntimeError(f"libiio is missing Pluto backends: {iio.backends}")
+    if not callable(adi.Pluto):
+        raise RuntimeError("pyadi-iio does not expose Pluto")
+    # Exercise libxml as well as libiio; imports alone miss some DLL failures.
+    with tempfile.TemporaryDirectory(prefix="aetv-sdr-smoke-") as folder:
+        xml = Path(folder) / "context.xml"
+        xml.write_text(
+            '<?xml version="1.0"?><!DOCTYPE context ['
+            '<!ELEMENT context EMPTY><!ATTLIST context name CDATA #REQUIRED '
+            'description CDATA #IMPLIED>]><context name="xml" description="AETV smoke"/>',
+            encoding="ascii",
+        )
+        context = iio.XMLContext(str(xml))
+    if context.devices:
+        raise RuntimeError("Unexpected devices in the empty XML fixture")
+    library = str(iio._lib._name)
+    frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        root = Path(sys._MEIPASS).resolve()
+        for path in (executable, library):
+            if not Path(path).resolve().is_relative_to(root):
+                raise RuntimeError(f"SDR runtime escaped the portable package: {path}")
+    return {
+        "passed": True,
+        "frozen": frozen,
+        "rtl_executable": executable,
+        "rtl_help_returncode": result.returncode,
+        "libiio": library,
+        "libiio_version": iio.version,
+        "libiio_backends": iio.backends,
+        "pluto_class": f"{adi.Pluto.__module__}.{adi.Pluto.__name__}",
+        "xml_context": True,
+    }
 
 
 def open_pluto(uri):
@@ -40,7 +113,8 @@ def open_pluto(uri):
         return radio
     except (ImportError, OSError) as error:
         raise RuntimeError(
-            f"Cannot open Pluto at {uri}: {error}. Install libiio and check the radio connection."
+            f"Cannot open Pluto at {uri}: {error}. Check the radio connection and "
+            "USB setup in docs/sdr-portable-setup.md. For a source installation, install libiio."
         ) from error
 
 
@@ -126,7 +200,10 @@ class SDRCapture:
                 "-",
             ]
             self._process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **_rtl_process_options(),
             )
             self._worker("rtl-log", self._read_log)
         self._worker("sdr-convert", self._convert)

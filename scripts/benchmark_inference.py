@@ -38,12 +38,23 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--json", type=Path, help="also write machine-readable results")
+    parser.add_argument("--sdr-smoke", action="store_true", help="load bundled RTL-SDR and Pluto runtimes without opening hardware")
     parser.add_argument(
         "--video-save-smoke",
         type=Path,
         help="exercise the packaged Save video FFmpeg path and exit",
     )
     args = parser.parse_args()
+
+    if args.sdr_smoke:
+        from aetv.sdr import sdr_runtime_smoke
+
+        result = sdr_runtime_smoke()
+        text = json.dumps(result, indent=2) + "\n"
+        print(text, end="")
+        if args.json:
+            args.json.write_text(text, encoding="utf-8")
+        return
 
     if args.video_save_smoke is not None:
         write_video_smoke_test(args.video_save_smoke)
