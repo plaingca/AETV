@@ -1,0 +1,77 @@
+[
+  {
+    "mode": "V8",
+    "before": {
+      "decoded": 52,
+      "unidentifiable": 6,
+      "min_source_cosine": 0.026548489928245544,
+      "held": 0
+    },
+    "after": {
+      "decoded": 46,
+      "unidentifiable": 0,
+      "min_source_cosine": 0.9123722910881042,
+      "held": 6
+    }
+  },
+  {
+    "mode": "V7",
+    "before": {
+      "decoded": 53,
+      "unidentifiable": 10,
+      "min_source_cosine": 0.018430102616548538,
+      "held": 0
+    },
+    "after": {
+      "decoded": 43,
+      "unidentifiable": 0,
+      "min_source_cosine": 0.9194189310073853,
+      "held": 10
+    }
+  },
+  {
+    "mode": "V8_AV",
+    "before": {
+      "decoded": 52,
+      "unidentifiable": 6,
+      "min_source_cosine": 0.034435808658599854,
+      "held": 0
+    },
+    "after": {
+      "decoded": 46,
+      "unidentifiable": 0,
+      "min_source_cosine": 0.9131661653518677,
+      "held": 6
+    }
+  },
+  {
+    "mode": "AC16_AV",
+    "before": {
+      "decoded": 45,
+      "unidentifiable": 0,
+      "min_source_cosine": 0.9157348275184631,
+      "held": 0
+    },
+    "after": {
+      "decoded": 45,
+      "unidentifiable": 0,
+      "min_source_cosine": 0.9157348275184631,
+      "held": 0
+    }
+  },
+  {
+    "mode": "AC16",
+    "before": {
+      "decoded": 53,
+      "unidentifiable": 10,
+      "min_source_cosine": 0.009819000959396362,
+      "held": 0
+    },
+    "after": {
+      "decoded": 43,
+      "unidentifiable": 0,
+      "min_source_cosine": 0.9156081080436707,
+      "held": 10
+    }
+  }
+]

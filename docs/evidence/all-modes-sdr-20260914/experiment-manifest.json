@@ -1,0 +1,70 @@
+{
+  "final_source_revision": "a1b4df938909818d429aac1244738db641414829",
+  "version": "0.1.20rc10",
+  "long_run_revision": "cce8175ffc12ea36a5ada7ab21615f2ae57bcdc8",
+  "baseline_revision": "e6856202a8f461be6dab7a84d14187e1687d7eaa",
+  "source_sha256": "85f201e2c51902c864e5f2dcd15dea2aa4ddbe51ff8796a47092cc10125d9fdb",
+  "frequency_mhz": 439,
+  "rtl_serials": [
+    "1000",
+    "1001",
+    "1003",
+    "1004"
+  ],
+  "excluded_serials": [
+    "1002"
+  ],
+  "long_gops_per_mode": 600,
+  "late_join_cases": 35,
+  "package_build": 34889511643,
+  "ci": 34889516941,
+  "model_and_wire_changes": false,
+  "artifact_assets": [
+    {
+      "digest": "sha256:8ea7b2cefddf7f4b91fade6f415decab6bc4bf6129ec93802f3d972ad5329070",
+      "name": "AETV-linux-x64-cpu.AppImage",
+      "size": 283470328
+    },
+    {
+      "digest": "sha256:96e79b0a5554278fe7021f4cc588f3df78532aee5f68f512ed2c21488a6b3fc6",
+      "name": "AETV-linux-x64-cpu.tar.gz",
+      "size": 305802099
+    },
+    {
+      "digest": "sha256:2d2ed7c8f05b5e42ca8bf4963fecd16d0f6b1fe479853085b5e713fef4aa4270",
+      "name": "AETV-linux-x64-gpu.AppImage",
+      "size": 1821411832
+    },
+    {
+      "digest": "sha256:d1736b46176c8fcd00a6744639e534b79fc0de67d6d5a9991f6e8128effe8e93",
+      "name": "AETV-linux-x64-gpu.tar.gz",
+      "size": 1945234337
+    },
+    {
+      "digest": "sha256:3cba6e8d48621225e3b65ed8a1e3077a972e84e67916d79375e00d96e6f17d66",
+      "name": "AETV-windows-x64-cpu.zip",
+      "size": 301015060
+    },
+    {
+      "digest": "sha256:485eecad31c1c472b698fa2912edc620a7e750b6fb4f8a3a988669ef197c5b6f",
+      "name": "AETV-windows-x64-gpu.zip",
+      "size": 312660988
+    }
+  ],
+  "analysis_scripts": {
+    "score.py": "a50c4e9e15c50bc7bb1e222fb1cee78903b1313733ba9fbb629c96ce391db86d",
+    "compare-weak.py": "fb374a401095585071e3bef2ef675bc0aa535179d437661c2dec455b3b5c2e23",
+    "make-report.py": "d032a8263cd47fbc317801b9998e1267498b437b90260a29e4375556bbaf24d1",
+    "plot-recovery.py": "604b3b44944dc4a18098c17d4aba35bfbb32b95fd8d1dd17501f1c2fec651c24",
+    "score-short.py": "3f427a803dbcd3295cbf298a10225c936e5c4df31beb715b17a69f22972a1766"
+  },
+  "final_package_gops_per_mode": 120,
+  "final_package_cases": [
+    "rc10-weak-late-V8_AV",
+    "rc10-weak-late-V8",
+    "rc10-weak-late-AC16",
+    "rc10-weak-late-V7",
+    "rc10-weak-late-AC16_AV"
+  ],
+  "final_package_all_modes_recovered": true
+}

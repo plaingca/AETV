@@ -129,6 +129,6 @@ The 2026-09-14 matrix uses Pluto at 439 MHz and RTL serials 1000, 1001, 1003 and
 1004. Serial 1002 is excluded because of its known hardware fault. Radios are
 approximately ten feet apart. The 60-second fixture cycles 30 training-disjoint
 validation clips; they were used for model selection and are not an untouched
-confirmation set. Detailed final measurements are retained with the trial
-artifacts; Windows and physical HackRF behavior require their own hardware
-validation.
+confirmation set. See the [measured results and limitations](all-modes-sdr-results-20260914.md)
+for the long trials, final package checks and retained evidence. Windows and
+physical HackRF behavior require their own hardware validation.

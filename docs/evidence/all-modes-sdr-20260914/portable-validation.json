@@ -1,0 +1,130 @@
+{
+  "linux-cpu": {
+    "tar_native_sdr_passed": true,
+    "appimage_native_sdr_passed": true,
+    "av_passed": true,
+    "av_device": "CPU",
+    "av_saved_frames": 30,
+    "gui_saved_video": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 48,
+          "height": 32,
+          "duration": "0.500000",
+          "nb_frames": "3"
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio",
+          "duration": "0.500000",
+          "nb_frames": "5"
+        }
+      ]
+    }
+  },
+  "windows-cpu": {
+    "execution": "Windows Actions runner; reports extracted from downloaded ZIP",
+    "smokes": {
+      "AETV/ac16-av-smoke.json": {
+        "passed": true,
+        "device": "CPU",
+        "radio_opened": false
+      },
+      "AETV/sdr-gui-smoke.json": {
+        "passed": true,
+        "device": null,
+        "radio_opened": null
+      },
+      "AETV/sdr-smoke.json": {
+        "passed": true,
+        "device": null,
+        "radio_opened": null
+      }
+    }
+  },
+  "linux-gpu": {
+    "tar_native_sdr_passed": true,
+    "appimage_native_sdr_passed": true,
+    "av_passed": true,
+    "av_device": "CUDA",
+    "av_saved_frames": 30,
+    "gui_saved_video": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "codec_type": "video",
+          "width": 48,
+          "height": 32,
+          "duration": "0.500000",
+          "nb_frames": "3"
+        },
+        {
+          "codec_name": "aac",
+          "codec_type": "audio",
+          "duration": "0.500000",
+          "nb_frames": "5"
+        }
+      ]
+    }
+  },
+  "windows-gpu": {
+    "execution": "Windows Actions runner; reports extracted from downloaded ZIP",
+    "smokes": {
+      "AETV/ac16-av-smoke.json": {
+        "passed": true,
+        "device": "CPU",
+        "radio_opened": false
+      },
+      "AETV/sdr-gui-smoke.json": {
+        "passed": true,
+        "device": null,
+        "radio_opened": null
+      },
+      "AETV/sdr-smoke.json": {
+        "passed": true,
+        "device": null,
+        "radio_opened": null
+      }
+    }
+  },
+  "binary_assets": [
+    {
+      "name": "AETV-linux-x64-cpu.tar.gz",
+      "size": 305802099,
+      "sha256": "96e79b0a5554278fe7021f4cc588f3df78532aee5f68f512ed2c21488a6b3fc6"
+    },
+    {
+      "name": "AETV-linux-x64-cpu.AppImage",
+      "size": 283470328,
+      "sha256": "8ea7b2cefddf7f4b91fade6f415decab6bc4bf6129ec93802f3d972ad5329070"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.tar.gz",
+      "size": 1945234337,
+      "sha256": "d1736b46176c8fcd00a6744639e534b79fc0de67d6d5a9991f6e8128effe8e93"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.AppImage",
+      "size": 1821411832,
+      "sha256": "2d2ed7c8f05b5e42ca8bf4963fecd16d0f6b1fe479853085b5e713fef4aa4270"
+    },
+    {
+      "name": "AETV-windows-x64-cpu.zip",
+      "size": 301015060,
+      "sha256": "3cba6e8d48621225e3b65ed8a1e3077a972e84e67916d79375e00d96e6f17d66"
+    },
+    {
+      "name": "AETV-windows-x64-gpu.zip",
+      "size": 312660988,
+      "sha256": "485eecad31c1c472b698fa2912edc620a7e750b6fb4f8a3a988669ef197c5b6f"
+    }
+  ],
+  "uploaded_sizes_and_sha256_match": true,
+  "physical_windows_and_hackrf_qualified": false
+}

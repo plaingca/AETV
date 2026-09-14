@@ -1,0 +1,1312 @@
+[
+  {
+    "case": "overload-retry-V8_AV",
+    "mode": "V8_AV",
+    "packaged": true,
+    "device": "CPU",
+    "decoded": 44,
+    "displayed": 264,
+    "first_decode_after_rf_s": 18.181163642555475,
+    "first_present_after_rf_s": 19.031790639273822,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.07490677083333333,
+        "component_peak": 0.99609375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.19140625
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": 0.14697265625,
+    "audio_pitch_max_hz": 0.533203125,
+    "last_health": {
+      "time": 6441905.900596759,
+      "tx_phase": "done",
+      "decoded": 44,
+      "delivered": 44,
+      "displayed": 264,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  44 GOP  SNR 30.2 dB",
+      "video_health": {
+        "enqueued_frames": 264,
+        "displayed_frames": 264,
+        "trimmed_frames": 0,
+        "queue_high_water": 6,
+        "empty_events": 4,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 0,
+        "rx_backlog_max_s": 0.69825,
+        "demod_max_ms": 138.91333807259798,
+        "decode_max_ms": 330.54703287780285,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 23,
+        "producer_blocks": 617,
+        "producer_wait_s": 0.0022659199312329292,
+        "late_data_events": 0,
+        "queue_wait_max_ms": 91.97465237230062,
+        "tx_write_max_ms": 101.84972267597914,
+        "tx_gap_max_s": 0.002752462401986122,
+        "sent_samples": 147840000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 3.0691083520650864
+      },
+      "source_dropped_frames": 9,
+      "rx_samples": 746379,
+      "rx_backlog_s": 0.1,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 622,
+      "sdr_health": {
+        "captured_samples": 59712000,
+        "converted_samples": 59712000,
+        "iq_queue_high_water": 1,
+        "iq_overruns": 0,
+        "iq_discarded_samples": 0,
+        "conversion_max_ms": 91.55673254281282,
+        "conversion_total_s": 4.727890486828983,
+        "conversion_blocks": 616,
+        "capture_gap_max_s": 0.10495724249631166
+      },
+      "audio_queue": 0,
+      "audio_error": "",
+      "audio_health": {
+        "queue_high_water_samples": 8000,
+        "dropped_blocks": 0,
+        "idle_samples": 141280
+      },
+      "av_queue": 0,
+      "av_dropped": 0,
+      "av_pending": 0,
+      "rss_mb": 985.71484375
+    },
+    "source_dropped_frames": 9,
+    "min_source_cosine": 0.928281307220459,
+    "warnings": [
+      "TX waveform debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V8_AV/received/debug/20260914-125414-284_tx_V8_N0CALL.tx.wav",
+      "RX modem debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V8_AV/received/debug/20260914-125422-681_rx_rtlsdr.modem.jsonl",
+      "RX rtlsdr audio debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V8_AV/received/debug/20260914-125422-681_rx_rtlsdr.audio.wav",
+      "RTL-SDR ADC overload (7.3% clipped samples); lower RTL RX gain and apply RF settings.",
+      "saved /tmp/aetv-all-modes-final-20260914/overload-retry-V8_AV/received/20260914-125525_N0CALL_V8.mp4"
+    ],
+    "source_revision": "7e8445f8dfb2a2d3716963e0df9d27d5f9a3e551",
+    "receive_start_to_first_gop_s": 11.044163642555475,
+    "last_source_gop": 59,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1581,
+        "write_max_ms": 0.2472633495926857,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 110,
+        "write_max_ms": 0.057348981499671936,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 373248,
+        "write_max_ms": 0.2425042912364006,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 32000,
+        "write_max_ms": 0.2946043387055397,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": 0.533203125
+  },
+  {
+    "case": "overload-retry-AC16",
+    "mode": "AC16",
+    "packaged": true,
+    "device": "CPU",
+    "decoded": 43,
+    "displayed": 430,
+    "first_decode_after_rf_s": 17.91384280938655,
+    "first_present_after_rf_s": 18.29427687358111,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.060267916666666664,
+        "component_peak": 0.99609375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.19921875
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": null,
+    "audio_pitch_max_hz": null,
+    "last_health": {
+      "time": 6441982.000838079,
+      "tx_phase": "done",
+      "decoded": 43,
+      "delivered": 43,
+      "displayed": 430,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  43 GOP  SNR 30.5 dB",
+      "video_health": {
+        "enqueued_frames": 430,
+        "displayed_frames": 430,
+        "trimmed_frames": 0,
+        "queue_high_water": 16,
+        "empty_events": 9,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 0,
+        "rx_backlog_max_s": 1.0,
+        "demod_max_ms": 628.3490946516395,
+        "decode_max_ms": 936.4214614033699,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 15,
+        "producer_blocks": 607,
+        "producer_wait_s": 0.002507033757865429,
+        "late_data_events": 1,
+        "queue_wait_max_ms": 91.18426218628883,
+        "tx_write_max_ms": 102.20316704362631,
+        "tx_gap_max_s": 0.3767671436071396,
+        "sent_samples": 145440000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 1.7571784555912018
+      },
+      "source_dropped_frames": 7,
+      "rx_samples": 2947179,
+      "rx_backlog_s": 0.0,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 614,
+      "sdr_health": {
+        "captured_samples": 58944000,
+        "converted_samples": 58944000,
+        "iq_queue_high_water": 1,
+        "iq_overruns": 0,
+        "iq_discarded_samples": 0,
+        "conversion_max_ms": 76.61214377731085,
+        "conversion_total_s": 4.7764238035306334,
+        "conversion_blocks": 608,
+        "capture_gap_max_s": 0.10807179566472769
+      },
+      "rss_mb": 1098.0859375
+    },
+    "source_dropped_frames": 7,
+    "min_source_cosine": 0.009380700998008251,
+    "warnings": [
+      "TX waveform debug: /tmp/aetv-all-modes-final-20260914/overload-retry-AC16/received/debug/20260914-125530-975_tx_AC16_N0CALL.tx.wav",
+      "RX modem debug: /tmp/aetv-all-modes-final-20260914/overload-retry-AC16/received/debug/20260914-125539-578_rx_rtlsdr.modem.jsonl",
+      "RX rtlsdr audio debug: /tmp/aetv-all-modes-final-20260914/overload-retry-AC16/received/debug/20260914-125539-578_rx_rtlsdr.audio.wav",
+      "RTL-SDR ADC overload (6.3% clipped samples); lower RTL RX gain and apply RF settings.",
+      "saved /tmp/aetv-all-modes-final-20260914/overload-retry-AC16/received/20260914-125641_N0CALL_AC16.mp4"
+    ],
+    "source_revision": "7e8445f8dfb2a2d3716963e0df9d27d5f9a3e551",
+    "receive_start_to_first_gop_s": 10.776842809386551,
+    "last_source_gop": 59,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1402,
+        "write_max_ms": 46.12316843122244,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1105920,
+        "write_max_ms": 0.5841869860887527,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": null
+  },
+  {
+    "case": "overload-retry-V8",
+    "mode": "V8",
+    "packaged": true,
+    "device": "CUDA",
+    "decoded": 45,
+    "displayed": 270,
+    "first_decode_after_rf_s": 18.17634030431509,
+    "first_present_after_rf_s": 18.189463838003576,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.059615729166666666,
+        "component_peak": 0.99609375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.18359375
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": null,
+    "audio_pitch_max_hz": null,
+    "last_health": {
+      "time": 6442058.500944343,
+      "tx_phase": "done",
+      "decoded": 45,
+      "delivered": 45,
+      "displayed": 270,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  45 GOP  SNR -6.2 dB",
+      "video_health": {
+        "enqueued_frames": 270,
+        "displayed_frames": 270,
+        "trimmed_frames": 0,
+        "queue_high_water": 8,
+        "empty_events": 1,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 0,
+        "rx_backlog_max_s": 0.697375,
+        "demod_max_ms": 153.02688628435135,
+        "decode_max_ms": 12.153803370893002,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 14,
+        "producer_blocks": 607,
+        "producer_wait_s": 0.0018034502863883972,
+        "late_data_events": 0,
+        "queue_wait_max_ms": 8.227763697504997,
+        "tx_write_max_ms": 100.04543792456388,
+        "tx_gap_max_s": 0.0011582523584365845,
+        "sent_samples": 145440000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 1.2019947171211243
+      },
+      "source_dropped_frames": 2,
+      "rx_samples": 490379,
+      "rx_backlog_s": 0.0,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 613,
+      "sdr_health": {
+        "captured_samples": 58848000,
+        "converted_samples": 58848000,
+        "iq_queue_high_water": 1,
+        "iq_overruns": 0,
+        "iq_discarded_samples": 0,
+        "conversion_max_ms": 67.13082268834114,
+        "conversion_total_s": 4.282175772823393,
+        "conversion_blocks": 607,
+        "capture_gap_max_s": 0.10295707732439041
+      },
+      "rss_mb": 1468.4765625
+    },
+    "source_dropped_frames": 2,
+    "min_source_cosine": 0.04587080329656601,
+    "warnings": [
+      "TX waveform debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V8/received/debug/20260914-125647-984_tx_V8_N0CALL.tx.wav",
+      "RX modem debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V8/received/debug/20260914-125656-178_rx_rtlsdr.modem.jsonl",
+      "RX rtlsdr audio debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V8/received/debug/20260914-125656-178_rx_rtlsdr.audio.wav",
+      "RTL-SDR ADC overload (6.2% clipped samples); lower RTL RX gain and apply RF settings.",
+      "saved /tmp/aetv-all-modes-final-20260914/overload-retry-V8/received/20260914-125758_N0CALL_V8.mp4"
+    ],
+    "source_revision": "7e8445f8dfb2a2d3716963e0df9d27d5f9a3e551",
+    "receive_start_to_first_gop_s": 11.03934030431509,
+    "last_source_gop": 48,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1403,
+        "write_max_ms": 1.431274227797985,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 373248,
+        "write_max_ms": 0.21789595484733582,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": null
+  },
+  {
+    "case": "overload-retry-V7",
+    "mode": "V7",
+    "packaged": true,
+    "device": "CUDA",
+    "decoded": 44,
+    "displayed": 528,
+    "first_decode_after_rf_s": 18.176899294368923,
+    "first_present_after_rf_s": 18.235268948599696,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.054161666666666664,
+        "component_peak": 0.99609375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.19140625
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": null,
+    "audio_pitch_max_hz": null,
+    "last_health": {
+      "time": 6442134.600873949,
+      "tx_phase": "done",
+      "decoded": 44,
+      "delivered": 44,
+      "displayed": 528,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  44 GOP  SNR 31.7 dB",
+      "video_health": {
+        "enqueued_frames": 528,
+        "displayed_frames": 528,
+        "trimmed_frames": 0,
+        "queue_high_water": 17,
+        "empty_events": 1,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 0,
+        "rx_backlog_max_s": 0.699125,
+        "demod_max_ms": 138.03430180996656,
+        "decode_max_ms": 56.56396597623825,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 14,
+        "producer_blocks": 607,
+        "producer_wait_s": 0.001798819750547409,
+        "late_data_events": 0,
+        "queue_wait_max_ms": 36.16958670318127,
+        "tx_write_max_ms": 102.12082508951426,
+        "tx_gap_max_s": 0.0016124201938509941,
+        "sent_samples": 145440000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 0.27950387448072433
+      },
+      "source_dropped_frames": 5,
+      "rx_samples": 1473579,
+      "rx_backlog_s": 0.0,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 614,
+      "sdr_health": {
+        "captured_samples": 58944000,
+        "converted_samples": 58944000,
+        "iq_queue_high_water": 1,
+        "iq_overruns": 0,
+        "iq_discarded_samples": 0,
+        "conversion_max_ms": 66.403329372406,
+        "conversion_total_s": 4.329494275152683,
+        "conversion_blocks": 608,
+        "capture_gap_max_s": 0.10485610086470842
+      },
+      "rss_mb": 1717.09765625
+    },
+    "source_dropped_frames": 5,
+    "min_source_cosine": 0.9257336854934692,
+    "warnings": [
+      "TX waveform debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V7/received/debug/20260914-125803-879_tx_V7_N0CALL.tx.wav",
+      "RX modem debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V7/received/debug/20260914-125812-178_rx_rtlsdr.modem.jsonl",
+      "RX rtlsdr audio debug: /tmp/aetv-all-modes-final-20260914/overload-retry-V7/received/debug/20260914-125812-178_rx_rtlsdr.audio.wav",
+      "RTL-SDR ADC overload (6.4% clipped samples); lower RTL RX gain and apply RF settings.",
+      "saved /tmp/aetv-all-modes-final-20260914/overload-retry-V7/received/20260914-125914_N0CALL_V7.mp4"
+    ],
+    "source_revision": "7e8445f8dfb2a2d3716963e0df9d27d5f9a3e551",
+    "receive_start_to_first_gop_s": 11.039899294368922,
+    "last_source_gop": 59,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 2740,
+        "write_max_ms": 1.2329351156949997,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1327104,
+        "write_max_ms": 0.5975309759378433,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": null
+  },
+  {
+    "case": "overload-retry-AC16_AV",
+    "mode": "AC16_AV",
+    "packaged": true,
+    "device": "CUDA",
+    "decoded": 44,
+    "displayed": 440,
+    "first_decode_after_rf_s": 17.95416527148336,
+    "first_present_after_rf_s": 18.825254646129906,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.07690447916666666,
+        "component_peak": 0.99609375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.19921875
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": 0.25859375,
+    "audio_pitch_max_hz": 0.291015625,
+    "last_health": {
+      "time": 6442212.701173227,
+      "tx_phase": "done",
+      "decoded": 44,
+      "delivered": 44,
+      "displayed": 440,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  44 GOP  SNR 32.4 dB",
+      "video_health": {
+        "enqueued_frames": 440,
+        "displayed_frames": 440,
+        "trimmed_frames": 0,
+        "queue_high_water": 10,
+        "empty_events": 3,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 0,
+        "rx_backlog_max_s": 0.6995625,
+        "demod_max_ms": 605.5862847715616,
+        "decode_max_ms": 28.145636431872845,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 22,
+        "producer_blocks": 617,
+        "producer_wait_s": 0.0016969507560133934,
+        "late_data_events": 0,
+        "queue_wait_max_ms": 74.44086391478777,
+        "tx_write_max_ms": 100.64359195530415,
+        "tx_gap_max_s": 0.0014662407338619232,
+        "sent_samples": 147840000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 1.8901005387306213
+      },
+      "source_dropped_frames": 14,
+      "rx_samples": 2985579,
+      "rx_backlog_s": 0.1,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 622,
+      "sdr_health": {
+        "captured_samples": 59712000,
+        "converted_samples": 59712000,
+        "iq_queue_high_water": 1,
+        "iq_overruns": 0,
+        "iq_discarded_samples": 0,
+        "conversion_max_ms": 72.42153771221638,
+        "conversion_total_s": 4.285729571245611,
+        "conversion_blocks": 616,
+        "capture_gap_max_s": 0.10421145148575306
+      },
+      "audio_queue": 0,
+      "audio_error": "",
+      "audio_health": {
+        "queue_high_water_samples": 8000,
+        "dropped_blocks": 0,
+        "idle_samples": 141280
+      },
+      "av_queue": 0,
+      "av_dropped": 0,
+      "av_pending": 0,
+      "rss_mb": 2726.89453125
+    },
+    "source_dropped_frames": 14,
+    "min_source_cosine": 0.9080658555030823,
+    "warnings": [
+      "TX waveform debug: /tmp/aetv-all-modes-final-20260914/overload-retry-AC16_AV/received/debug/20260914-125921-085_tx_AC16_N0CALL.tx.wav",
+      "RX modem debug: /tmp/aetv-all-modes-final-20260914/overload-retry-AC16_AV/received/debug/20260914-125929-479_rx_rtlsdr.modem.jsonl",
+      "RX rtlsdr audio debug: /tmp/aetv-all-modes-final-20260914/overload-retry-AC16_AV/received/debug/20260914-125929-479_rx_rtlsdr.audio.wav",
+      "RTL-SDR ADC overload (8.3% clipped samples); lower RTL RX gain and apply RF settings.",
+      "saved /tmp/aetv-all-modes-final-20260914/overload-retry-AC16_AV/received/20260914-130032_N0CALL_AC16.mp4"
+    ],
+    "source_revision": "7e8445f8dfb2a2d3716963e0df9d27d5f9a3e551",
+    "receive_start_to_first_gop_s": 10.817165271483361,
+    "last_source_gop": 59,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1584,
+        "write_max_ms": 0.22365618497133255,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 110,
+        "write_max_ms": 0.06584450602531433,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1105920,
+        "write_max_ms": 0.7181316614151001,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 32000,
+        "write_max_ms": 0.0495249405503273,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": 0.291015625
+  },
+  {
+    "case": "rc10-weak-late-V8_AV",
+    "mode": "V8_AV",
+    "packaged": true,
+    "device": "CPU",
+    "decoded": 74,
+    "displayed": 438,
+    "first_decode_after_rf_s": 23.833206733688712,
+    "first_present_after_rf_s": 24.390266411937773,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.0,
+        "component_peak": 0.03515625
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.15234375
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": 0.15351562499999993,
+    "audio_pitch_max_hz": 20.65625,
+    "last_health": {
+      "time": 6442605.801743281,
+      "tx_phase": "done",
+      "decoded": 74,
+      "delivered": 73,
+      "displayed": 438,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  73 GOP  SNR 28.1 dB",
+      "video_health": {
+        "enqueued_frames": 438,
+        "displayed_frames": 438,
+        "trimmed_frames": 0,
+        "queue_high_water": 6,
+        "empty_events": 12,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 1,
+        "rx_backlog_max_s": 2.2,
+        "demod_max_ms": 142.02785957604647,
+        "decode_max_ms": 2250.2997536212206,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 24,
+        "producer_blocks": 1217,
+        "producer_wait_s": 0.32489618845283985,
+        "late_data_events": 1,
+        "queue_wait_max_ms": 37.23595384508371,
+        "tx_write_max_ms": 101.74407251179218,
+        "tx_gap_max_s": 1.102925693616271,
+        "sent_samples": 291840000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 0.7298849523067474
+      },
+      "source_dropped_frames": 14,
+      "rx_samples": 1381158,
+      "rx_backlog_s": 0.1,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 1231,
+      "sdr_health": {
+        "captured_samples": 118176000,
+        "converted_samples": 110496000,
+        "iq_queue_high_water": 80,
+        "iq_overruns": 1,
+        "iq_discarded_samples": 7680000,
+        "conversion_max_ms": 86.90423332154751,
+        "conversion_total_s": 8.704564114101231,
+        "conversion_blocks": 1139,
+        "capture_gap_max_s": 0.10456802882254124
+      },
+      "audio_queue": 0,
+      "audio_error": "",
+      "audio_health": {
+        "queue_high_water_samples": 8000,
+        "dropped_blocks": 0,
+        "idle_samples": 396480
+      },
+      "av_queue": 0,
+      "av_dropped": 0,
+      "av_pending": 0,
+      "rss_mb": 1131.53515625
+    },
+    "source_dropped_frames": 14,
+    "min_source_cosine": 0.7213031053543091,
+    "warnings": [
+      "SDR IQ queue overrun; discarded 8.0 s and reacquiring"
+    ],
+    "source_revision": "a1b4df938909818d429aac1244738db641414829",
+    "receive_start_to_first_gop_s": 16.69620673368871,
+    "last_source_gop": 119,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1587,
+        "write_max_ms": 45.600282959640026,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 110,
+        "write_max_ms": 0.2705967053771019,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 373248,
+        "write_max_ms": 0.2660490572452545,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 32000,
+        "write_max_ms": 0.3923298791050911,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [
+      {
+        "row": 40,
+        "decoded_gop": 40,
+        "source_gop": 61,
+        "time_s": 63.806219103746116,
+        "expected_hz": 423,
+        "measured_hz": 402.34375,
+        "error_hz": -20.65625
+      }
+    ],
+    "audio_other_blocks_max_error_hz": 0.16796875
+  },
+  {
+    "case": "rc10-weak-late-V8",
+    "mode": "V8",
+    "packaged": true,
+    "device": "CPU",
+    "decoded": 74,
+    "displayed": 443,
+    "first_decode_after_rf_s": 23.63896021898836,
+    "first_present_after_rf_s": 23.92294238228351,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.0,
+        "component_peak": 0.02734375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.13671875
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": null,
+    "audio_pitch_max_hz": null,
+    "last_health": {
+      "time": 6442743.500614306,
+      "tx_phase": "done",
+      "decoded": 74,
+      "delivered": 74,
+      "displayed": 443,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  74 GOP  SNR 25.3 dB",
+      "video_health": {
+        "enqueued_frames": 444,
+        "displayed_frames": 443,
+        "trimmed_frames": 1,
+        "queue_high_water": 12,
+        "empty_events": 4,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 1,
+        "rx_backlog_max_s": 2.2,
+        "demod_max_ms": 144.66375764459372,
+        "decode_max_ms": 2267.727921716869,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 21,
+        "producer_blocks": 1207,
+        "producer_wait_s": 0.0046727946028113365,
+        "late_data_events": 1,
+        "queue_wait_max_ms": 34.54203065484762,
+        "tx_write_max_ms": 101.16480756551027,
+        "tx_gap_max_s": 1.1195583287626505,
+        "sent_samples": 289440000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 2.084033563733101
+      },
+      "source_dropped_frames": 8,
+      "rx_samples": 912758,
+      "rx_backlog_s": 0.1,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 1221,
+      "sdr_health": {
+        "captured_samples": 117216000,
+        "converted_samples": 109536000,
+        "iq_queue_high_water": 80,
+        "iq_overruns": 1,
+        "iq_discarded_samples": 7680000,
+        "conversion_max_ms": 74.64218232780695,
+        "conversion_total_s": 8.619170072488487,
+        "conversion_blocks": 1129,
+        "capture_gap_max_s": 0.10553916823118925
+      },
+      "rss_mb": 1124.37109375
+    },
+    "source_dropped_frames": 8,
+    "min_source_cosine": 0.7085717916488647,
+    "warnings": [
+      "SDR IQ queue overrun; discarded 8.0 s and reacquiring"
+    ],
+    "source_revision": "a1b4df938909818d429aac1244738db641414829",
+    "receive_start_to_first_gop_s": 16.50196021898836,
+    "last_source_gop": 119,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1406,
+        "write_max_ms": 0.4929518327116966,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 373248,
+        "write_max_ms": 0.21455995738506317,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": null
+  },
+  {
+    "case": "rc10-weak-late-AC16",
+    "mode": "AC16",
+    "packaged": true,
+    "device": "CPU",
+    "decoded": 81,
+    "displayed": 810,
+    "first_decode_after_rf_s": 17.87708784453571,
+    "first_present_after_rf_s": 18.204391532577574,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.0,
+        "component_peak": 0.03515625
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.17578125
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": null,
+    "audio_pitch_max_hz": null,
+    "last_health": {
+      "time": 6442881.101069781,
+      "tx_phase": "done",
+      "decoded": 81,
+      "delivered": 81,
+      "displayed": 810,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  81 GOP  SNR 36.8 dB",
+      "video_health": {
+        "enqueued_frames": 810,
+        "displayed_frames": 810,
+        "trimmed_frames": 0,
+        "queue_high_water": 19,
+        "empty_events": 7,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 1,
+        "rx_backlog_max_s": 2.4,
+        "demod_max_ms": 503.3254297450185,
+        "decode_max_ms": 2322.2901383414865,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 24,
+        "producer_blocks": 1207,
+        "producer_wait_s": 0.004733205772936344,
+        "late_data_events": 1,
+        "queue_wait_max_ms": 93.61190907657146,
+        "tx_write_max_ms": 103.29906176775694,
+        "tx_gap_max_s": 1.2953797988593578,
+        "sent_samples": 289440000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 3.7760762497782707
+      },
+      "source_dropped_frames": 16,
+      "rx_samples": 5491158,
+      "rx_backlog_s": 0.0,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 1224,
+      "sdr_health": {
+        "captured_samples": 117504000,
+        "converted_samples": 109824000,
+        "iq_queue_high_water": 80,
+        "iq_overruns": 1,
+        "iq_discarded_samples": 7680000,
+        "conversion_max_ms": 121.61573581397533,
+        "conversion_total_s": 8.4426223449409,
+        "conversion_blocks": 1127,
+        "capture_gap_max_s": 0.10705649852752686
+      },
+      "rss_mb": 1200.48828125
+    },
+    "source_dropped_frames": 16,
+    "min_source_cosine": 0.8785342574119568,
+    "warnings": [
+      "SDR IQ queue overrun; discarded 8.0 s and reacquiring"
+    ],
+    "source_revision": "a1b4df938909818d429aac1244738db641414829",
+    "receive_start_to_first_gop_s": 10.740087844535708,
+    "last_source_gop": 119,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1402,
+        "write_max_ms": 1.2674322351813316,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1105920,
+        "write_max_ms": 2.350212074816227,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": null
+  },
+  {
+    "case": "rc10-weak-late-V7",
+    "mode": "V7",
+    "packaged": true,
+    "device": "CUDA",
+    "decoded": 83,
+    "displayed": 996,
+    "first_decode_after_rf_s": 18.199398212134838,
+    "first_present_after_rf_s": 18.257626250386238,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.0,
+        "component_peak": 0.02734375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.16796875
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": null,
+    "audio_pitch_max_hz": null,
+    "last_health": {
+      "time": 6443020.200735637,
+      "tx_phase": "done",
+      "decoded": 83,
+      "delivered": 83,
+      "displayed": 996,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  83 GOP  SNR 39.0 dB",
+      "video_health": {
+        "enqueued_frames": 996,
+        "displayed_frames": 996,
+        "trimmed_frames": 0,
+        "queue_high_water": 23,
+        "empty_events": 6,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 1,
+        "rx_backlog_max_s": 2.1,
+        "demod_max_ms": 341.80246479809284,
+        "decode_max_ms": 2042.5349855795503,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 24,
+        "producer_blocks": 1207,
+        "producer_wait_s": 3.9225749084725976,
+        "late_data_events": 1,
+        "queue_wait_max_ms": 26.847210712730885,
+        "tx_write_max_ms": 100.54082795977592,
+        "tx_gap_max_s": 1.7137963995337486,
+        "sent_samples": 289440000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 3.3880164846777916
+      },
+      "source_dropped_frames": 22,
+      "rx_samples": 2755158,
+      "rx_backlog_s": 0.0,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 1228,
+      "sdr_health": {
+        "captured_samples": 117888000,
+        "converted_samples": 110208000,
+        "iq_queue_high_water": 80,
+        "iq_overruns": 1,
+        "iq_discarded_samples": 7680000,
+        "conversion_max_ms": 66.63399282842875,
+        "conversion_total_s": 8.047243225388229,
+        "conversion_blocks": 1136,
+        "capture_gap_max_s": 0.10470469482243061
+      },
+      "rss_mb": 1936.86328125
+    },
+    "source_dropped_frames": 22,
+    "min_source_cosine": 0.7883874177932739,
+    "warnings": [
+      "SDR IQ queue overrun; discarded 8.0 s and reacquiring"
+    ],
+    "source_revision": "a1b4df938909818d429aac1244738db641414829",
+    "receive_start_to_first_gop_s": 11.062398212134838,
+    "last_source_gop": 119,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1405,
+        "write_max_ms": 44.156345538794994,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1327104,
+        "write_max_ms": 0.6096949800848961,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 0,
+        "write_max_ms": 0.0,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [],
+    "audio_other_blocks_max_error_hz": null
+  },
+  {
+    "case": "rc10-weak-late-AC16_AV",
+    "mode": "AC16_AV",
+    "packaged": true,
+    "device": "CUDA",
+    "decoded": 82,
+    "displayed": 810,
+    "first_decode_after_rf_s": 18.296185413375497,
+    "first_present_after_rf_s": 18.899186951108277,
+    "errors": [],
+    "adc": [
+      {
+        "phase": "initial",
+        "rail_fraction": 0.0,
+        "component_peak": 0.02734375
+      },
+      {
+        "phase": "restored",
+        "rail_fraction": 0.0,
+        "component_peak": 0.18359375
+      }
+    ],
+    "portaudio_underflows": 0,
+    "audio_pitch_p95_hz": 0.25,
+    "audio_pitch_max_hz": 98.53515625,
+    "last_health": {
+      "time": 6443162.000605659,
+      "tx_phase": "done",
+      "decoded": 82,
+      "delivered": 81,
+      "displayed": 810,
+      "video_queue": 0,
+      "video_timer": false,
+      "message": "de N0CALL  81 GOP  SNR 36.2 dB",
+      "video_health": {
+        "enqueued_frames": 810,
+        "displayed_frames": 810,
+        "trimmed_frames": 0,
+        "queue_high_water": 10,
+        "empty_events": 7,
+        "late_ticks": 0,
+        "late_max_s": 0.0
+      },
+      "rx_health": {
+        "ring_overruns": 0,
+        "source_discontinuities": 1,
+        "rx_backlog_max_s": 2.0,
+        "demod_max_ms": 479.14114221930504,
+        "decode_max_ms": 2026.1650700122118,
+        "audio_dropped": 0
+      },
+      "tx_health": {
+        "iq_queue_high_water": 24,
+        "producer_blocks": 1217,
+        "producer_wait_s": 7.0057751853019,
+        "late_data_events": 1,
+        "queue_wait_max_ms": 89.08365480601788,
+        "tx_write_max_ms": 100.9118165820837,
+        "tx_gap_max_s": 1.6761124981567264,
+        "sent_samples": 291840000,
+        "completed": true
+      },
+      "raw_recorder": {
+        "queue_high_water": 1,
+        "dropped_blocks": 0,
+        "write_max_ms": 1.3496093451976776
+      },
+      "source_dropped_frames": 28,
+      "rx_samples": 5553558,
+      "rx_backlog_s": 0.0,
+      "iq_queue": 0,
+      "iq_error": "",
+      "iq_blocks": 1237,
+      "sdr_health": {
+        "captured_samples": 118752000,
+        "converted_samples": 111072000,
+        "iq_queue_high_water": 80,
+        "iq_overruns": 1,
+        "iq_discarded_samples": 7680000,
+        "conversion_max_ms": 126.9109845161438,
+        "conversion_total_s": 7.9804671267047524,
+        "conversion_blocks": 1140,
+        "capture_gap_max_s": 0.10490403790026903
+      },
+      "audio_queue": 0,
+      "audio_error": "",
+      "audio_health": {
+        "queue_high_water_samples": 8000,
+        "dropped_blocks": 0,
+        "idle_samples": 337120
+      },
+      "av_queue": 0,
+      "av_dropped": 0,
+      "av_pending": 0,
+      "rss_mb": 2867.37109375
+    },
+    "source_dropped_frames": 28,
+    "min_source_cosine": 0.8452244997024536,
+    "warnings": [
+      "SDR IQ queue overrun; discarded 8.0 s and reacquiring"
+    ],
+    "source_revision": "a1b4df938909818d429aac1244738db641414829",
+    "receive_start_to_first_gop_s": 11.159185413375496,
+    "last_source_gop": 119,
+    "trace_recorders": {
+      "health": {
+        "queue_high_water_bytes": 1585,
+        "write_max_ms": 1.2927008792757988,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "audio_output": {
+        "queue_high_water_bytes": 110,
+        "write_max_ms": 0.3774808719754219,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "decoded_rgb": {
+        "queue_high_water_bytes": 1105920,
+        "write_max_ms": 0.5615334957838058,
+        "rejected_bytes": 0,
+        "error": ""
+      },
+      "paired_audio": {
+        "queue_high_water_bytes": 32000,
+        "write_max_ms": 0.416305847465992,
+        "rejected_bytes": 0,
+        "error": ""
+      }
+    },
+    "audio_outliers_over_1hz": [
+      {
+        "row": 44,
+        "decoded_gop": 44,
+        "source_gop": 60,
+        "time_s": 62.87454201094806,
+        "expected_hz": 400,
+        "measured_hz": 498.53515625,
+        "error_hz": 98.53515625
+      }
+    ],
+    "audio_other_blocks_max_error_hz": 0.26171875
+  }
+]
