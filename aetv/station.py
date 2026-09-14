@@ -642,17 +642,20 @@ class TxEngine:
                     leveled_chunks(), transmit_rate, n_gops, codec,
                     channel_profile, tx_recorder,
                 )
-            if settings.tx_backend == "pluto":
+            if settings.tx_backend in {"pluto", "hackrf"}:
                 from .sdr import transmit_pluto
-                self._set(TxPhase.ENCODING, 0.0, "Preparing Pluto transmit")
-                complete = transmit_pluto(
+                from .hackrf import transmit_hackrf
+                transport = transmit_hackrf if settings.tx_backend == "hackrf" else transmit_pluto
+                label = "HackRF" if settings.tx_backend == "hackrf" else "Pluto"
+                self._set(TxPhase.ENCODING, 0.0, f"Preparing {label} transmit")
+                complete = transport(
                     leveled_chunks(), transmit_rate, settings, self._cancel,
-                    lambda progress: self._set(TxPhase.SENDING, progress, "Pluto transmitting"),
+                    lambda progress: self._set(TxPhase.SENDING, progress, f"{label} transmitting"),
                     max_seconds=n_gops + 0.65,
                 )
                 self._set(TxPhase.DONE if complete else TxPhase.CANCELLED,
                           1.0 if complete else self.state.progress,
-                          "Pluto off · sent" if complete else "Pluto off · cancelled")
+                          f"{label} off · sent" if complete else f"{label} off · cancelled")
                 return complete
             return self._keyed_send_stream(leveled_chunks(), transmit_rate, n_gops)
         except Exception as error:
@@ -1470,7 +1473,7 @@ class RxEngine:
                     },
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
-            elif settings.rx_source in {"soundcard", "pluto", "rtlsdr"}:
+            elif settings.rx_source in {"soundcard", "pluto", "rtlsdr", "hackrf"}:
                 self._soundcard_recorder = _PcmWaveRecorder(
                     prefix.with_suffix(".audio.wav"), capture_rate
                 )
@@ -1494,7 +1497,7 @@ class RxEngine:
             "auto_frequency_correction": settings.sdr_auto_correct,
             "manual_frequency_correction_hz": settings.sdr_rx_correction_hz,
         })
-        if settings.rx_source in {"pluto", "rtlsdr"}:
+        if settings.rx_source in {"pluto", "rtlsdr", "hackrf"}:
             from .sdr import SDRCapture
             sink = (
                 _RecordingSink(self.ring, self._soundcard_recorder)
@@ -1670,7 +1673,7 @@ class RxEngine:
             # Kiwi already has an exact-rate I/Q resampler upstream. Both
             # sources still need guarded correction of waveform timing jumps.
             timing_tracking=self.station.settings.rx_source == "soundcard",
-            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard", "pluto", "rtlsdr"},
+            boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard", "pluto", "rtlsdr", "hackrf"},
         )
 
     def _loop(self) -> None:

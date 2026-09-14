@@ -28,12 +28,16 @@ def load_validation(path):
         raise ValueError("OTA validation is limited to 1–60 GOPs")
     settings = StationSettings(
         mode="AC16",
-        tx_backend="pluto",
+        tx_backend=config.get("transmitter", "pluto"),
         rx_source=config.get("receiver", "rtlsdr"),
         gops=gops,
         torch_device=config.get("device", "cpu"),
         pluto_uri=config.get("pluto_uri", "ip:192.168.2.1"),
         rtl_serial=config.get("rtl_serial", "1001"),
+        hackrf_serial=config.get("hackrf_serial", ""),
+        hackrf_tx_gain=int(config.get("hackrf_tx_gain", 0)),
+        hackrf_rx_lna_gain=int(config.get("hackrf_rx_lna_gain", 16)),
+        hackrf_rx_vga_gain=int(config.get("hackrf_rx_vga_gain", 16)),
         pluto_tx_gain=float(config.get("tx_gain", -30)),
         pluto_rx_gain=float(config.get("rx_gain", 30)),
         rtl_rx_gain=float(config.get("rx_gain", 37.2)),
@@ -46,6 +50,10 @@ def load_validation(path):
         debug_capture=True,
     )
     problems = settings.validate()
+    if settings.tx_backend not in {"pluto", "hackrf"}:
+        problems.append("OTA validation requires a Pluto or HackRF transmitter")
+    if settings.tx_backend == "hackrf" and settings.rx_source == "hackrf":
+        problems.append("HackRF is half duplex; OTA validation needs a separate Pluto or RTL receiver")
     if problems:
         raise ValueError("; ".join(problems))
     return config, settings
@@ -69,9 +77,14 @@ def install_validation(window, app, config):
             key: getattr(window.settings, key)
             for key in (
                 "rx_source",
+                "tx_backend",
                 "sdr_frequency_mhz",
                 "pluto_uri",
                 "rtl_serial",
+                "hackrf_serial",
+                "hackrf_tx_gain",
+                "hackrf_rx_lna_gain",
+                "hackrf_rx_vga_gain",
                 "pluto_tx_gain",
                 "pluto_rx_gain",
                 "rtl_rx_gain",

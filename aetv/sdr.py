@@ -21,7 +21,7 @@ import numpy as np
 
 from .audio_io import StreamResampler, resample_ratio
 from .hfchannel import _active_signal_power
-from .sdr_dsp import IQToModem, ModemToIQ, estimate_signal_offset
+from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ, estimate_signal_offset
 
 
 def rtl_executable() -> str:
@@ -55,10 +55,12 @@ def _rtl_process_options():
 
 
 def sdr_runtime_smoke():
-    """Load both native transports without opening a radio or transmitting."""
+    """Load native transports without opening a radio or transmitting."""
     import adi
     import iio
     from .modem_smoke import acquisition_smoke
+    from .hackrf import runtime_smoke as hackrf_smoke
+    from .hackrf_smoke import transport_smoke
 
     executable = rtl_executable()
     result = subprocess.run(
@@ -103,6 +105,8 @@ def sdr_runtime_smoke():
         "pluto_class": f"{adi.Pluto.__module__}.{adi.Pluto.__name__}",
         "xml_context": True,
         "acquisition": acquisition_smoke(),
+        "hackrf": hackrf_smoke(),
+        "hackrf_transport": transport_smoke(),
     }
 
 
@@ -168,6 +172,13 @@ class SDRCapture:
         self.mode, self.ring = mode, ring
         self.on_error, self.on_status = on_error, on_status
         self.rate = 2400000 if settings.rx_source == "pluto" else 960000
+        self._hackrf = None
+        self._decimator = None
+        if settings.rx_source == "hackrf":
+            from .hackrf import SAMPLE_RATE
+            self.rate = SAMPLE_RATE
+            self._decimator = IQDecimator(self.rate // 960000)
+        self.conversion_rate = 960000 if self._decimator else self.rate
         self.preview = IQPreview(self.rate, settings.sdr_frequency_mhz * 1e6, mode)
         self._stop = threading.Event()
         self._radio = None
@@ -186,6 +197,19 @@ class SDRCapture:
             self._radio.gain_control_mode_chan0 = "manual"
             self._radio.rx_hardwaregain_chan0 = settings.pluto_rx_gain
             self._radio.rx_buffer_size = self.rate // 10
+        elif settings.rx_source == "hackrf":
+            from .hackrf import HackRF
+            self._hackrf = HackRF(settings, "rx")
+            try:
+                self._hackrf.start_rx()
+            except Exception:
+                self._hackrf.close()
+                self._hackrf = None
+                raise
+            self.on_status(
+                f"HackRF: {self.rate} S/s, LNA {settings.hackrf_rx_lna_gain} dB, "
+                f"VGA {settings.hackrf_rx_vga_gain} dB, RF amp/bias off"
+            )
         else:
             command = [
                 rtl_executable(),
@@ -233,7 +257,9 @@ class SDRCapture:
 
     def _capture(self):
         while not self._stop.is_set():
-            if self._radio is not None:
+            if self._hackrf is not None:
+                iq = self._hackrf.read(self._stop)
+            elif self._radio is not None:
                 iq = np.asarray(self._radio.rx(), np.complex64) / 2048
             else:
                 data = self._process.stdout.read(self.rate // 10 * 2)
@@ -246,6 +272,8 @@ class SDRCapture:
                     raise RuntimeError("Truncated RTL IQ sample")
                 iq = ((raw[::2] - 127.5) + 1j * (raw[1::2] - 127.5)) / 128
             self.preview.write(iq)
+            if self._decimator is not None:
+                iq = self._decimator.feed(iq)
             try:
                 self._queue.put_nowait(iq)
             except queue.Full as error:
@@ -255,7 +283,7 @@ class SDRCapture:
 
     def _convert(self):
         offset = -100000 + self.settings.sdr_rx_correction_hz
-        adapter = IQToModem(self.rate, offset, self.mode.geometry.fcenter_hz)
+        adapter = IQToModem(self.conversion_rate, offset, self.mode.geometry.fcenter_hz)
         resample = StreamResampler(*resample_ratio(48000, self.mode.geometry.fs))
         calibration = []
         estimates = []
@@ -272,7 +300,7 @@ class SDRCapture:
                     continue
                 try:
                     measured = estimate_signal_offset(
-                        np.concatenate(calibration[-10:]), self.rate
+                        np.concatenate(calibration[-10:]), self.conversion_rate
                     )
                 except ValueError:
                     estimates.clear()
@@ -287,7 +315,7 @@ class SDRCapture:
                 if len(estimates) < 5 or np.ptp(estimates) > 150:
                     continue
                 offset = float(np.median(estimates))
-                adapter = IQToModem(self.rate, offset, self.mode.geometry.fcenter_hz)
+                adapter = IQToModem(self.conversion_rate, offset, self.mode.geometry.fcenter_hz)
                 resample = StreamResampler(
                     *resample_ratio(48000, self.mode.geometry.fs)
                 )
@@ -310,6 +338,9 @@ class SDRCapture:
                 self._process.wait(timeout=3)
         for thread in self._threads:
             thread.join(timeout=3)
+        if self._hackrf is not None:
+            self._hackrf.close()
+            self._hackrf = None
         if self._radio is not None:
             self._radio.rx_destroy_buffer()
             self._radio = None

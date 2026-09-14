@@ -1,9 +1,8 @@
 Portable SDR components
 =======================
 
-AETV invokes rtl_sdr as a separate executable and dynamically loads libiio.
-You may replace these components with compatible builds. They are unmodified
-upstream binaries; they retain their own copyrights and licenses.
+AETV invokes rtl_sdr as a separate executable and dynamically loads libiio and libhackrf.
+You may replace these components with compatible builds. The bundled binaries and build sources retain their own copyrights and licenses.
 
 Windows packages include:
   RTL-SDR Blog V1.4.0 (GPL-2.0-or-later), including V4/V4L support:
@@ -31,3 +30,21 @@ copyright holders and upstream source locations. Build provenance is Ubuntu
   https://archive.ubuntu.com/ubuntu/pool/universe/libi/libiio/
 
 See docs/sdr-portable-setup.md for the one-time operating-system USB setup.
+
+HackRF additions (all portable variants)
+---------------------------------------
+libhackrf 2026.01.3 / library 0.9.2 uses the BSD-3-Clause license in its header.
+The upstream tree also contains GPL-2.0-or-later tools/build files. Linux builds
+compile the checksum-pinned official source archive; it and the license texts
+are included in drivers/sources and drivers/licenses. No firmware is flashed.
+  https://github.com/greatscottgadgets/hackrf/releases/tag/v2026.01.3
+
+Windows uses checksum-pinned MSYS2 builds of libhackrf 2026.01.3-1, libusb
+1.0.30-1 (LGPL-2.1-or-later), and libwinpthread
+14.0.0.r375.g9c1abbbf5-1 (MIT/BSD). The libhackrf and libusb source packages
+include the distribution build recipes. Winpthreads' license text is included.
+Pluto and HackRF share the same libusb 1.0.30 DLL to avoid process-wide DLL
+version conflicts. The original Pluto USB driver installer is unchanged.
+  https://packages.msys2.org/packages/mingw-w64-x86_64-hackrf
+  https://packages.msys2.org/packages/mingw-w64-x86_64-libusb
+  https://packages.msys2.org/packages/mingw-w64-x86_64-libwinpthread

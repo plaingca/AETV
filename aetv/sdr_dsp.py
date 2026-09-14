@@ -6,6 +6,30 @@ import numpy as np
 from scipy.signal import firwin, lfilter, upfirdn, welch
 
 
+class IQDecimator:
+    """Reduce wideband hardware IQ before calibration, keeping FIR/phase state."""
+
+    def __init__(self, factor=10):
+        self.factor = factor
+        self.taps = firwin(20 * factor + 1, 0.8 / factor)
+        self.history = np.zeros(len(self.taps) - 1, np.complex64)
+        self.input_count = 0
+
+    def feed(self, iq):
+        if not len(iq):
+            return np.empty(0, np.complex64)
+        joined = np.concatenate((self.history, iq))
+        origin = self.input_count - len(self.history)
+        phase = (-origin) % self.factor
+        filtered = upfirdn(self.taps, joined[phase:], down=self.factor)
+        indices = origin + phase + np.arange(len(filtered)) * self.factor
+        result = filtered[(indices >= self.input_count) &
+                          (indices < self.input_count + len(iq))]
+        self.history = joined[-len(self.history):].copy()
+        self.input_count += len(iq)
+        return result.astype(np.complex64)
+
+
 class ModemToIQ:
     """Select the analytic sideband, interpolate and translate with retained state.
 

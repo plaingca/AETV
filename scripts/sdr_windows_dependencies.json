@@ -5,7 +5,6 @@
     "sha256": "4ad4a8c6b3f7145922c122dcfc51d693f0d3f9a0054fb2228814ce58c538a6ca",
     "members": {
       "Windows-VS-2022-x64/libiio.dll": "runtime/pluto/libiio.dll",
-      "Windows-VS-2022-x64/libusb-1.0.dll": "runtime/pluto/libusb-1.0.dll",
       "Windows-VS-2022-x64/libserialport-0.dll": "runtime/pluto/libserialport-0.dll",
       "Windows-VS-2022-x64/libxml2.dll": "runtime/pluto/libxml2.dll"
     }
@@ -98,5 +97,47 @@
     "url": "https://codeload.github.com/pbatard/libwdi/tar.gz/refs/tags/v1.5.1",
     "sha256": "a695e93db0977dfdc5c6a99a4ea91b22f9027547d0177b2a0f3075078643c929",
     "destination": "sources/libwdi-v1.5.1.tar.gz"
+  },
+  {
+    "name": "msys2-hackrf-2026.01.3-1",
+    "url": "https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-hackrf-2026.01.3-1-any.pkg.tar.zst",
+    "sha256": "c6457baca8abcf0b773a5f0c022e8df3142e81ca1e1991adb1ded9848c06417b",
+    "format": "tar.zst",
+    "members": {
+      "mingw64/bin/libhackrf.dll": "runtime/hackrf/libhackrf.dll",
+      "mingw64/include/libhackrf/hackrf.h": "licenses/libhackrf-BSD-header.h"
+    }
+  },
+  {
+    "name": "msys2-libusb-1.0.30-1",
+    "url": "https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-libusb-1.0.30-1-any.pkg.tar.zst",
+    "sha256": "124edc26b009678a4c5e759481a364abf63ed7f2f49a53092e8bd0a47c0c0740",
+    "format": "tar.zst",
+    "members": {
+      "mingw64/bin/libusb-1.0.dll": "runtime/hackrf/libusb-1.0.dll",
+      "mingw64/share/licenses/libusb/COPYING": "licenses/HackRF-libusb-LGPL.txt"
+    }
+  },
+  {
+    "name": "msys2-libwinpthread-14.0.0.r375.g9c1abbbf5-1",
+    "url": "https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-libwinpthread-14.0.0.r375.g9c1abbbf5-1-any.pkg.tar.zst",
+    "sha256": "1d0ed7fda332a5c879de210f3d72c75fa1f3df7cc63dd951e763dec8eb02c1ee",
+    "format": "tar.zst",
+    "members": {
+      "mingw64/bin/libwinpthread-1.dll": "runtime/hackrf/libwinpthread-1.dll",
+      "mingw64/share/licenses/libwinpthread/COPYING": "licenses/libwinpthread-COPYING.txt"
+    }
+  },
+  {
+    "name": "msys2-hackrf-2026.01.3-1-source",
+    "url": "https://mirror.msys2.org/mingw/sources/mingw-w64-hackrf-2026.01.3-1.src.tar.zst",
+    "sha256": "b13c1caac90f9836c5664fecf83deae50d6a7c0ac526f4b6b463172fdd113b1e",
+    "destination": "sources/mingw-w64-hackrf-2026.01.3-1.src.tar.zst"
+  },
+  {
+    "name": "msys2-libusb-1.0.30-1-source",
+    "url": "https://mirror.msys2.org/mingw/sources/mingw-w64-libusb-1.0.30-1.src.tar.zst",
+    "sha256": "e1052bbff0fe7a7ce25b847ca5f69d7ecafe1c644a3d07f971e770c3a44724f6",
+    "destination": "sources/mingw-w64-libusb-1.0.30-1.src.tar.zst"
   }
 ]

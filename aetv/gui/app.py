@@ -77,6 +77,7 @@ def _rx_runtime_config(settings: StationSettings) -> tuple:
         settings.rx_source,
         settings.sdr_frequency_mhz, settings.pluto_uri, settings.rtl_serial,
         settings.pluto_rx_gain, settings.rtl_rx_gain,
+        settings.hackrf_serial, settings.hackrf_rx_lna_gain, settings.hackrf_rx_vga_gain,
         settings.sdr_rx_correction_hz, settings.sdr_auto_correct,
         settings.audio_input,
         getattr(settings, "audio_playback_output", ""),
@@ -593,7 +594,9 @@ class MainWindow(QMainWindow):
             key = self.tx.selected_channel_profile()
             self.rx.prepare_emulator(CHANNEL_PROFILES[key].label)
         simultaneous_rx = self.settings.rx_source == "kiwi" or (
-            self.settings.tx_backend == "pluto" and self.settings.rx_source in {"pluto", "rtlsdr"})
+            self.settings.tx_backend in {"pluto", "hackrf"}
+            and self.settings.rx_source in {"pluto", "rtlsdr", "hackrf"}
+            and not (self.settings.tx_backend == "hackrf" and self.settings.rx_source == "hackrf"))
         if self.rx.listening() and (emulating or not simultaneous_rx):
             self.rx.stop()
             self._resume_rx = True

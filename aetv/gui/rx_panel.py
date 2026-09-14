@@ -456,6 +456,7 @@ class ReceivePanel(QWidget):
         self.source.addItem("Public KiwiSDR", "kiwi")
         self.source.addItem("PlutoSDR", "pluto")
         self.source.addItem("RTL-SDR", "rtlsdr")
+        self.source.addItem("HackRF (experimental)", "hackrf")
         self.source.currentIndexChanged.connect(self._sync_source_visibility)
         self.input_device = QComboBox()
         self.playback_label = QLabel("Program audio to")
@@ -1047,7 +1048,7 @@ class ReceivePanel(QWidget):
     def _on_error(self, message: str) -> None:
         self.status.setText(message)
         self.logMessage.emit(message)
-        if self.station.settings.rx_source in {"pluto", "rtlsdr"} and self.listening():
+        if self.station.settings.rx_source in {"pluto", "rtlsdr", "hackrf"} and self.listening():
             self.stop()
 
     def _show_video(self, video, state: RxState) -> None:

@@ -38,7 +38,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--json", type=Path, help="also write machine-readable results")
-    parser.add_argument("--sdr-smoke", action="store_true", help="load bundled RTL-SDR and Pluto runtimes without opening hardware")
+    parser.add_argument("--sdr-smoke", action="store_true", help="check bundled RTL-SDR, Pluto and HackRF transports without opening hardware")
     parser.add_argument(
         "--video-save-smoke",
         type=Path,

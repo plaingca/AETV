@@ -8,10 +8,11 @@ from pathlib import Path
 _original_find_library = ctypes.util.find_library
 _root = Path(sys._MEIPASS)
 _pluto = _root / "aetv" / "bin" / "pluto"
+_hackrf = _root / "aetv" / "bin" / "hackrf"
 # Keep the handles alive: closing them removes the DLL search directories.
 _dll_directories = []
 if sys.platform == "win32":
-    for _directory in (_root, _pluto):
+    for _directory in (_root, _pluto, _hackrf):
         if _directory.is_dir():
             _dll_directories.append(os.add_dll_directory(str(_directory)))
 

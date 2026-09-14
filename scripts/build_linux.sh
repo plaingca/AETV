@@ -35,6 +35,8 @@ done
 uv venv "$build_root/runtime-venv" --managed-python --python 3.12 --clear
 python_bin="$build_root/runtime-venv/bin/python"
 uv pip install --python "$python_bin" "$repo_root[gui]" pyinstaller
+hackrf_dir="$build_root/hackrf"
+"$python_bin" "$repo_root/scripts/build_hackrf_linux.py" --output "$hackrf_dir"
 if [[ "$runtime" == gpu ]]; then
   uv pip uninstall --python "$python_bin" onnxruntime
   uv pip install --python "$python_bin" 'onnxruntime-gpu[cuda,cudnn]>=1.20,<1.24'
@@ -55,6 +57,7 @@ common=(
   --runtime-hook "$repo_root/scripts/pyi_rth_sdr.py"
   --add-binary "/usr/bin/rtl_sdr:aetv/bin/rtlsdr"
   --add-binary "$(ldconfig -p | awk '/libiio\.so\.0/ && !found {found=$NF} END {print found}'):."
+  --add-binary "$hackrf_dir/libhackrf.so.0:."
   --exclude-module torch
   --exclude-module torchvision
   --exclude-module aetv.models
@@ -96,6 +99,10 @@ cp "$repo_root/SDR-NOTICE.txt" "$app_dir/"
 mkdir -p "$app_dir/drivers/udev"
 cp /lib/udev/rules.d/60-librtlsdr0.rules "$app_dir/drivers/udev/"
 cp "$repo_root/scripts/60-aetv-pluto.rules" "$app_dir/drivers/udev/"
+cp "$hackrf_dir/53-hackrf.rules" "$app_dir/drivers/udev/"
+mkdir -p "$app_dir/drivers/sources" "$app_dir/drivers/licenses"
+cp "$hackrf_dir/hackrf-2026.01.3.zip" "$app_dir/drivers/sources/"
+cp "$hackrf_dir/libhackrf-BSD-header.h" "$hackrf_dir/HackRF-COPYING.txt" "$app_dir/drivers/licenses/"
 for dependency in libiio0 rtl-sdr librtlsdr0 libusb-1.0-0 libserialport0 libxml2; do
   if [[ -f "/usr/share/doc/$dependency/copyright" ]]; then
     cp "/usr/share/doc/$dependency/copyright" "$app_dir/$dependency-COPYRIGHT.txt"

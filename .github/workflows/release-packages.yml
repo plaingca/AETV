@@ -55,7 +55,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libiio-dev rtl-sdr
+          sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils libiio-dev rtl-sdr cmake libusb-1.0-0-dev
 
       - name: Install appimagetool
         if: runner.os == 'Linux'

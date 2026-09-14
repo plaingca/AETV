@@ -61,11 +61,15 @@ class StationSettings:
     tx_audio_mode: str = "mono"  # mono | iq
     tx_iq_mapping: str = "iq_lr"  # iq_lr | iq_rl
     tx_level: float = 0.7
-    rx_source: str = "soundcard"  # soundcard | flex | kiwi
-    tx_backend: str = "audio"  # audio | pluto
+    rx_source: str = "soundcard"  # soundcard | flex | kiwi | pluto | rtlsdr | hackrf
+    tx_backend: str = "audio"  # audio | pluto | hackrf
     sdr_frequency_mhz: float = 439.0
     pluto_uri: str = "ip:192.168.2.1"
     rtl_serial: str = "1001"
+    hackrf_serial: str = ""  # empty selects the first available HackRF
+    hackrf_tx_gain: int = 0
+    hackrf_rx_lna_gain: int = 16
+    hackrf_rx_vga_gain: int = 16
     pluto_tx_gain: float = -30.0
     pluto_rx_gain: float = 30.0
     rtl_rx_gain: float = 37.2
@@ -150,7 +154,7 @@ class StationSettings:
             problems.append(f"unknown TX channel profile {self.tx_channel_profile!r}")
         if self.cat_backend not in {"none", "hamlib", "rigctld", "flex", "rts", "dtr"}:
             problems.append(f"unknown CAT backend {self.cat_backend!r}")
-        if self.rx_source not in {"soundcard", "flex", "kiwi", "pluto", "rtlsdr"}:
+        if self.rx_source not in {"soundcard", "flex", "kiwi", "pluto", "rtlsdr", "hackrf"}:
             problems.append(f"unknown receive source {self.rx_source!r}")
         if receive and self.rx_source == "kiwi":
             if not self.kiwi_host:
@@ -170,9 +174,9 @@ class StationSettings:
             problems.append("Flex host is empty")
         if radio_tx and self.tx_backend == "audio" and self.cat_backend in {"rts", "dtr"} and not self.serial_port:
             problems.append("serial PTT port is empty")
-        if self.tx_backend not in {"audio", "pluto"}:
+        if self.tx_backend not in {"audio", "pluto", "hackrf"}:
             problems.append("unknown transmit backend")
-        using_sdr = (radio_tx and self.tx_backend == "pluto") or (receive and self.rx_source in {"pluto", "rtlsdr"})
+        using_sdr = (radio_tx and self.tx_backend in {"pluto", "hackrf"}) or (receive and self.rx_source in {"pluto", "rtlsdr", "hackrf"})
         using_pluto = (radio_tx and self.tx_backend == "pluto") or (receive and self.rx_source == "pluto")
         if using_sdr:
             if using_pluto and not 70 <= self.sdr_frequency_mhz <= 6000:
@@ -181,9 +185,10 @@ class StationSettings:
                 problems.append("Direct SDR requires video waveform mode")
             if using_pluto and not self.pluto_uri.strip():
                 problems.append("Pluto URI is empty")
-            if not -89.75 <= self.pluto_tx_gain <= 0:
+            if radio_tx and self.tx_backend == "pluto" and not -89.75 <= self.pluto_tx_gain <= 0:
                 problems.append("Pluto TX gain must be −89.75 to 0 dB")
-            if not 0 <= self.pluto_rx_gain <= 70 or not 0 <= self.rtl_rx_gain <= 49.6:
+            if receive and ((self.rx_source == "pluto" and not 0 <= self.pluto_rx_gain <= 70)
+                            or (self.rx_source == "rtlsdr" and not 0 <= self.rtl_rx_gain <= 49.6)):
                 problems.append("SDR receive gain is outside hardware bounds")
             if not -25000 <= self.sdr_rx_correction_hz <= 25000:
                 problems.append("RX frequency correction must be within ±25 kHz")
@@ -192,6 +197,18 @@ class StationSettings:
                 problems.append("RTL-SDR frequency must be 24–1765 MHz")
             if not self.rtl_serial.strip():
                 problems.append("Select an RTL-SDR serial")
+        if (radio_tx and self.tx_backend == "hackrf") or (receive and self.rx_source == "hackrf"):
+            if not 1.1 <= self.sdr_frequency_mhz <= 5999.9:
+                problems.append("HackRF frequency must be 1.1–5999.9 MHz (including LO offset)")
+            if self.hackrf_serial.strip() and not re.fullmatch(r"[0-9a-fA-F]{1,32}", self.hackrf_serial.strip()):
+                problems.append("HackRF serial must be up to 32 hexadecimal digits, or empty for the first device")
+            if radio_tx and self.tx_backend == "hackrf" and self.hackrf_tx_gain not in range(48):
+                problems.append("HackRF TX gain must be 0–47 dB in 1 dB steps")
+            if receive and self.rx_source == "hackrf":
+                if self.hackrf_rx_lna_gain not in range(0, 41, 8):
+                    problems.append("HackRF RX LNA gain must be 0–40 dB in 8 dB steps")
+                if self.hackrf_rx_vga_gain not in range(0, 63, 2):
+                    problems.append("HackRF RX VGA gain must be 0–62 dB in 2 dB steps")
         return problems
 
     def receive_path(self) -> Path:

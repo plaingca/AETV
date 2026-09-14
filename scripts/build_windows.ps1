@@ -23,7 +23,7 @@ $HamlibDir = Join-Path $BuildRoot "hamlib"
 
 uv venv (Join-Path $BuildRoot "runtime-venv") --python 3.12 --clear
 $Python = Join-Path $BuildRoot "runtime-venv\Scripts\python.exe"
-uv pip install --python $Python "$RepoRoot[gui]" pyinstaller
+uv pip install --python $Python "$RepoRoot[gui]" pyinstaller zstandard
 $SdrDir = Join-Path $BuildRoot "sdr"
 if (Test-Path -LiteralPath $SdrDir) { Remove-Item -LiteralPath $SdrDir -Recurse -Force }
 & $Python (Join-Path $RepoRoot "scripts\fetch_sdr_windows.py") --output $SdrDir
@@ -64,7 +64,7 @@ $Common = @(
     "--add-data", "$(Join-Path $RepoRoot 'aetv\assets');aetv/assets",
     "--add-data", "$HamlibDir;aetv/bin"
 )
-foreach ($Backend in @('rtlsdr', 'pluto')) {
+foreach ($Backend in @('rtlsdr', 'pluto', 'hackrf')) {
     foreach ($Binary in (Get-ChildItem -LiteralPath (Join-Path $SdrDir "runtime\$Backend") -File)) {
         $Common += @("--add-binary", "$($Binary.FullName);aetv/bin/$Backend")
     }
@@ -126,7 +126,7 @@ try {
     $SdrReport = Join-Path $AppDir 'sdr-gui-smoke.json'
     $SdrProcess = Start-Process -FilePath (Join-Path $AppDir 'AETV.exe') `
         -ArgumentList @('--sdr-smoke', "`"$SdrReport`"") -PassThru -WindowStyle Hidden
-    if (-not $SdrProcess.WaitForExit(60000)) {
+    if (-not $SdrProcess.WaitForExit(180000)) {
         Stop-Process -Id $SdrProcess.Id -Force -ErrorAction SilentlyContinue
         throw 'Packaged GUI SDR runtime check timed out'
     }

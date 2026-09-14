@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import time
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -36,11 +37,20 @@ def main():
     for entry in entries:
         data = fetch(entry)
         if "members" in entry:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                files = [
-                    (target, archive.read(member))
-                    for member, target in entry["members"].items()
-                ]
+            if entry.get("format") == "tar.zst":
+                import zstandard
+                with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(data)) as stream:
+                    with tarfile.open(fileobj=stream, mode="r|") as archive:
+                        files = [(entry["members"][member.name], archive.extractfile(member).read())
+                                 for member in archive if member.name in entry["members"]]
+                if len(files) != len(entry["members"]):
+                    raise RuntimeError(f"Missing archive members: {entry['name']}")
+            else:
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    files = [
+                        (target, archive.read(member))
+                        for member, target in entry["members"].items()
+                    ]
         else:
             files = [(entry["destination"], data)]
         for relative, content in files:
@@ -48,6 +58,10 @@ def main():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
         print(f"Verified {entry['name']}")
+    # Windows resolves a DLL basename once per process. Both native backends
+    # must use the same libusb, including HackRF's 1.0.30 raw-I/O API exports.
+    usb = (args.output / "runtime/hackrf/libusb-1.0.dll").read_bytes()
+    (args.output / "runtime/pluto/libusb-1.0.dll").write_bytes(usb)
     (args.output / "dependencies.json").write_text(
         manifest.read_text(encoding="utf-8"), encoding="utf-8"
     )

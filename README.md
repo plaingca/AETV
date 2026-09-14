@@ -233,6 +233,7 @@ are collected in [NOTICE](NOTICE).
 ## AC16 and direct SDR trial
 
 AC16 (256×144 at 10 fps) is available through Model Manager, with Pluto transmit
-and Pluto/RTL-SDR receive, an RF IQ waterfall, frequency dial, and separate gain
+and Pluto/RTL-SDR receive, plus experimental HackRF transmit/receive, an RF IQ
+waterfall, frequency dial, and separate gain
 controls. See [AC16 and SDR operation](docs/ac16-gui-and-sdr.md) for setup and
 portable-runtime details.

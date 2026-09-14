@@ -50,7 +50,12 @@ Pluto TX starts at −30 dB hardware gain by default, with the slider covering
 which selects its supported hardware setting. The amplitude control in the
 Transmit pane and the hardware gain slider are separate adjustments.
 
-All Windows and Linux portable packages include `rtl_sdr`, libiio, and their
+HackRF TX/RX is also available as an experimental selection. It has its own
+serial and TX/RX gain controls, captured-IQ waterfall, and automatic half-duplex
+pause/resume. See [HackRF setup and validation limits](sdr-portable-setup.md#hackrf-experimental).
+No physical HackRF test has been performed.
+
+All Windows and Linux portable packages include `rtl_sdr`, libiio, libhackrf, and their
 linked runtime libraries. Windows packages also include the offline Pluto USB
 installer and Zadig; Linux packages include USB permission rules. See
 [portable SDR setup](sdr-portable-setup.md) for first-time device setup.
