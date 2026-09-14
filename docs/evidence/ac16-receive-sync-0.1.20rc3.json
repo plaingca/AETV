@@ -1,0 +1,567 @@
+{
+  "release": "trial-ac16-gui-0.1.20rc3",
+  "binary_commit": "c85bf250826b5c54f837c84156323ca0f35e625c",
+  "build_run": "https://github.com/plaingca/AETV/actions/runs/34795037003",
+  "ci_run": "https://github.com/plaingca/AETV/actions/runs/34795040947",
+  "local_tests": {
+    "passed": 371,
+    "skipped": 2
+  },
+  "windows_ci": {
+    "passed": 371,
+    "skipped": 2
+  },
+  "linux_ci": {
+    "passed": 371,
+    "skipped": 2
+  },
+  "all_four_package_builds_passed": true,
+  "assets": [
+    {
+      "name": "AETV-linux-x64-cpu.AppImage",
+      "bytes": 246643192,
+      "sha256": "d6f34eb70b71c236a7bfc8789cbe93f71df56eab66f536376e5b9e5a02bc1e25"
+    },
+    {
+      "name": "AETV-linux-x64-cpu.tar.gz",
+      "bytes": 268982522,
+      "sha256": "3664a1ff7b38fa2f70ca4b25340bd151b2da26d9db1843dd75f2b36ccf83d2e5"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.AppImage",
+      "bytes": 1784588792,
+      "sha256": "59f925a6f40fc12a11a77d6cfce4fea36d124af097ff8a0fb972a19b0978517a"
+    },
+    {
+      "name": "AETV-linux-x64-gpu.tar.gz",
+      "bytes": 1908390213,
+      "sha256": "76af601357cc05093032fbb4b9e6a767a62906437175f72d7d4e8ad97aef5988"
+    },
+    {
+      "name": "AETV-windows-x64-cpu.zip",
+      "bytes": 276320902,
+      "sha256": "ca9e1e87e520273c4a99ac60cd50ccfee15a2245c5081edb07f98b77270d4832"
+    },
+    {
+      "name": "AETV-windows-x64-gpu.zip",
+      "bytes": 287964482,
+      "sha256": "e7fcc44c3225fe35f226559ae800d40bf8a619a39de9586df984ec5557744fb8"
+    }
+  ],
+  "package_reports": {
+    "linux-cpu": {
+      "ac16-build-smoke.json": {
+        "mode": "AC16",
+        "device": "CPU",
+        "checkpoint": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/models/ac16-v4.runtime.json",
+        "cpu": "x86_64",
+        "logical_cpus": 4,
+        "backend": "onnxruntime",
+        "backend_version": "1.23.2",
+        "backend_threads": 8,
+        "runtime_validation": null,
+        "encode_median_ms": 3444.99,
+        "decode_median_ms": 4706.46,
+        "cycle_median_ms": 8151.45,
+        "encode_realtime_headroom": 0.29,
+        "decode_realtime_headroom": 0.21,
+        "full_duplex_headroom": 0.12,
+        "repeats": 1
+      },
+      "sdr-smoke.json": {
+        "passed": true,
+        "frozen": true,
+        "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+        "rtl_help_returncode": 1,
+        "libiio": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/libiio.so.0",
+        "libiio_version": [
+          0,
+          23,
+          "v0.23"
+        ],
+        "libiio_backends": [
+          "local",
+          "xml",
+          "ip",
+          "usb"
+        ],
+        "pluto_class": "adi.ad936x.Pluto",
+        "xml_context": true,
+        "acquisition": {
+          "passed": true,
+          "mode": "AC16",
+          "cases": [
+            {
+              "offset_hz": -12.5,
+              "estimated_offset_hz": -12.498573900017826,
+              "timing_metric": 0.9958501609735668,
+              "latent_cosine": 0.9574815630912781,
+              "elapsed_s": 0.44119525399997883
+            },
+            {
+              "offset_hz": 12.5,
+              "estimated_offset_hz": 12.498628623971431,
+              "timing_metric": 0.9958507007871829,
+              "latent_cosine": 0.9577231407165527,
+              "elapsed_s": 0.4267500750000295
+            }
+          ],
+          "radio_opened": false
+        }
+      },
+      "sdr-gui-smoke.json": {
+        "passed": true,
+        "frozen": true,
+        "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+        "rtl_help_returncode": 1,
+        "libiio": "/home/runner/work/AETV/AETV/dist/linux-cpu/AETV/_internal/libiio.so.0",
+        "libiio_version": [
+          0,
+          23,
+          "v0.23"
+        ],
+        "libiio_backends": [
+          "local",
+          "xml",
+          "ip",
+          "usb"
+        ],
+        "pluto_class": "adi.ad936x.Pluto",
+        "xml_context": true,
+        "acquisition": {
+          "passed": true,
+          "mode": "AC16",
+          "cases": [
+            {
+              "offset_hz": -12.5,
+              "estimated_offset_hz": -12.498573900017826,
+              "timing_metric": 0.9958501609735668,
+              "latent_cosine": 0.9574815630912781,
+              "elapsed_s": 0.4455939670000362
+            },
+            {
+              "offset_hz": 12.5,
+              "estimated_offset_hz": 12.498628623971431,
+              "timing_metric": 0.9958507007871829,
+              "latent_cosine": 0.9577231407165527,
+              "elapsed_s": 0.43331240200001275
+            }
+          ],
+          "radio_opened": false
+        }
+      }
+    },
+    "linux-gpu": {
+      "ac16-build-smoke.json": {
+        "mode": "AC16",
+        "device": "CPU",
+        "checkpoint": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/models/ac16-v4.runtime.json",
+        "cpu": "x86_64",
+        "logical_cpus": 4,
+        "backend": "onnxruntime",
+        "backend_version": "1.23.2",
+        "backend_threads": 8,
+        "runtime_validation": null,
+        "encode_median_ms": 3194.97,
+        "decode_median_ms": 4355.08,
+        "cycle_median_ms": 7550.05,
+        "encode_realtime_headroom": 0.31,
+        "decode_realtime_headroom": 0.23,
+        "full_duplex_headroom": 0.13,
+        "repeats": 1
+      },
+      "sdr-smoke.json": {
+        "passed": true,
+        "frozen": true,
+        "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+        "rtl_help_returncode": 1,
+        "libiio": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/libiio.so.0",
+        "libiio_version": [
+          0,
+          23,
+          "v0.23"
+        ],
+        "libiio_backends": [
+          "local",
+          "xml",
+          "ip",
+          "usb"
+        ],
+        "pluto_class": "adi.ad936x.Pluto",
+        "xml_context": true,
+        "acquisition": {
+          "passed": true,
+          "mode": "AC16",
+          "cases": [
+            {
+              "offset_hz": -12.5,
+              "estimated_offset_hz": -12.498573900017826,
+              "timing_metric": 0.9958501609735668,
+              "latent_cosine": 0.9574815630912781,
+              "elapsed_s": 0.37044090799997775
+            },
+            {
+              "offset_hz": 12.5,
+              "estimated_offset_hz": 12.498628623971431,
+              "timing_metric": 0.9958507007871829,
+              "latent_cosine": 0.9577231407165527,
+              "elapsed_s": 0.3552478959999803
+            }
+          ],
+          "radio_opened": false
+        }
+      },
+      "sdr-gui-smoke.json": {
+        "passed": true,
+        "frozen": true,
+        "rtl_executable": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+        "rtl_help_returncode": 1,
+        "libiio": "/home/runner/work/AETV/AETV/dist/linux-gpu/AETV/_internal/libiio.so.0",
+        "libiio_version": [
+          0,
+          23,
+          "v0.23"
+        ],
+        "libiio_backends": [
+          "local",
+          "xml",
+          "ip",
+          "usb"
+        ],
+        "pluto_class": "adi.ad936x.Pluto",
+        "xml_context": true,
+        "acquisition": {
+          "passed": true,
+          "mode": "AC16",
+          "cases": [
+            {
+              "offset_hz": -12.5,
+              "estimated_offset_hz": -12.498573900017826,
+              "timing_metric": 0.9958501609735668,
+              "latent_cosine": 0.9574815630912781,
+              "elapsed_s": 0.3689472380000325
+            },
+            {
+              "offset_hz": 12.5,
+              "estimated_offset_hz": 12.498628623971431,
+              "timing_metric": 0.9958507007871829,
+              "latent_cosine": 0.9577231407165527,
+              "elapsed_s": 0.3489626730000168
+            }
+          ],
+          "radio_opened": false
+        }
+      }
+    },
+    "windows-cpu": {
+      "asset": "AETV-windows-x64-cpu.zip",
+      "sha256": "ca9e1e87e520273c4a99ac60cd50ccfee15a2245c5081edb07f98b77270d4832",
+      "bytes": 276320902,
+      "native_files_match_pinned_inputs": 21,
+      "reports": {
+        "sdr-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true,
+          "acquisition": {
+            "passed": true,
+            "mode": "AC16",
+            "cases": [
+              {
+                "offset_hz": -12.5,
+                "estimated_offset_hz": -12.498573900017826,
+                "timing_metric": 0.9958501609735667,
+                "latent_cosine": 0.9574815630912781,
+                "elapsed_s": 0.5015508999999838
+              },
+              {
+                "offset_hz": 12.5,
+                "estimated_offset_hz": 12.498628623971431,
+                "timing_metric": 0.995850700787183,
+                "latent_cosine": 0.9577231407165527,
+                "elapsed_s": 0.5102000999999632
+              }
+            ],
+            "radio_opened": false
+          }
+        },
+        "sdr-gui-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true,
+          "acquisition": {
+            "passed": true,
+            "mode": "AC16",
+            "cases": [
+              {
+                "offset_hz": -12.5,
+                "estimated_offset_hz": -12.498573900017826,
+                "timing_metric": 0.9958501609735667,
+                "latent_cosine": 0.9574815630912781,
+                "elapsed_s": 0.48882930000002034
+              },
+              {
+                "offset_hz": 12.5,
+                "estimated_offset_hz": 12.498628623971431,
+                "timing_metric": 0.995850700787183,
+                "latent_cosine": 0.9577231407165527,
+                "elapsed_s": 0.48837249999996857
+              }
+            ],
+            "radio_opened": false
+          }
+        },
+        "ac16-build-smoke.json": {
+          "mode": "AC16",
+          "device": "CPU",
+          "checkpoint": "D:\\a\\AETV\\AETV\\dist\\windows-cpu\\AETV\\_internal\\models\\ac16-v4.runtime.json",
+          "cpu": "AMD64 Family 25 Model 1 Stepping 1, AuthenticAMD",
+          "logical_cpus": 4,
+          "backend": "onnxruntime",
+          "backend_version": "1.23.2",
+          "backend_threads": 8,
+          "runtime_validation": null,
+          "encode_median_ms": 5852.88,
+          "decode_median_ms": 7030.8,
+          "cycle_median_ms": 12883.68,
+          "encode_realtime_headroom": 0.17,
+          "decode_realtime_headroom": 0.14,
+          "full_duplex_headroom": 0.08,
+          "repeats": 1
+        }
+      }
+    },
+    "windows-gpu": {
+      "asset": "AETV-windows-x64-gpu.zip",
+      "sha256": "e7fcc44c3225fe35f226559ae800d40bf8a619a39de9586df984ec5557744fb8",
+      "bytes": 287964482,
+      "native_files_match_pinned_inputs": 21,
+      "reports": {
+        "sdr-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true,
+          "acquisition": {
+            "passed": true,
+            "mode": "AC16",
+            "cases": [
+              {
+                "offset_hz": -12.5,
+                "estimated_offset_hz": -12.498573900017826,
+                "timing_metric": 0.9958501609735667,
+                "latent_cosine": 0.9574815630912781,
+                "elapsed_s": 0.3950602999999546
+              },
+              {
+                "offset_hz": 12.5,
+                "estimated_offset_hz": 12.498628623971431,
+                "timing_metric": 0.995850700787183,
+                "latent_cosine": 0.9577231407165527,
+                "elapsed_s": 0.3910766000000194
+              }
+            ],
+            "radio_opened": false
+          }
+        },
+        "sdr-gui-smoke.json": {
+          "passed": true,
+          "frozen": true,
+          "rtl_executable": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\rtlsdr\\rtl_sdr.exe",
+          "rtl_help_returncode": 1,
+          "libiio": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\aetv\\bin\\pluto\\libiio.dll",
+          "libiio_version": [
+            0,
+            26,
+            "a0eca0d"
+          ],
+          "libiio_backends": [
+            "xml",
+            "ip",
+            "usb",
+            "serial"
+          ],
+          "pluto_class": "adi.ad936x.Pluto",
+          "xml_context": true,
+          "acquisition": {
+            "passed": true,
+            "mode": "AC16",
+            "cases": [
+              {
+                "offset_hz": -12.5,
+                "estimated_offset_hz": -12.498573900017826,
+                "timing_metric": 0.9958501609735667,
+                "latent_cosine": 0.9574815630912781,
+                "elapsed_s": 0.3968735999999353
+              },
+              {
+                "offset_hz": 12.5,
+                "estimated_offset_hz": 12.498628623971431,
+                "timing_metric": 0.995850700787183,
+                "latent_cosine": 0.9577231407165527,
+                "elapsed_s": 0.3891977999999199
+              }
+            ],
+            "radio_opened": false
+          }
+        },
+        "ac16-build-smoke.json": {
+          "mode": "AC16",
+          "device": "CPU",
+          "checkpoint": "D:\\a\\AETV\\AETV\\dist\\windows-gpu\\AETV\\_internal\\models\\ac16-v4.runtime.json",
+          "cpu": "AMD64 Family 25 Model 17 Stepping 1, AuthenticAMD",
+          "logical_cpus": 4,
+          "backend": "onnxruntime",
+          "backend_version": "1.23.0",
+          "backend_threads": 8,
+          "runtime_validation": {
+            "selected": "cpu",
+            "attempts": [
+              {
+                "profile": "default",
+                "passed": false,
+                "reason": "DirectML provider did not initialize"
+              },
+              {
+                "profile": "compatible",
+                "passed": false,
+                "reason": "DirectML provider did not initialize"
+              }
+            ]
+          },
+          "encode_median_ms": 4874.37,
+          "decode_median_ms": 6828.11,
+          "cycle_median_ms": 11702.48,
+          "encode_realtime_headroom": 0.21,
+          "decode_realtime_headroom": 0.15,
+          "full_duplex_headroom": 0.09,
+          "repeats": 1
+        }
+      }
+    }
+  },
+  "fresh_linux_cpu_sdr_smoke": {
+    "passed": true,
+    "frozen": true,
+    "rtl_executable": "/pool0/AETV-runs/sdr-portable-0.1.20rc3/extracted/cpu/AETV/_internal/aetv/bin/rtlsdr/rtl_sdr",
+    "rtl_help_returncode": 1,
+    "libiio": "/pool0/AETV-runs/sdr-portable-0.1.20rc3/extracted/cpu/AETV/_internal/libiio.so.0",
+    "libiio_version": [
+      0,
+      23,
+      "v0.23"
+    ],
+    "libiio_backends": [
+      "local",
+      "xml",
+      "ip",
+      "usb"
+    ],
+    "pluto_class": "adi.ad936x.Pluto",
+    "xml_context": true,
+    "acquisition": {
+      "passed": true,
+      "mode": "AC16",
+      "cases": [
+        {
+          "offset_hz": -12.5,
+          "estimated_offset_hz": -12.498573900017826,
+          "timing_metric": 0.9958501609735668,
+          "latent_cosine": 0.9574815630912781,
+          "elapsed_s": 0.16633680555969477
+        },
+        {
+          "offset_hz": 12.5,
+          "estimated_offset_hz": 12.498628623971431,
+          "timing_metric": 0.9958507007871829,
+          "latent_cosine": 0.9577231407165527,
+          "elapsed_s": 0.15165437199175358
+        }
+      ],
+      "radio_opened": false
+    }
+  },
+  "ota": {
+    "passed": true,
+    "packaged": true,
+    "backend": "onnxruntime",
+    "device": "CPU",
+    "gops": 60,
+    "displayed_frames": 600,
+    "correct_chronology": true,
+    "errors": [],
+    "source_sha256": "85f201e2c51902c864e5f2dcd15dea2aa4ddbe51ff8796a47092cc10125d9fdb",
+    "minimum_latent_cosine": 0.9523694515228271
+  },
+  "hardware_final": {
+    "tx_powerdown": "1",
+    "tx_gain_db": -89.75,
+    "rtl_process_count": 0
+  },
+  "captured_late_replay": {
+    "source": "new portable GUI RTL capture",
+    "mode": "AC16",
+    "additional_offset_hz": 12.5,
+    "late_start_seconds": 4.125,
+    "gops": 4,
+    "minimum_best_cosine": 0.9540849328041077,
+    "matched_gops": [
+      16,
+      17,
+      18,
+      19
+    ],
+    "chronological": true,
+    "blind_acquired": true,
+    "passed": true
+  },
+  "limitations": [
+    "Physical Windows RF reception and the compatible DirectML GPU profile remain unverified on the affected user hardware.",
+    "The Windows build runner had no usable DirectML adapter; it exercised explicit CPU fallback.",
+    "Synthetic color probes are a startup compatibility check, not exhaustive proof for every video input."
+  ]
+}

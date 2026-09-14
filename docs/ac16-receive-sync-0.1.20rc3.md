@@ -71,3 +71,26 @@ numerical check on this host's CUDA provider against CPU.
 After the color-qualification changes, the full suite passed 371 tests with
 two skipped. The DirectML GPU hardware limitation above remains explicit;
 successful CPU fallback on a build runner is not GPU accuracy evidence.
+
+## Downloaded artifact validation
+
+All four builds and both Windows/Linux CI jobs passed at binary commit
+`c85bf250826b5c54f837c84156323ca0f35e625c`. Both CI platforms passed 371 tests
+with two skips. The downloaded Windows archives contain the expected pinned
+RTL/Pluto runtime files and offline USB setup tools. Their frozen GUI and
+benchmark entry points passed the late-entry fixture and native library checks.
+The Windows GPU report confirms DirectML 1.23.0 and explicit CPU fallback on
+the runner without a usable GPU adapter.
+
+The downloaded Linux CPU executable passed a fresh native runtime check and a
+60-second 439 MHz Pluto → RTL 1001 trial: 60/60 GOPs, 600/600 displayed frames,
+correct chronology, minimum latent cosine 0.95237, and no recorded errors.
+Independent device readback confirmed Pluto TX powered down at −89.75 dB gain,
+with zero remaining RTL capture processes. The new modem WAV was then replayed
+from 4.125 seconds into reception with an additional 12.5 Hz tuning offset;
+blind entry recovered four sequential payloads at minimum cosine 0.95408.
+
+[Checksums, package reports, and trial evidence](evidence/ac16-receive-sync-0.1.20rc3.json)
+are recorded separately from the unchanged model provenance. The six portable
+assets and machine-readable validation report accompany the
+[rc3 trial release](https://github.com/plaingca/AETV/releases/tag/trial-ac16-gui-0.1.20rc3).
