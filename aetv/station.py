@@ -1470,23 +1470,38 @@ class RxEngine:
                     },
                 )
                 self.station.log(f"Kiwi IQ debug: {prefix.with_suffix('.iq.wav')}")
-            elif settings.rx_source == "soundcard":
+            elif settings.rx_source in {"soundcard", "pluto", "rtlsdr"}:
                 self._soundcard_recorder = _PcmWaveRecorder(
                     prefix.with_suffix(".audio.wav"), capture_rate
                 )
                 self.station.log(
-                    f"RX soundcard debug: {self._soundcard_recorder.path}"
+                    f"RX {settings.rx_source} audio debug: {self._soundcard_recorder.path}"
                 )
         self._stream_decoder = self._new_demodulator(codec.mode)
         self._source_discontinuity.clear()
         self._read_cursor = 0
         self._on_ring(self.ring)
-        self.state = RxState(listening=True, source=settings.rx_source, message="starting")
+        self.state = RxState(
+            listening=True, source=settings.rx_source,
+            message=f"Listening; searching for {codec.mode.name} synchronization",
+        )
         self._on_state(self.state)
+        self._record_modem_debug({
+            "event": "rx_started", "time": time.time(),
+            "mode": codec.mode.name, "source": settings.rx_source,
+            "sample_rate": capture_rate,
+            "frequency_mhz": settings.sdr_frequency_mhz,
+            "auto_frequency_correction": settings.sdr_auto_correct,
+            "manual_frequency_correction_hz": settings.sdr_rx_correction_hz,
+        })
         if settings.rx_source in {"pluto", "rtlsdr"}:
             from .sdr import SDRCapture
-            self._sdr = SDRCapture(settings, codec.mode, self.ring,
-                                   on_error=self._on_error, on_status=self.station.log)
+            sink = (
+                _RecordingSink(self.ring, self._soundcard_recorder)
+                if self._soundcard_recorder is not None else self.ring
+            )
+            self._sdr = SDRCapture(settings, codec.mode, sink,
+                                   on_error=self._on_error, on_status=self._on_sdr_status)
             try:
                 self._sdr.start()
             except Exception:
@@ -1604,6 +1619,12 @@ class RxEngine:
         self.state.source = "kiwi"
         self._on_state(self.state)
 
+    def _on_sdr_status(self, message: str) -> None:
+        self.station.log(message)
+        self._record_modem_debug({
+            "event": "sdr_status", "time": time.time(), "message": message,
+        })
+
     def _record_kiwi_iq(self, iq: np.ndarray, rate: float, sequence: int) -> None:
         if self._iq_recorder is not None:
             self._iq_recorder.write(iq, rate, sequence)
@@ -1622,6 +1643,21 @@ class RxEngine:
     def _record_modem_debug(self, event: dict) -> None:
         if self._debug_log is not None:
             self._debug_log.write(event)
+        if not self.state.listening or self._shown_gops:
+            return
+        kind = event.get("event")
+        message = {
+            "preamble_candidate": "Checking signal framing",
+            "candidate_rejected": "Receiving samples; searching for synchronization",
+            "blind_search_started": "Searching for a matching station beacon",
+            "blind_candidate_rejected": (
+                f"Searching for synchronization: {event.get('reason', '')}"
+            ),
+            "gop_accepted": "Signal synchronized; decoding first video GOP",
+        }.get(kind)
+        if message and message != self.state.message:
+            self.state.message = message
+            self._on_state(self.state)
 
     def _new_demodulator(self, mode: AETVModeSpec) -> StreamingDemodulator:
         return StreamingDemodulator(

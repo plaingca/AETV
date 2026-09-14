@@ -576,7 +576,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(browse)
         self.autosave = QCheckBox("Autosave each decoded reception")
         self.autosave.setChecked(self._settings.autosave)
-        self.debug_capture = QCheckBox("Save TX waveform, Kiwi IQ, and modem debug logs")
+        self.debug_capture = QCheckBox("Save TX/RX waveforms, Kiwi IQ, and modem debug logs")
         self.debug_capture.setChecked(self._settings.debug_capture)
         form.addRow("Received video", row)
         form.addRow(self.autosave)
@@ -730,4 +730,3 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, "CAT", message)
         else:
             QMessageBox.warning(self, "CAT", message)
-

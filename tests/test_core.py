@@ -660,8 +660,8 @@ def test_pilot_denoising_reduces_noise_without_erasing_multipath(delay_ms):
     assert np.array_equal(_denoise_pilot_channels(clean, 1e-12), clean)
 
 
-@pytest.mark.parametrize("mode_name", ["V0", "V8", "V7"])
-@pytest.mark.parametrize("offset", [0.4, -75.0, 120.0])
+@pytest.mark.parametrize("mode_name", ["V0", "V8", "V7", "AC16"])
+@pytest.mark.parametrize("offset", [0.4, -75.0, 120.0, -12.5, 12.5])
 def test_blind_acquisition_corrects_cfo_on_quiet_late_entry(mode_name, offset):
     mode = AETV_MODES[mode_name]
     rng = np.random.default_rng(906)

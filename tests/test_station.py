@@ -41,6 +41,45 @@ def test_rx_demodulator_uses_loaded_mode_as_one_atomic_configuration():
     assert demodulator.expected_mode.name == "V8"
 
 
+@pytest.mark.parametrize("source", ["rtlsdr", "pluto"])
+def test_sdr_debug_records_modem_waveform_and_reports_acquisition(monkeypatch, tmp_path, source):
+    settings = StationSettings(mode="AC16", rx_source=source, receive_dir=str(tmp_path))
+    station = Station(settings)
+    station.codec = SimpleNamespace(mode=AETV_MODES["AC16"])
+    samples = np.linspace(-0.2, 0.2, 4800, dtype=np.float32)
+
+    class Capture:
+        def __init__(self, _settings, _mode, sink, **_kwargs):
+            self.sink = sink
+            self.preview = object()
+
+        def start(self):
+            self.sink.write(samples)
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("aetv.sdr.SDRCapture", Capture)
+    messages = []
+    engine = RxEngine(station, on_state=lambda state: messages.append(state.message))
+    monkeypatch.setattr(engine, "_loop", lambda: engine._stop.wait(2))
+    try:
+        engine.start()
+        assert "searching" in engine.state.message
+        engine._record_modem_debug({"event": "blind_search_started"})
+        assert "beacon" in engine.state.message
+        engine._record_modem_debug({"event": "gop_accepted"})
+        assert "decoding first" in engine.state.message
+    finally:
+        engine.stop()
+    paths = list(tmp_path.glob("debug/*.audio.wav"))
+    assert len(paths) == 1
+    with wave.open(str(paths[0])) as recording:
+        assert recording.getframerate() == 48000
+        saved = np.frombuffer(recording.readframes(recording.getnframes()), dtype="<i2")
+    np.testing.assert_allclose(saved / 32767.0, samples, atol=1 / 32767)
+
+
 @pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex"])
 def test_rx_timing_policy_matches_source(source):
     engine = RxEngine(Station(StationSettings(mode="V8", rx_source=source)))

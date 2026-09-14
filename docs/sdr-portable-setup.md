@@ -54,6 +54,26 @@ the application folder is `squashfs-root/usr/lib/AETV`.
 Run `AETV-Benchmark.exe --sdr-smoke` on Windows or
 `./AETV-Benchmark --sdr-smoke` on Linux. This starts the bundled RTL-SDR utility,
 loads the Pluto libraries and USB/network backends, and exercises libiio's XML
-parser. It does not open hardware or transmit. Build-time reports are included
+parser. It also decodes an offline AC16 late-entry fixture at ±12.5 Hz residual
+offset and checks the recovered payload against the transmitted fixture.
+It does not open hardware or transmit. Build-time reports are included
 as `sdr-smoke.json` and `sdr-gui-smoke.json`; physical USB access depends on the
 driver setup above. Source installations still need native SDR dependencies.
+
+## Signal visible, but no video
+
+Select AC16 at both ends. For 439 MHz reception, the RTL driver deliberately
+tunes to 439.100 MHz; the application removes that 100 kHz offset. Leave automatic
+frequency correction enabled to compensate for the RTL oscillator.
+
+The receive status distinguishes synchronization search, beacon search, and
+decoding the first synchronized video GOP. Joining a continuous transmission
+after its opening header requires a 12-second beacon observation. Keep the
+receiver running during the transmission.
+
+With **Settings → Folders → Save TX/RX waveforms, Kiwi IQ, and modem debug logs**
+enabled, direct SDR reception saves `*.audio.wav` at the modem sample rate and
+`*.modem.jsonl` under the received-video folder's `debug` directory. The WAV is
+the recovered modem signal, not microphone audio or source video. Preserve both
+files from the same attempt when reporting a failure. The log includes tuning
+messages, acquisition timing, and whether a GOP reached the video decoder.

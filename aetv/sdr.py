@@ -58,6 +58,7 @@ def sdr_runtime_smoke():
     """Load both native transports without opening a radio or transmitting."""
     import adi
     import iio
+    from .modem_smoke import acquisition_smoke
 
     executable = rtl_executable()
     result = subprocess.run(
@@ -101,6 +102,7 @@ def sdr_runtime_smoke():
         "libiio_backends": iio.backends,
         "pluto_class": f"{adi.Pluto.__module__}.{adi.Pluto.__name__}",
         "xml_context": True,
+        "acquisition": acquisition_smoke(),
     }
 
 

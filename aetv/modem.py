@@ -1178,12 +1178,18 @@ class StreamingDemodulator:
         if stream_end - self._last_blind_attempt_end < fs:
             return False
         self._last_blind_attempt_end = stream_end
+        started = time.perf_counter()
+        self._debug("blind_search_started", stream_sample=int(stream_end))
         try:
             blind = blind_acquire_continuous_payload(
                 self.buffer[-blind_minimum:], self.expected_mode
             )
         except SyncError as error:
-            self._debug("blind_candidate_rejected", reason=str(error))
+            self._debug(
+                "blind_candidate_rejected", reason=str(error),
+                search_ms=1000.0 * (time.perf_counter() - started),
+                stream_sample=int(stream_end),
+            )
             return False
         window_start = len(self.buffer) - blind_minimum
         discard = window_start + blind.payload_start
@@ -1206,6 +1212,7 @@ class StreamingDemodulator:
             metric=float(blind.metric),
             freq_offset_hz=float(blind.freq_offset),
             callsign=blind.beacon.callsign,
+            search_ms=1000.0 * (time.perf_counter() - started),
         )
         return True
 
@@ -1444,9 +1451,21 @@ class StreamingDemodulator:
                         candidate_incomplete = False
                         candidate_deferred = False
                         try:
+                            # This overlap retires only scan_step samples. Search
+                            # preambles beginning there, with the full template
+                            # and filter margin, rather than scanning the same
+                            # later payload repeatedly before it is complete.
+                            # Keep the full GOP window for independent framing
+                            # and payload validation below.
+                            bounded_search = self.expected_mode.name == "AC16"
+                            prefix = (
+                                recent[: scan_step + preamble_samples + 64]
+                                if bounded_search else recent
+                            )
                             recent_acq = acquire(
-                                to_baseband(recent, geom.fcenter_hz, fs),
+                                to_baseband(prefix, geom.fcenter_hz, fs),
                                 band=self.band,
+                                search=(0, scan_step + 1) if bounded_search else None,
                             )
                             if self.expected_mode.name == "AC16":
                                 recent_acq = _resolve_preamble_repetition(
@@ -1558,6 +1577,15 @@ class StreamingDemodulator:
                     break
                 if self._attempt_blind_acquisition(fs):
                     continue
+                # Startup noise can last indefinitely. Retain the blind window
+                # and adjust the incremental preamble cursor with its origin.
+                discard = max(0, len(self.buffer) - 12 * fs)
+                if discard:
+                    self.buffer = self.buffer[discard:]
+                    self.samples_consumed += discard
+                    self._awaiting_search_offset = max(
+                        0, self._awaiting_search_offset - discard
+                    )
                 # Wait for one more second before another expensive scan.
                 break
             if len(self.buffer) < minimum:
@@ -1869,11 +1897,17 @@ def blind_acquire_continuous_payload(
     values = values / peak
 
     z = to_baseband(values, mode.geometry.fcenter_hz, fs)
-    product = z[m:] * np.conj(z[:-m])
+    # Real passband contains conjugate images. Their CP correlations cancel
+    # at quarter-carrier residual CFO (12.5 Hz here), even with clean RF.
+    # Measure timing with analytic audio so CFO rotates the correlation
+    # without suppressing its magnitude. Keep the established real-audio
+    # amplitude convention in the payload FFT/equalizer below.
+    analytic = signal.hilbert(values)
+    product = analytic[m:] * np.conj(analytic[:-m])
     kernel = np.ones(ncp)
     correlation = signal.fftconvolve(product, kernel, mode="valid")
-    e1 = signal.fftconvolve(np.abs(z[:-m]) ** 2, kernel, mode="valid")
-    e2 = signal.fftconvolve(np.abs(z[m:]) ** 2, kernel, mode="valid")
+    e1 = signal.fftconvolve(np.abs(analytic[:-m]) ** 2, kernel, mode="valid")
+    e2 = signal.fftconvolve(np.abs(analytic[m:]) ** 2, kernel, mode="valid")
     cp_metric = np.abs(correlation) / np.maximum(
         np.sqrt(np.maximum(e1, 0.0) * np.maximum(e2, 0.0)), 1e-12
     )
