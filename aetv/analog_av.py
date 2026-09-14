@@ -262,7 +262,9 @@ class AC16CompositeSeparator:
     def __init__(self):
         profile = AC16_AV
         count = 2 * self.delay_samples + 1
-        self._voice_taps = signal.firwin(count, 3_500, fs=profile.fs, window=("kaiser", 10))
+        # Leave room for residual tuning drift; program audio is limited back
+        # to 3.3 kHz after received-pilot frequency correction.
+        self._voice_taps = signal.firwin(count, 3_700, fs=profile.fs, window=("kaiser", 10))
         base = signal.firwin(count, 7_800, fs=profile.fs, window=("kaiser", 10))
         self._video_taps = 2 * base * np.exp(
             2j * np.pi * 12_000 * (np.arange(count) - self.delay_samples) / profile.fs
@@ -302,12 +304,63 @@ class AC16ProgramAudio:
         from .ringbuffer import RingBuffer
         self.voice = RingBuffer(40, NATIVE_AETV_FS)
         self.pending = deque()
+        self._frequency = deque(maxlen=64)
+        self._phase = 0.0
+        self._next_sample = None
 
     def add(self, result, payload):
         if result.stream_start_sample is None:
             raise ValueError("AC16 A/V needs received payload sample positions")
         start = round(result.stream_start_sample / 6) + NATIVE_AETV_FS
         self.pending.append((start, payload))
+        frequency = float(getattr(result, "freq_offset", np.nan))
+        if (np.isfinite(frequency)
+                and getattr(result, "pilot_coherence", 1.0) >= 0.2):
+            # Mean center of AC16's eight pilot symbols: .015 + .125*i.
+            # Voice n is sent alongside video n+1, so observations must be
+            # indexed by receive time, not by the video/audio pairing index.
+            when = result.stream_start_sample / AC16_AV.fs + 0.4525
+            if not self._frequency or when > self._frequency[-1][0]:
+                self._frequency.append((when, frequency))
+
+    def _frequency_at(self, times):
+        if not self._frequency:
+            return np.zeros_like(times)
+        points = np.asarray(self._frequency)
+        frequencies = np.interp(times, points[:, 0], points[:, 1])
+        if len(points) >= 2:
+            recent = points[-5:]
+            slope = np.clip(np.median(np.diff(recent[:, 1]) / np.diff(recent[:, 0])), -4, 4)
+            # The final voice-only second has no new video pilots. Extend a
+            # measured slow trend through that tail, then hold if pilots stop.
+            frequencies += slope * np.clip(times - points[-1, 0], 0, 1.6)
+        return frequencies
+
+    def _correct(self, start, audio):
+        if not self._frequency:
+            return _cosine_lowpass(audio, NATIVE_AETV_FS, 3_200, 3_300)
+        halo = 320  # 40 ms on each side reduces Hilbert/FFT boundary artifacts.
+        left = max(0, start - halo, self.voice.total_written - self.voice.n)
+        extended, _, _ = self.voice.read_since(left)
+        extended = extended[:start - left + NATIVE_AETV_FS + halo]
+        offset = start - left
+        positions = left + np.arange(len(extended) + 1)
+        frequencies = self._frequency_at(positions / NATIVE_AETV_FS)
+        # Integrate frequency and carry phase across GOP boundaries. Updating
+        # f*t directly would introduce a phase jump each time tracking changes.
+        cycles = np.r_[0.0, np.cumsum(frequencies[:-1] / NATIVE_AETV_FS)]
+        if self._next_sample is not None and self._next_sample != start:
+            # Boundary tracking can nudge a GOP by a few samples. Advance (or
+            # rewind) the oscillator across that gap instead of resetting it.
+            endpoints = np.array([self._next_sample, start]) / NATIVE_AETV_FS
+            self._phase += float(np.mean(self._frequency_at(endpoints)) *
+                                 (start - self._next_sample) / NATIVE_AETV_FS)
+        cycles += self._phase - cycles[offset]
+        corrected = (signal.hilbert(extended) * np.exp(-2j*np.pi*cycles[:-1])).real
+        corrected = _cosine_lowpass(corrected, NATIVE_AETV_FS, 3_200, 3_300)
+        self._phase = float(cycles[offset + NATIVE_AETV_FS] % 1.0)
+        self._next_sample = start + NATIVE_AETV_FS
+        return corrected[offset:offset + NATIVE_AETV_FS]
 
     def ready(self):
         while self.pending:
@@ -319,4 +372,4 @@ class AC16ProgramAudio:
             if overrun:
                 # Never pair a video GOP with a different source second.
                 continue
-            yield payload, audio[:NATIVE_AETV_FS].astype(np.float32)
+            yield payload, self._correct(start, audio[:NATIVE_AETV_FS]).astype(np.float32)

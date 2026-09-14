@@ -82,6 +82,11 @@ of the complete 20 kHz waveform: at 439.000 MHz it spans nominally
 438.990–439.010 MHz. Audio occupies the bottom of that RF interval. Frequency
 auto-correction measures the broad video slice independently of audio level,
 so silence and speech do not move the estimated center.
+After acquisition, accepted video pilots also correct the program audio's
+residual frequency drift. The receiver applies observations at the audio's
+receive time, integrates correction phase continuously across GOPs, and
+extends the measured slow trend through the final audio-only second. Weak
+pilot estimates do not steer audio, and extrapolation stops if pilots vanish.
 
 Use the existing **video/audio power** fader and **clip/microphone mix** controls.
 A video file or prepared clip supplies its audio track; webcam and screen
@@ -95,7 +100,11 @@ waits for the matching complete audio interval before releasing each video
 GOP and audio block together. Pairing uses received payload sample positions,
 including after reacquisition; it does not use transmitter frames or latents.
 The A/V view starts with one paired GOP instead of the video-only two-GOP
-buffer. Device playback latency can still affect live lip synchronization.
+buffer. A shared four-GOP queue releases one complete audio/video pair per
+second. Blind-acquisition bursts discard old pairs together before playback;
+saved recordings retain all correctly paired recovered GOPs. The video view
+holds only the current released GOP, so it cannot independently build seconds
+of backlog. Device playback latency can still affect live lip synchronization.
 
 Pluto and HackRF transmit, and Pluto/RTL-SDR/HackRF receive, use the complete
 20 kHz waveform. A soundcard path needs 48 ksample/s capture/playback and a
@@ -108,7 +117,11 @@ not a new physical over-the-air qualification.
 Portable builds run **frames → AC16 encoder → composite → signed 9.6 MS/s IQ
 → receiver DSP → AC16 decoder → saved MP4 with audio**, without opening a
 radio. The report and clip are `ac16-av-smoke.json` and `ac16-av-smoke.mp4`
-inside each package. To repeat the same check:
+inside each package. The report also includes 60-second modem tests with
+positive and negative 0.6 Hz/s frequency drift, a mid-transmission blind join,
+distinct audio tones identifying each source second, and bounded paired
+playout. These are software checks; soundcard/display latency is not measured.
+To repeat the same check:
 
 ```bash
 AETV-Benchmark --mode AC16 --device cpu --av-smoke \

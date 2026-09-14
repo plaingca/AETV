@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PySide6.QtWidgets import QDialog
 
 from aetv.config import AETV_MODES
@@ -355,9 +356,11 @@ def test_ten_gop_loopback_reaches_full_progress_and_is_recorded():
     assert np.array_equal(panel._emulated_video[2:], last)
 
 
-def test_loopback_save_passes_recovered_audio_to_mp4_writer():
+@pytest.mark.parametrize('complete_recording', [False, True])
+def test_loopback_save_passes_recovered_audio_to_mp4_writer(complete_recording):
     captured = {}
     audio = np.ones(8000, dtype=np.float32)
+    retained = np.ones((10, 2, 3, 3), dtype=np.uint8) if complete_recording else None
 
     class Engine:
         def save_video(self, video, **kwargs):
@@ -367,7 +370,8 @@ def test_loopback_save_passes_recovered_audio_to_mp4_writer():
 
     panel = SimpleNamespace(
         _emulated_video=np.zeros((2, 2, 3, 3), dtype=np.uint8),
-        station=SimpleNamespace(loopback_audio=audio, loopback_audio_rate=8000),
+        station=SimpleNamespace(loopback_audio=audio, loopback_audio_rate=8000,
+                                loopback_video=retained),
         engine=Engine(),
         status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
         logMessage=SimpleNamespace(emit=lambda _message: None),
@@ -377,6 +381,7 @@ def test_loopback_save_passes_recovered_audio_to_mp4_writer():
 
     assert np.array_equal(captured["audio"], audio)
     assert captured["audio_rate"] == 8000
+    assert captured['video'] is (retained if complete_recording else panel._emulated_video)
     assert panel.status.text == "saved loopback.mp4"
 
 

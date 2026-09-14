@@ -417,7 +417,8 @@ class ReceivePanel(QWidget):
         try:
             path = (
                 self.engine.save_video(
-                    self._emulated_video,
+                    (self.station.loopback_video if self.station.loopback_video is not None
+                     else self._emulated_video),
                     audio=self.station.loopback_audio,
                     audio_rate=self.station.loopback_audio_rate,
                 )
@@ -1058,7 +1059,10 @@ class ReceivePanel(QWidget):
             fps=mode.fps,
             prebuffer_frames=(2 if mode.name == "AC16" and self.station.settings.waveform_mode != "analog_av" else 1) * mode.gop_frames,
             boundary_blend_frames=0 if mode.name == "AC16" else 4,
-            max_queue_frames=(4 if mode.name == "AC16" else 2) * mode.gop_frames,
+            max_queue_frames=(
+                (1 if self.station.settings.waveform_mode == "analog_av" else 4)
+                if mode.name == "AC16" else 2
+            ) * mode.gop_frames,
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)
@@ -1126,6 +1130,7 @@ class ReceivePanel(QWidget):
         self.preview.clear()
         self._emulated_video = None
         self.station.loopback_audio = None
+        self.station.loopback_video = None
         self.status.setText(f"Waiting for {label} loopback…")
         self.statusChanged.emit(self.status.text())
         self.progress.setValue(0)
@@ -1143,7 +1148,10 @@ class ReceivePanel(QWidget):
             fps=mode.fps,
             prebuffer_frames=(2 if mode.name == "AC16" and self.station.settings.waveform_mode != "analog_av" else 1) * mode.gop_frames,
             boundary_blend_frames=0 if mode.name == "AC16" else 4,
-            max_queue_frames=(4 if mode.name == "AC16" else 2) * mode.gop_frames,
+            max_queue_frames=(
+                (1 if self.station.settings.waveform_mode == "analog_av" else 4)
+                if mode.name == "AC16" else 2
+            ) * mode.gop_frames,
         )
         self.status.setText(state.message)
         self.statusChanged.emit(state.message)

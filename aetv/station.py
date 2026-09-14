@@ -40,6 +40,7 @@ from .analog_av import (
     mix_composite_chunk,
 )
 from .cat import CatConfig, NullPtt, open_ptt
+from .av_playout import PairedAVPlayout
 from .codec import AETVCodec, resolve_checkpoint
 from .clip_cache import prepared_clip_path, load_prepared_clip, save_prepared_clip
 from .config import AETV_MODES, AETVModeSpec
@@ -324,6 +325,7 @@ class Station:
         self.codec: AETVCodec | None = None
         self.codec_lock = threading.Lock()
         self.loopback_audio: np.ndarray | None = None
+        self.loopback_video: np.ndarray | None = None
         self.loopback_audio_rate = NATIVE_AETV_FS
         self._on_log = lambda _msg: None
 
@@ -480,6 +482,7 @@ class TxEngine:
         self._cancel.clear()
         self.gop_timings = []
         self.station.loopback_audio = None
+        self.station.loopback_video = None
         settings = self.station.settings
         tx_recorder: _PcmWaveRecorder | None = None
         tx_metadata: dict = {}
@@ -841,14 +844,23 @@ class TxEngine:
         av_program = AC16ProgramAudio() if composite and codec.mode.name == "AC16" else None
         voice_resampler = StreamResampler(1, 6) if av_program is not None else None
         paired_voice = []
+        paired_video = []
+        av_playout = PairedAVPlayout() if av_program is not None else None
         playback = getattr(self, "_loopback_playback", None)
+        def drain_playout():
+            item = av_playout.pop() if av_playout is not None else None
+            if item is not None:
+                decoded, voice, state = item
+                if playback is not None:
+                    playback.write(voice)
+                self._on_loopback(decoded, state)
+
         def publish(decoded, result, voice=None):
             nonlocal decoded_count
             decoded_count += 1
             if voice is not None:
                 paired_voice.append(voice)
-                if playback is not None:
-                    playback.write(voice)
+                paired_video.append(decoded)
             state = RxState(
                 listening=False,
                 source="emulator",
@@ -863,7 +875,10 @@ class TxEngine:
                     f"SNR {result.snr_db:.1f} dB"
                 ),
             )
-            self._on_loopback(decoded, state)
+            if av_playout is not None:
+                av_playout.push((decoded, voice, state))
+            else:
+                self._on_loopback(decoded, state)
             self._set(
                 TxPhase.SENDING,
                 decoded_count / max(1, n_gops),
@@ -916,12 +931,14 @@ class TxEngine:
                 if av_program is not None:
                     for (decoded, result), voice in av_program.ready():
                         publish(decoded, result, voice)
+                    drain_playout()
         if transmitted_chunks == 0:
             raise SyncError("modulator produced no loopback audio")
         if decoded_count == 0:
             raise SyncError(f"{profile.label} loopback recovered no GOPs")
         if paired_voice:
             self.station.loopback_audio = np.concatenate(paired_voice)
+            self.station.loopback_video = np.concatenate(paired_video)
             self.station.loopback_audio_rate = NATIVE_AETV_FS
         elif loopback_voice:
             voice = resample_audio(
@@ -939,6 +956,11 @@ class TxEngine:
                 voice = np.pad(voice, (0, wanted - len(voice)))
             self.station.loopback_audio = voice.astype(np.float32, copy=False)
             self.station.loopback_audio_rate = NATIVE_AETV_FS
+        while av_playout is not None and len(av_playout):
+            if self._cancel.wait(0.02):
+                self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+                return False
+            drain_playout()
         self._set(
             TxPhase.DONE,
             1.0,
@@ -1467,6 +1489,7 @@ class RxEngine:
         self._audio_playback: AudioPlaybackStream | None = None
         self._voice_history: RingBuffer | None = None
         self._av_program: AC16ProgramAudio | None = None
+        self._av_playout: PairedAVPlayout | None = None
 
     @property
     def listening(self) -> bool:
@@ -1500,6 +1523,7 @@ class RxEngine:
             self._voice_history = RingBuffer(4.0, NATIVE_AETV_FS)
             if settings.mode == "AC16":
                 self._av_program = AC16ProgramAudio()
+                self._av_playout = PairedAVPlayout()
         if settings.debug_capture:
             prefix = _debug_prefix(settings, f"rx_{settings.rx_source}")
             self._debug_log = _JsonlRecorder(prefix.with_suffix(".modem.jsonl"))
@@ -1647,6 +1671,7 @@ class RxEngine:
         self._composite_voice_resampler = None
         self._voice_history = None
         self._av_program = None
+        self._av_playout = None
         if self.station.settings.autosave and self.last_video is not None and self._last_result is not None:
             self._autosave(self.last_video, self._last_result)
         self.ring = None
@@ -1738,6 +1763,7 @@ class RxEngine:
                 self._stream_decoder = self._new_demodulator(codec.mode)
                 if self._av_program is not None:
                     self._av_program = AC16ProgramAudio()
+                    self._av_playout.clear()
                     self._composite_separator = AC16CompositeSeparator()
                     self._composite_video_resampler = StreamResampler(1, 1)
                     self._composite_voice_resampler = StreamResampler(1, 6)
@@ -1756,11 +1782,16 @@ class RxEngine:
                 self._stream_decoder = self._new_demodulator(codec.mode)
                 if self._av_program is not None:
                     self._av_program = AC16ProgramAudio()
+                    self._av_playout.clear()
                     self._composite_separator = AC16CompositeSeparator()
                     self._composite_video_resampler = StreamResampler(1, 1)
                     self._composite_voice_resampler = StreamResampler(1, 6)
                 self.state.message = "receive buffer overrun; reacquiring"
             if audio.size == 0:
+                try:
+                    self._drain_av_playout()
+                except Exception as error:
+                    self._on_error(str(error))
                 continue
             raw_audio = audio
             try:
@@ -1827,6 +1858,7 @@ class RxEngine:
                 if self._av_program is not None:
                     for (result, decoded), audio_gop in self._av_program.ready():
                         self._deliver_received(result, decoded, audio_gop)
+                    self._drain_av_playout()
             except SyncError as error:
                 self.state.message = str(error)
                 self._on_state(self.state)
@@ -1848,9 +1880,21 @@ class RxEngine:
             self.last_video = self.last_video[-max_frames:]
         if audio_gop is not None:
             self._append_received_audio(audio_gop)
-            if self._av_program is not None and self._audio_playback is not None:
-                self._audio_playback.write(audio_gop)
-        self._update_from_result(result, decoded)
+        if self._av_playout is not None and audio_gop is not None:
+            # Retain every correctly paired GOP for saving; trim only live
+            # presentation, with the same decision for audio and video.
+            self._update_from_result(result, None)
+            self._av_playout.push((decoded, audio_gop, self.state))
+        else:
+            self._update_from_result(result, decoded)
+
+    def _drain_av_playout(self):
+        item = self._av_playout.pop() if self._av_playout is not None else None
+        if item is not None:
+            decoded, audio, state = item
+            if self._audio_playback is not None:
+                self._audio_playback.write(audio)
+            self._on_video(decoded, state)
 
     def _report_received_audio_levels(
         self,

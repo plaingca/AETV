@@ -16,6 +16,73 @@ from .settings import StationSettings
 from .station import Station, TxEngine
 
 
+def av_tracking_smoke(*, gops=60) -> dict:
+    """Exercise thermal-like drift and joining after the startup preamble.
+
+    Distinct source tones identify the audio second independently of modem
+    framing. No neural reference, transmit timing, or known CFO is supplied
+    to the receiver's correction or pairing logic.
+    """
+    from .av_playout import PairedAVPlayout
+
+    sent = np.random.default_rng(2033).normal(size=(gops, 19200)).astype(np.float32)
+    t = np.arange(8000) / 8000
+    tones = 500 + 31 * np.arange(gops)
+    voice = np.concatenate([.2*np.sin(2*np.pi*f*t) for f in tones])
+    settings = StationSettings(mode='AC16', waveform_mode='analog_av', av_microphone_mix=0)
+    waveform = np.concatenate(list(TxEngine(Station(settings))._composite_chunks(
+        modulate_continuous_chunks(sent, 'AC16'), voice, gops, capture_microphone=False)))
+    timeline = np.arange(len(waveform)) / 48000
+    analytic = signal.hilbert(waveform)
+    reports = []
+    for direction, join_s in ((1, 0), (-1, 3.125)):
+        impaired = (analytic * np.exp(2j*np.pi*direction*(12.5*timeline + .3*timeline**2))).real
+        impaired = impaired[round(join_s*48000):]
+        separator, resample, program = AC16CompositeSeparator(), StreamResampler(1, 6), AC16ProgramAudio()
+        events = []
+        demod = StreamingDemodulator('A', continuous=True, mode_name='AC16',
+                                    boundary_tracking=True, on_debug=events.append)
+        playout = PairedAVPlayout()
+        rows, played = [], []
+        for start in range(0, len(impaired), 4800):
+            audio, video = separator.process(impaired[start:start+4800])
+            program.voice.write(resample(audio))
+            for result in demod.feed(video):
+                latent = result.gops_latents[0]
+                cosines = sent @ latent / (np.linalg.norm(sent, axis=1)*np.linalg.norm(latent))
+                index = int(cosines.argmax())
+                program.add(result, (index, float(cosines[index])))
+            for (index, cosine), audio in program.ready():
+                spectrum = abs(np.fft.rfft(audio[800:-800]*np.hanning(6400), n=65536))
+                peak = float(np.argmax(spectrum)*8000/65536)
+                rows.append(dict(source_gop=index, latent_cosine=cosine, audio_error_hz=peak-tones[index]))
+                playout.push((index, peak))
+            now = (start + 4800) / 48000
+            item = playout.pop(now)
+            if item is not None:
+                played.append((now, *item))
+        while len(playout):
+            now += 1
+            played.append((now, *playout.pop(now)))
+        indices = [r['source_gop'] for r in rows]
+        blind = any(e['event'] == 'blind_acquired' for e in events)
+        if (not indices or indices != list(range(indices[0], gops))
+                or (not join_s and indices[0] != 0) or (join_s and not blind)):
+            raise RuntimeError(f'A/V drift acquisition/continuity failed: {indices}')
+        max_error = max(abs(r['audio_error_hz']) for r in rows)
+        if max_error > .5 or min(r['latent_cosine'] for r in rows) < .9:
+            raise RuntimeError(f'A/V drift/pairing failed: {rows}')
+        if (any(abs(peak-tones[index]) > .5 for _,index,peak in played)
+                or any(b[0]-a[0] < .999 for a,b in zip(played, played[1:]))):
+            raise RuntimeError('A/V live playout lost pairing or burst its backlog')
+        reports.append(dict(join_s=join_s, initial_cfo_hz=direction*12.5,
+                            drift_hz_per_s=direction*.6, blind_acquired=blind,
+                            paired_gops=len(rows), first_source_gop=indices[0],
+                            last_source_gop=indices[-1], max_pitch_error_hz=max_error,
+                            playout_gops=len(played), dropped_pairs=playout.dropped, rows=rows))
+    return dict(passed=True, radio_opened=False, source_seconds=gops, cases=reports)
+
+
 def av_smoke(codec=None, *, output: Path | None = None, source: Path | None = None,
              sample_rate: int = 9600000) -> dict:
     started = time.perf_counter()
@@ -121,5 +188,6 @@ def av_smoke(codec=None, *, output: Path | None = None, source: Path | None = No
             if saved_frames != 30 or not 24000 <= len(track) <= 25024 or np.sqrt(np.mean(track**2)) < .005:
                 raise RuntimeError('Saved AC16 A/V video or audio did not decode')
             result.update(saved_video=str(output), saved_frames=saved_frames, saved_audio_samples=len(track))
+    result['tracking'] = av_tracking_smoke()
     result['elapsed_s'] = time.perf_counter() - started
     return result
