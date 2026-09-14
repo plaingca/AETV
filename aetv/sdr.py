@@ -246,6 +246,31 @@ class SDRCapture:
             self._worker("rtl-log", self._read_log)
         self._worker("sdr-convert", self._convert)
         self._worker("sdr-capture", self._capture)
+        if self._process is not None:
+            self._worker("rtl-watchdog", self._watch_rtl_samples)
+
+    def _watch_rtl_samples(self, startup_timeout=10.0, stall_timeout=3.0):
+        """A running rtl_sdr process does not guarantee a working USB stream."""
+        started = time.monotonic()
+        while not self._stop.wait(0.25):
+            if self._process.poll() is not None:
+                return  # The capture reader reports EOF/driver exit.
+            last = self._last_capture
+            timeout = startup_timeout if last is None else stall_timeout
+            if time.monotonic() - (started if last is None else last) < timeout:
+                continue
+            self.error = (
+                f"RTL-SDR {self.settings.rtl_serial} delivered no I/Q for {timeout:g} s; "
+                "stop Receive, reconnect the USB receiver, and retry."
+            )
+            # Unblock the pipe reader as well as the converter. Report the
+            # actual no-samples failure rather than waiting forever in Search.
+            self._stop.set()
+            try:
+                self._process.terminate()
+            finally:
+                self.on_error(self.error)
+            return
 
     def _worker(self, name, function):
         def guarded():

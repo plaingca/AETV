@@ -80,12 +80,22 @@ def test_sdr_debug_records_modem_waveform_and_reports_acquisition(monkeypatch, t
     np.testing.assert_allclose(saved / 32767.0, samples, atol=1 / 32767)
 
 
-@pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex"])
+@pytest.mark.parametrize("source", ["kiwi", "soundcard", "flex", "rtlsdr", "pluto", "hackrf"])
 def test_rx_timing_policy_matches_source(source):
     engine = RxEngine(Station(StationSettings(mode="V8", rx_source=source)))
     demodulator = engine._new_demodulator(AETV_MODES["V8"])
-    assert demodulator.boundary_tracking == (source in {"kiwi", "soundcard"})
+    assert demodulator.boundary_tracking == (source != "flex")
     assert demodulator.timing_tracking == (source == "soundcard")
+    assert demodulator.verify_gap_phase == (source in {"kiwi", "rtlsdr", "pluto", "hackrf"})
+
+
+def test_sdr_phase_reverification_is_visible_after_video_has_started():
+    messages = []
+    engine = RxEngine(Station(), on_state=lambda state: messages.append(state.message))
+    engine.state.listening = True
+    engine._shown_gops = 20
+    engine._record_modem_debug({"event": "tracking_phase_pending"})
+    assert messages == ["Rechecking video boundary after a sample discontinuity"]
 
 
 def test_stale_codec_cannot_start_a_new_mode_receive():

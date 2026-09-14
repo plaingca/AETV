@@ -94,10 +94,15 @@ identical captured samples and model/runtime for paired receiver comparisons.
 - Timing recovery uses analytic cyclic-prefix correlation, avoiding conjugate
   cancellation during oscillator drift. Guarded pilot comparisons repair short
   insertions/deletions. CRC-verified beacon counters correct whole-frame phase
-  after larger transport jumps.
+  after larger transport jumps. While that phase is uncertain, hold the last
+  good picture and show a boundary-check status instead of displaying
+  scrambled interleaver contents with a misleadingly healthy pilot SNR.
 - An I/Q queue overflow explicitly discards old samples and resets demodulation
   and A/V clocks. Reception resumes automatically. Exact discarded sample
   counts are logged.
+- A running RTL driver that produces no samples times out explicitly (ten
+  seconds at startup, three seconds after streaming). It closes the stalled
+  driver and reports the receiver/USB problem instead of searching forever.
 - Both A/V modes associate voice with received GOP positions. Absolute playout
   deadlines avoid accumulating polling jitter. Video is released when its
   paired audio reaches the output worker, with bounded queues and whole-pair

@@ -980,6 +980,9 @@ class StreamingDemodulator:
 
     ``boundary_tracking`` repairs small timing jumps using CP and pilot
     evidence, independently of ``timing_tracking``'s sample-clock estimator.
+    ``verify_gap_phase`` holds output after opaque SDR transport jumps until
+    a beacon verifies interleaver phase. Soundcard endpoint-servo users can
+    retain the existing immediate recovery policy.
     """
 
     def __init__(
@@ -991,6 +994,7 @@ class StreamingDemodulator:
         mode_name: str | None = None,
         timing_tracking: bool = False,
         boundary_tracking: bool = False,
+        verify_gap_phase: bool = False,
     ):
         self.band = band
         self.interleave = interleave
@@ -1004,6 +1008,7 @@ class StreamingDemodulator:
         self.continuous = bool(continuous)
         self.timing_tracking = bool(timing_tracking)
         self.boundary_tracking = bool(boundary_tracking)
+        self.verify_gap_phase = bool(verify_gap_phase)
         self._tracking_mode: AETVModeSpec | None = None
         self._tracking_freq_offset = 0.0
         self._tracking_bad_gops = 0
@@ -1023,6 +1028,7 @@ class StreamingDemodulator:
         self._awaiting_search_offset = 0
         self._beacon_total_chips = 0
         self._beacon_phase_error = 0
+        self._tracking_phase_uncertain = False
 
     def _start_tracking(
         self, mode: AETVModeSpec, freq_offset: float
@@ -1033,6 +1039,7 @@ class StreamingDemodulator:
         self._tracking_pending.clear()
         self._tracking_expected_offset = 0
         self._tracking_rate_adjustment = 0.0
+        self._tracking_phase_uncertain = False
 
     def _clear_beacon(self) -> None:
         self._beacon_total_chips = 0
@@ -1189,6 +1196,7 @@ class StreamingDemodulator:
         logical_history = self.beacon_repeated_chips if result.mode.band == "U" else self.beacon_chips
         phase_beacon = find_beacon_superframe(logical_history, expected_mode=result.mode.index)
         if phase_beacon is not None:
+            self._tracking_phase_uncertain = False
             first_chip = self._beacon_total_chips - len(logical_history)
             relative_frame = (first_chip + phase_beacon.chip_offset) // DATA_SYMS_PER_FRAME
             self._beacon_phase_error = (phase_beacon.frame_index - relative_frame) % FRAMES_PER_GOP
@@ -1457,6 +1465,7 @@ class StreamingDemodulator:
                     identity = self.last_beacon
                     self._clear_beacon()
                     self.last_beacon = identity
+                    self._tracking_phase_uncertain = self.verify_gap_phase
                 missing_gops = self._accumulate_beacon(
                     result, stream_sample, payload_samples
                 )
@@ -1469,6 +1478,14 @@ class StreamingDemodulator:
                     identity = self.last_beacon
                     self._clear_beacon()
                     self.last_beacon = identity
+                    continue
+                if self._tracking_phase_uncertain:
+                    # A periodic pilot verifies a frame, not the eight-frame
+                    # interleaver phase. After a transport jump, displaying
+                    # these latents before a fresh beacon CRC can produce
+                    # seconds of corrupt video with deceptively healthy SNR.
+                    # Keep consuming pilots/chips; release only verified GOPs.
+                    self._debug("tracking_phase_pending", stream_sample=int(stream_sample))
                     continue
                 self._debug(
                     "gop_accepted",

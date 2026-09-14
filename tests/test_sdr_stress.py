@@ -69,6 +69,22 @@ def test_coarse_tuning_rejects_noise_or_one_tone(name):
             estimate_mode_signal_offset(values, AETV_MODES[name])
 
 
+@pytest.mark.parametrize("started", [False, True])
+def test_rtl_process_without_iq_fails_instead_of_searching_forever(started):
+    import time
+    from aetv.sdr import SDRCapture
+    from aetv.settings import StationSettings
+    errors, terminated = [], []
+    capture = SDRCapture(StationSettings(rx_source="rtlsdr"), AETV_MODES["V8"],
+                         SimpleNamespace(), on_error=errors.append, on_status=lambda _: None)
+    capture._process = SimpleNamespace(poll=lambda: None, terminate=lambda: terminated.append(True))
+    if started:
+        capture._last_capture = time.monotonic() - 1
+    capture._watch_rtl_samples(startup_timeout=.02, stall_timeout=.02)
+    assert capture._stop.is_set() and terminated == [True]
+    assert len(errors) == 1 and "delivered no I/Q" in errors[0]
+
+
 def test_v8_program_audio_pairs_late_gops_at_native_rate_and_corrects_pitch():
     from aetv.analog_av import ProgramAudio
     fs, frequency, offset = 8000, 811.5, 14.25
@@ -151,16 +167,22 @@ def test_plausible_pilots_after_transport_timing_slip_do_not_leave_corrupt_track
     waveform = (np.r_[waveform[:cut], np.zeros(samples), waveform[cut:]]
                 if jump > 0 else np.r_[waveform[:cut], waveform[cut + samples:]])
     demod = StreamingDemodulator(mode.band, continuous=True, mode_name=name,
-                                 boundary_tracking=True)
-    received = []
+                                 boundary_tracking=True, verify_gap_phase=True)
+    received, positions = [], []
     for start in range(0, len(waveform), fs // 10):
-        received.extend(r.gops_latents[0] for r in demod.feed(waveform[start:start + fs // 10]))
+        for result in demod.feed(waveform[start:start + fs // 10]):
+            received.append(result.gops_latents[0])
+            positions.append(result.stream_start_sample)
     z = np.asarray(received)
     scores = (z / np.linalg.norm(z, axis=1)[:, None]) @ (sent / np.linalg.norm(sent, axis=1)[:, None]).T
     # The interrupted GOP can be lost; every final GOP must recover with the
     # correct source identity, not merely a plausible pilot-presence score.
     assert scores[-6:].argmax(axis=1).tolist() == list(range(24, 30))
     assert np.min(scores[-6:].max(axis=1)) > .90
+    # Hold the last good picture during ambiguous frame phase instead of
+    # emitting scrambled interleaver contents until the next beacon arrives.
+    after_interruption = np.asarray(positions) > cut + 2 * fs
+    assert np.min(scores[after_interruption].max(axis=1)) > .90
 
 
 def test_slow_debug_disk_keeps_valid_prefix_without_blocking_receiver():

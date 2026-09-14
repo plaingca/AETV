@@ -64,7 +64,7 @@ def main():
         events.append(dict(input_s=input_time[0], **value))
 
     demod = StreamingDemodulator(mode.band, continuous=True, mode_name=mode.name,
-                                 boundary_tracking=True, on_debug=event)
+                                 boundary_tracking=True, verify_gap_phase=True, on_debug=event)
     separator = (AC16CompositeSeparator() if mode.name == "AC16" else StreamingCompositeSeparator()) if av else None
     rate = waveform_sample_rate(settings)
     video_resampler = StreamResampler(*resample_ratio(rate, mode.geometry.fs))

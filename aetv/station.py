@@ -1733,10 +1733,11 @@ class RxEngine:
     def _record_modem_debug(self, event: dict) -> None:
         if self._debug_log is not None:
             self._debug_log.write(event)
-        if not self.state.listening or self._shown_gops:
-            return
         kind = event.get("event")
+        if not self.state.listening or (self._shown_gops and kind != "tracking_phase_pending"):
+            return
         message = {
+            "tracking_phase_pending": "Rechecking video boundary after a sample discontinuity",
             "preamble_candidate": "Checking signal framing",
             "candidate_rejected": "Receiving samples; searching for synchronization",
             "blind_search_started": "Searching for a matching station beacon",
@@ -1761,6 +1762,7 @@ class RxEngine:
             # sources still need guarded correction of waveform timing jumps.
             timing_tracking=self.station.settings.rx_source == "soundcard",
             boundary_tracking=self.station.settings.rx_source in {"kiwi", "soundcard", "pluto", "rtlsdr", "hackrf"},
+            verify_gap_phase=self.station.settings.rx_source in {"kiwi", "pluto", "rtlsdr", "hackrf"},
         )
 
     def _loop(self) -> None:
