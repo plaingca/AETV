@@ -312,6 +312,25 @@ def estimate_mode_signal_offset(iq, mode, sample_rate=960000, nominal_hz=-100000
             high = np.interp(threshold, smooth[right-1:right+1][::-1], f[right-1:right+1][::-1])
             if .8 * width <= high - low <= 1.2 * width:
                 center = round(((low + high) / 2 - video_center) / 25) * 25
+    else:
+        # At low SNR the broad interior score has a flat maximum. An uneven
+        # payload can move it hundreds of hertz without changing that score
+        # much. This matters for late entry: the V8 A/V beacon sits at the
+        # upper filter edge and can disappear before payload pilots do.
+        # Refine against both *local* edges, retaining independent occupancy
+        # checks and requiring positive evidence at each edge. Speech below
+        # the guard cannot satisfy the upper-edge check on its own.
+        lower = mean(-.5 * width, -.4 * width) - mean(-.6 * width, -.5 * width)
+        upper = mean(.4 * width, .5 * width) - mean(.5 * width, .6 * width)
+        edge_scores = (lower + upper) / 2
+        plausible = (
+            occupied & (abs(centers - centers[index]) <= .25 * width)
+            & (lower > .12) & (upper > .12)
+        )
+        edge_scores[~plausible] = -np.inf
+        refined = int(np.argmax(edge_scores))
+        if np.isfinite(edge_scores[refined]):
+            center = centers[refined] - video_center
     return dict(offset_hz=float(center), video_width_hz=float(width),
                 inband_over_noise_db=float(10*np.log10(1 + slices[:, index].mean())),
                 method=f"Received-only {mode.name} carrier-bank contrast and four interior slices")

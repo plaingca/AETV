@@ -31,7 +31,8 @@ def test_paired_clock_does_not_accumulate_polling_jitter_over_ten_minutes():
 
 @pytest.mark.parametrize("name,av", [("V8", False), ("V7", False), ("V8", True)])
 @pytest.mark.parametrize("snr", [0., 35.])
-def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, av, snr):
+@pytest.mark.parametrize("seed", [8473, 836])
+def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, av, snr, seed):
     from aetv.modem import modulate_continuous_chunks
     from aetv.sdr_dsp import ModemToIQ, estimate_mode_signal_offset
     from aetv.audio_io import StreamResampler, resample_ratio
@@ -39,7 +40,7 @@ def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, a
     from aetv.settings import StationSettings
     from aetv.station import Station, TxEngine
 
-    rng = np.random.default_rng(8473)
+    rng = np.random.default_rng(seed)
     mode = AETV_MODES[name]
     settings = StationSettings(mode=name, waveform_mode="analog_av" if av else "video")
     latents = rng.normal(size=(3, mode.latents_per_gop)).astype(np.float32)
@@ -52,7 +53,9 @@ def test_non_ac16_coarse_tuning_finds_offset_video_without_source_timing(name, a
     power = np.mean(abs(iq)**2) * (.5 if av else 1) * (960000/(50*mode.geometry.carriers)) / 10**(snr/10)
     iq += np.sqrt(power/2)*(rng.normal(size=len(iq))+1j*rng.normal(size=len(iq)))
     result = estimate_mode_signal_offset(iq, mode, composite=av)
-    assert abs(result["offset_hz"] + 105150) < 450
+    # Merely being inside the modem's +/-600 Hz search is insufficient: a
+    # narrow A/V receive filter can lose its edge beacon before its pilots.
+    assert abs(result["offset_hz"] + 105150) < 150, result
 
 
 @pytest.mark.parametrize("name", ["V8", "V7"])

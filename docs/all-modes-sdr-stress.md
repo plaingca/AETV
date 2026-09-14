@@ -88,6 +88,9 @@ identical captured samples and model/runtime for paired receiver comparisons.
 
 - All released carrier banks support received-only coarse tuning. Boundary
   peaks, narrow interferers and unoccupied banks cannot establish calibration.
+  Weak-bank tuning uses both local spectral edges to avoid shifting a narrow
+  A/V beacon into the receive filter's transition band. Broad interior power
+  alone is insufficient even when its estimate falls inside modem CFO range.
 - Timing recovery uses analytic cyclic-prefix correlation, avoiding conjugate
   cancellation during oscillator drift. Guarded pilot comparisons repair short
   insertions/deletions. CRC-verified beacon counters correct whole-frame phase
