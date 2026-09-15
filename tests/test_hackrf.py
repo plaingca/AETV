@@ -414,3 +414,28 @@ def test_tx_primes_past_header_before_starting_usb(monkeypatch):
     assert health['iq_queue_high_water'] <= 16
     assert health['produced_samples'] == sent_bytes[0] // 2
     assert abs(health['produced_samples'] / SAMPLE_RATE - 2.85) < .01
+
+
+@pytest.mark.parametrize('available,result', [(False, 0), (True, -1000), (True, 0)])
+def test_device_shortfall_counters_are_optional_and_use_public_abi(available, result):
+    from aetv.hackrf import M0State
+    assert C.sizeof(M0State) == 40
+    assert M0State.num_shortfalls.offset == 16
+    lib = FakeLibrary()
+
+    def query(device, output):
+        state = C.cast(output, C.POINTER(M0State)).contents
+        state.num_shortfalls = 7
+        state.longest_shortfall = 8064
+        return result
+
+    lib.hackrf_get_m0_state = query if available else None
+    radio = HackRF(settings(), 'tx', library=lib)
+    try:
+        report = radio.device_state()
+        assert report['available'] == (available and result == 0)
+        if report['available']:
+            assert report['num_shortfalls'] == 7
+            assert report['longest_shortfall'] == 8064
+    finally:
+        radio.close()

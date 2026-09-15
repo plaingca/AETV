@@ -36,6 +36,16 @@ class Transfer(C.Structure):
     ]
 
 
+class M0State(C.Structure):
+    """Public libhackrf MCU diagnostics ABI (USB API 0x0106 and newer)."""
+    _fields_ = [("requested_mode", C.c_uint16), ("request_flag", C.c_uint16)] + [
+        (name, C.c_uint32) for name in (
+            "active_mode", "m0_count", "m4_count", "num_shortfalls",
+            "longest_shortfall", "shortfall_limit", "threshold", "next_mode", "error",
+        )
+    ]
+
+
 SampleCallback = C.CFUNCTYPE(C.c_int, C.POINTER(Transfer))
 FlushCallback = C.CFUNCTYPE(None, C.c_void_p, C.c_int)
 
@@ -80,6 +90,10 @@ def load_library():
         for name, (args, result) in signatures.items():
             function = getattr(lib, "hackrf_" + name)
             function.argtypes, function.restype = args, result
+        get_state = getattr(lib, "hackrf_get_m0_state", None)
+        if get_state is not None:
+            get_state.argtypes = [C.c_void_p, C.POINTER(M0State)]
+            get_state.restype = C.c_int
         return lib
     except (OSError, AttributeError) as error:
         raise RuntimeError(f"Cannot load HackRF runtime {path}: {error}") from error
@@ -156,6 +170,18 @@ class HackRF:
             reason = self.lib.hackrf_error_name(result).decode(errors="replace")
             raise RuntimeError(f"HackRF {name}: {reason} ({result}). "
                                "Check the serial, USB driver, and other SDR applications.")
+
+    def device_state(self):
+        """Best-effort firmware counters; call outside USB callbacks."""
+        query = getattr(self.lib, "hackrf_get_m0_state", None)
+        if query is None:
+            return {"available": False, "reason": "libhackrf API unavailable"}
+        state = M0State()
+        result = query(self.device, C.byref(state))
+        if result != 0:
+            return {"available": False, "error_code": int(result)}
+        return {"available": True, **{name: int(getattr(state, name))
+                                     for name, _ in M0State._fields_}}
 
     def start_rx(self):
         def receive(pointer):
@@ -372,7 +398,10 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
         cancel.set()
         try:
             if radio is not None:
-                radio.close()
+                try:
+                    health["device_state_at_close"] = radio.device_state()
+                finally:
+                    radio.close()
         finally:
             producer.join(timeout=5)
             if producer.is_alive():

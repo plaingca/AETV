@@ -199,6 +199,7 @@ class SDRCapture:
         self.error = ""
         self._clipped_buffers = 0
         self._overload_reported = False
+        self._frequency_confirmed_at = None
 
     def start(self):
         settings = self.settings
@@ -352,6 +353,17 @@ class SDRCapture:
                 self.on_status(f"SDR IQ queue overrun; discarded {discarded/self.conversion_rate:.1f} s and reacquiring{detail}")
             self.health["iq_queue_high_water"] = max(self.health["iq_queue_high_water"], self._queue.qsize())
 
+    def confirm_signal(self):
+        """Called after the modem validates payload, not merely a spectrum fit."""
+        self._frequency_confirmed_at = time.monotonic()
+
+    def _correction_expired(self):
+        # Allow the longest blind-acquisition window plus processing margin.
+        # A real payload refreshes this lease even before neural decoding.
+        return (self.settings.sdr_auto_correct
+                and self._frequency_confirmed_at is not None
+                and time.monotonic() - self._frequency_confirmed_at >= 30.0)
+
     def _convert(self):
         offset = -100000 + self.settings.sdr_rx_correction_hz
         adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
@@ -364,7 +376,11 @@ class SDRCapture:
                 iq = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if iq is self._gap:
+            expired = not auto and self._correction_expired()
+            if iq is self._gap or expired:
+                if expired:
+                    self.on_status("No validated AETV payload for 30 s; retrying SDR frequency correction")
+                self._frequency_confirmed_at = None
                 offset = -100000 + self.settings.sdr_rx_correction_hz
                 adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
                 resample = StreamResampler(*resample_ratio(48000, waveform_sample_rate(self.settings)))
@@ -422,6 +438,7 @@ class SDRCapture:
                 )
                 iq = np.concatenate(calibration)
                 auto = False
+                self._frequency_confirmed_at = time.monotonic()
                 calibration.clear()
                 self.on_status(
                     f"SDR received-only frequency correction: {offset + 100000:+.0f} Hz"

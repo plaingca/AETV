@@ -59,3 +59,52 @@ Detailed local scripts and source snapshots are retained under
 No HackRF is attached here. Physical One/clone/PortaPack streaming, long-duration
 USB stability and Ryzen 1600 CPU inference remain unverified. In particular,
 transport optimizations cannot guarantee real-time V7 CPU encoding/decoding.
+
+## Evaluation feedback: stale frequency correction
+
+The tester reported successful RX without queue overruns and TX without
+underruns on v0.1.21rc1. An unrelated HT transmission could leave RX searching
+until restart. Code inspection found that an accepted coarse spectrum fit had
+no expiry even when the modem never validated its payload.
+
+The receiver now retries coarse frequency correction after 30 seconds without
+validated modem payload. Valid payload refreshes that deadline before neural
+decoding. Manual correction is unaffected. A retry resets downstream acquisition
+and A/V state through the existing discontinuity path. Simulated 65-second
+regressions verify repeated recovery for an unvalidated fit and uninterrupted
+operation for validated payload. This is recovery from a bad candidate, not a
+claim that unrelated FM signals can never pass the coarse spectrum estimator.
+
+The supplied debug archive contains 13 completed transmissions, all reporting
+zero host queue underruns. Replaying all saved TX waveforms through the modem
+and appropriate A/V separator recovered 244/244 GOPs. All five prepared runs
+recovered 29/29 GOPs each. No interior near-silent 10 ms block (RMS below 1e-4)
+was found. This establishes complete recorded video waveforms, not uninterrupted
+USB/RF output or perceptual audio quality.
+
+The initial RX log contains one coarse correction (-1250 Hz), 98 rejected
+preamble/header candidates and 246 rejected blind candidates, with no decoded
+payload and no I/Q/ring overruns. Replaying that recorded RX audio followed by a
+prepared TX recording, without resetting the modem, produced zero false payloads
+and then all 29 valid GOPs. The modem can recover at the corrected-audio layer;
+this replay cannot retest coarse RF tuning because raw I/Q was not recorded.
+
+RC2 also records optional MCU counters at TX close using
+[libhackrf's public M0-state API](https://github.com/greatscottgadgets/hackrf/blob/v2026.01.3/host/libhackrf/src/hackrf.h).
+These include device shortfall counts and longest shortfall in bytes, distinct
+from the software queue's late-data counter. The query runs once outside USB
+callbacks and before closing the device. Missing APIs/older firmware are marked
+unavailable. Raw counters must be interpreted with completion/cancellation and
+firmware state; they do not establish the timing or cause of a shortfall.
+
+The audible prepared-clip stutter remains unconfirmed after the waveform
+recording point. Further evaluation should determine whether another AETV
+receiver loses video and inspect the new firmware counters. No speculative
+A/V waveform change is included. Raw user recordings remain local; committed
+evidence contains only aggregate replay results.
+
+Validation for recovery: full suite 492 passed, 2 skipped. After adding optional
+MCU diagnostics, the focused HackRF/SDR suite passed 45 tests, including ABI
+layout, nonzero shortfall values, unsupported firmware, and missing API cases.
+Dynamic library loading passed with the portable libhackrf 2026.01.3 runtime;
+the host's older system library lacks the already-required TX flush API.

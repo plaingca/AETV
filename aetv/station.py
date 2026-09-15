@@ -1849,6 +1849,8 @@ class RxEngine:
                     for result in results
                     for latents, weights in zip(result.gops_latents, result.gops_weights)
                 ]
+                if received and self._sdr is not None:
+                    self._sdr.confirm_signal()
                 received_audio: list[np.ndarray | None] = [None] * len(received)
                 if self._voice_history is not None and received:
                     needed = len(received) * NATIVE_AETV_FS
