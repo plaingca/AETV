@@ -108,3 +108,31 @@ MCU diagnostics, the focused HackRF/SDR suite passed 45 tests, including ABI
 layout, nonzero shortfall values, unsupported firmware, and missing API cases.
 Dynamic library loading passed with the portable libhackrf 2026.01.3 runtime;
 the host's older system library lacks the already-required TX flush API.
+
+## AC16 startup follow-up (RC3)
+
+The tester subsequently reported no observed RF for AC16 from either webcam or
+prepared clips, with no retained status/error text. The existing archive includes
+two completed AC16 video transmissions; those do not prove later attempts worked.
+Four regression cases now exercise TxEngine through real modulation, conversion,
+packing and paced ctypes callbacks: prepared/webcam times video/A/V. Capture,
+inference and USB hardware are stubbed. All four submit nonzero I/Q and complete;
+this does not validate the physical device or DirectML model loading.
+
+A separate startup error-propagation defect was found: converter/resampler setup
+ran outside the producer's exception handler. Such an exception could leave TX
+waiting for its preparation watchdog. Setup now propagates its error, records it,
+and leaves the radio closed when no I/Q was produced. No evidence yet ties this
+defect to the tester's specific AC16 failure. GUI validation and unready-clip
+rejections now appear in the application log as well as the transmit status.
+
+TX diagnostics additionally record whether USB streaming started, callback sample
+count, configured frequency/rates/gain, and the peak-protection gain. Local replay
+at 8.064 MS/s found the three supplied prepared V8 A/V waveforms reduce that gain
+to about 0.586--0.588 at GOP 2, versus unity for the webcam recording. That is about
+4.6 dB less signal level and remains a possible HT audibility factor, not evidence
+of repeated missing samples. The same reduction was absent in the V7 comparison.
+The peak protection remains enabled to avoid DAC clipping.
+
+Validation: 54 HackRF/GUI-panel tests passed, including all four AC16 cases and
+conversion-initialization failure before device open. Ruff and diff checks pass.

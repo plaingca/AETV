@@ -439,3 +439,81 @@ def test_device_shortfall_counters_are_optional_and_use_public_abi(available, re
             assert report['longest_shortfall'] == 8064
     finally:
         radio.close()
+
+
+@pytest.mark.parametrize('av', [False, True])
+@pytest.mark.parametrize('prepared', [False, True])
+def test_ac16_sources_reach_usb_with_nonzero_iq(monkeypatch, av, prepared):
+    """Real modem/conversion/callback path; stub only capture, inference and USB."""
+    import time
+    from types import SimpleNamespace
+    import aetv.hackrf as module
+    import aetv.station as station_module
+    from aetv.config import AETV_MODES
+    from aetv.source import PreparedClip
+    selected = replace(settings(), gops=2, debug_capture=False,
+                       waveform_mode='analog_av' if av else 'video')
+    station = station_module.Station(selected)
+    station.codec = SimpleNamespace(mode=AETV_MODES['AC16'])
+    errors = []
+    engine = station_module.TxEngine(station, on_error=errors.append)
+    latents = np.random.default_rng(172).normal(size=(2, 19200)).astype(np.float32)
+    monkeypatch.setattr(engine, '_live_webcam_gops', lambda *a: iter(latents))
+    monkeypatch.setattr(station_module, 'read_video_audio', lambda *a, **k: np.zeros(16000))
+    monkeypatch.setattr(station_module, 'open_input_stream', lambda *a, **k: (None, 8000))
+    lib = FakeLibrary()
+    original_start = lib.__getattr__('hackrf_start_tx')
+    workers, blocks, counts = [], [], []
+
+    def start(*args):
+        original_start(*args)
+        def consume():
+            total = 0
+            epoch = time.monotonic()
+            while True:
+                buf = (C.c_uint8 * 262144)()
+                transfer = Transfer(None, buf, len(buf), len(buf), None, None)
+                if lib.transmit(C.pointer(transfer)) != 0:
+                    break
+                values = np.ctypeslib.as_array(buf)[:transfer.valid_length].view(np.int8)
+                blocks.append(bool(np.any(values)))
+                total += transfer.valid_length
+                engine._cancel.wait(max(0, epoch + total/(2*SAMPLE_RATE) - time.monotonic()))
+            counts.append(total)
+            lib.flush(None, 1)
+        thread = threading.Thread(target=consume)
+        workers.append(thread)
+        thread.start()
+        return 0
+
+    lib.hackrf_start_tx = start
+    monkeypatch.setattr(module, 'load_library', lambda: lib)
+    source = (PreparedClip('unused.mp4', 'AC16', tuple(latents),
+                           np.zeros((6, 144, 256, 3), np.uint8)) if prepared else 'webcam')
+    try:
+        assert engine.transmit(source), errors
+    finally:
+        for thread in workers:
+            thread.join(timeout=5)
+    assert not errors
+    assert engine.sdr_health['completed']
+    assert engine.sdr_health['produced_samples'] == counts[0] // 2
+    assert sum(blocks) > 100
+    assert engine.sdr_health['late_data_events'] == 0
+
+
+def test_conversion_initialization_error_reaches_caller_before_radio_open(monkeypatch):
+    import aetv.sdr_dsp as dsp
+    import aetv.hackrf as module
+
+    def fail(*args, **kwargs):
+        raise ValueError('test conversion setup failed')
+
+    monkeypatch.setattr(dsp, 'ModemToIQ', fail)
+    monkeypatch.setattr(module, 'HackRF', lambda *a, **k: pytest.fail('radio must stay closed'))
+    health = {}
+    with pytest.raises(ValueError, match='test conversion setup failed'):
+        transmit_hackrf(iter(()), 48000, settings(), threading.Event(), lambda _: None,
+                       max_seconds=1, diagnostics=health)
+    assert health['producer_error'] == 'test conversion setup failed'
+    assert not health['completed']

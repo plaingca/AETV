@@ -308,10 +308,14 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
     end = object()
     deadline = time.monotonic() + max_seconds + 25
     radio = None
+    producer_errors = []
     health = diagnostics if diagnostics is not None else {}
     health.update(iq_queue_high_water=0, conversion_max_ms=0., packing_max_ms=0.,
                   conversion_seconds=0., packing_seconds=0., produced_samples=0,
-                  late_data_events=0, completed=False)
+                  late_data_events=0, completed=False, usb_started=False,
+                  sample_rate=SAMPLE_RATE, input_sample_rate=fs,
+                  rf_center_hz=round(settings.sdr_frequency_mhz * 1e6),
+                  tx_gain_db=settings.hackrf_tx_gain, headroom_gain=1.0)
 
     def put(value):
         while not (stopped.is_set() or cancel.is_set()):
@@ -323,11 +327,11 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
                 pass
 
     def produce():
-        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9,
-                            narrowband=True)
-        resample = StreamResampler(*resample_ratio(fs, 48000))
         count = 0
         try:
+            adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9,
+                                narrowband=True)
+            resample = StreamResampler(*resample_ratio(fs, 48000))
             for audio in chunks:
                 if stopped.is_set() or cancel.is_set():
                     break
@@ -342,6 +346,7 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
                         return
                     before = time.perf_counter()
                     iq = adapter.feed(audio[pos:pos + 48000])
+                    health["headroom_gain"] = adapter.headroom_gain
                     elapsed = time.perf_counter() - before
                     health["conversion_seconds"] += elapsed
                     health["conversion_max_ms"] = max(health["conversion_max_ms"], elapsed * 1000)
@@ -360,6 +365,8 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
             health["produced_samples"] += len(tail)
             put(encode_iq(tail))
         except Exception as error:
+            producer_errors.append(error)
+            health["producer_error"] = str(error)
             put(error)
         finally:
             put(end)
@@ -377,8 +384,11 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
             cancel.wait(0.02)
         if cancel.is_set():
             return False
+        if producer_errors and not health["produced_samples"]:
+            raise producer_errors[0]
         radio = HackRF(settings, "tx")
         radio.start_tx(ready, end, cancel)
+        health["usb_started"] = True
         while not cancel.is_set():
             if radio.error:
                 if "underrun" in radio.error:
@@ -399,6 +409,7 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
         try:
             if radio is not None:
                 try:
+                    health["callback_samples"] = getattr(radio, "tx_samples", 0)
                     health["device_state_at_close"] = radio.device_state()
                 finally:
                     radio.close()
