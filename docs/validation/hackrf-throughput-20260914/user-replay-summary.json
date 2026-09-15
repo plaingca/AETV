@@ -1,0 +1,141 @@
+{
+  "scope": "Saved TX waveform replay; before USB/RF. Source media and raw user logs kept local.",
+  "runs": [
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "live",
+      "expected": 29,
+      "decoded": 29,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "prepared",
+      "expected": 29,
+      "decoded": 29,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "prepared",
+      "expected": 29,
+      "decoded": 29,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "prepared",
+      "expected": 29,
+      "decoded": 29,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": true,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "AC16",
+      "av": false,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "AC16",
+      "av": false,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V7",
+      "av": false,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V7",
+      "av": false,
+      "kind": "prepared",
+      "expected": 29,
+      "decoded": 29,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V7",
+      "av": false,
+      "kind": "prepared",
+      "expected": 29,
+      "decoded": 29,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    },
+    {
+      "mode": "V8",
+      "av": false,
+      "kind": "live",
+      "expected": 10,
+      "decoded": 10,
+      "interior_quiet_10ms_blocks": 0,
+      "late_data_events": 0,
+      "completed": true
+    }
+  ],
+  "recovery_replay": {
+    "unrelated_rx_payloads": 0,
+    "subsequent_prepared_tx_payloads": 29,
+    "expected_tx_payloads": 29,
+    "scope": "Recorded corrected audio concatenation, no IQ retuning or RF"
+  }
+}

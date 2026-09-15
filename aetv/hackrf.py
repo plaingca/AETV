@@ -18,7 +18,12 @@ from .analog_av import waveform_center_hz
 
 import numpy as np
 
-SAMPLE_RATE = 9600000  # >=8 MHz ADC/DAC recommendation; integer 48 kHz ratio.
+# Keep the One's converter above its documented 8 MHz recommendation. This
+# 168*48 kHz rate also permits an integer /8 host decimator before calibration.
+# HackRF One has no hardware filtered decimation; this lowers its sample clock.
+SAMPLE_RATE = 8064000
+RX_DECIMATION = 8
+RX_SAMPLE_RATE = SAMPLE_RATE // RX_DECIMATION
 FILTER_BANDWIDTH = 1750000
 _device_lock = threading.Lock()  # One shared TX/RX selector: half duplex.
 
@@ -28,6 +33,16 @@ class Transfer(C.Structure):
         ("device", C.c_void_p), ("buffer", C.POINTER(C.c_uint8)),
         ("buffer_length", C.c_int), ("valid_length", C.c_int),
         ("rx_ctx", C.c_void_p), ("tx_ctx", C.c_void_p),
+    ]
+
+
+class M0State(C.Structure):
+    """Public libhackrf MCU diagnostics ABI (USB API 0x0106 and newer)."""
+    _fields_ = [("requested_mode", C.c_uint16), ("request_flag", C.c_uint16)] + [
+        (name, C.c_uint32) for name in (
+            "active_mode", "m0_count", "m4_count", "num_shortfalls",
+            "longest_shortfall", "shortfall_limit", "threshold", "next_mode", "error",
+        )
     ]
 
 
@@ -75,6 +90,10 @@ def load_library():
         for name, (args, result) in signatures.items():
             function = getattr(lib, "hackrf_" + name)
             function.argtypes, function.restype = args, result
+        get_state = getattr(lib, "hackrf_get_m0_state", None)
+        if get_state is not None:
+            get_state.argtypes = [C.c_void_p, C.POINTER(M0State)]
+            get_state.restype = C.c_int
         return lib
     except (OSError, AttributeError) as error:
         raise RuntimeError(f"Cannot load HackRF runtime {path}: {error}") from error
@@ -92,9 +111,13 @@ def runtime_smoke():
 def encode_iq(iq):
     values = np.asarray(iq, np.complex64).reshape(-1)
     components = values.view(np.float32)
-    if not np.all(np.isfinite(components)) or np.any(np.abs(components) >= 1):
+    low, high = components.min(initial=0), components.max(initial=0)
+    if not np.isfinite(low) or not np.isfinite(high) or low <= -1 or high >= 1:
         raise ValueError("HackRF IQ exceeds signed 8-bit range; reduce TX level")
-    return np.clip(np.rint(components * 128), -128, 127).astype(np.int8).tobytes()
+    scaled = components * 128
+    np.rint(scaled, out=scaled)
+    np.clip(scaled, -128, 127, out=scaled)
+    return scaled.astype(np.int8).tobytes()
 
 
 def decode_iq(data):
@@ -147,6 +170,18 @@ class HackRF:
             reason = self.lib.hackrf_error_name(result).decode(errors="replace")
             raise RuntimeError(f"HackRF {name}: {reason} ({result}). "
                                "Check the serial, USB driver, and other SDR applications.")
+
+    def device_state(self):
+        """Best-effort firmware counters; call outside USB callbacks."""
+        query = getattr(self.lib, "hackrf_get_m0_state", None)
+        if query is None:
+            return {"available": False, "reason": "libhackrf API unavailable"}
+        state = M0State()
+        result = query(self.device, C.byref(state))
+        if result != 0:
+            return {"available": False, "error_code": int(result)}
+        return {"available": True, **{name: int(getattr(state, name))
+                                     for name, _ in M0State._fields_}}
 
     def start_rx(self):
         def receive(pointer):
@@ -215,7 +250,8 @@ class HackRF:
                 self.tx_samples += transfer.valid_length // 2
                 return 0 if transfer.valid_length else -1
             except queue.Empty:
-                self.error = "HackRF TX underrun: inference/modem could not supply IQ in real time"
+                self.error = ("HackRF TX underrun: host could not supply IQ in real time; "
+                              "try a prepared clip or faster inference")
             except Exception as error:
                 self.error = str(error)
             return -1
@@ -259,7 +295,8 @@ class HackRF:
             raise RuntimeError("HackRF shutdown failed: " + "; ".join(errors))
 
 
-def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
+def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds,
+                    diagnostics=None):
     from dataclasses import replace
     from .audio_io import StreamResampler, resample_ratio
     from .hfchannel import _active_signal_power
@@ -271,20 +308,30 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     end = object()
     deadline = time.monotonic() + max_seconds + 25
     radio = None
+    producer_errors = []
+    health = diagnostics if diagnostics is not None else {}
+    health.update(iq_queue_high_water=0, conversion_max_ms=0., packing_max_ms=0.,
+                  conversion_seconds=0., packing_seconds=0., produced_samples=0,
+                  late_data_events=0, completed=False, usb_started=False,
+                  sample_rate=SAMPLE_RATE, input_sample_rate=fs,
+                  rf_center_hz=round(settings.sdr_frequency_mhz * 1e6),
+                  tx_gain_db=settings.hackrf_tx_gain, headroom_gain=1.0)
 
     def put(value):
         while not (stopped.is_set() or cancel.is_set()):
             try:
                 ready.put(value, timeout=0.1)
+                health["iq_queue_high_water"] = max(health["iq_queue_high_water"], ready.qsize())
                 return
             except queue.Full:
                 pass
 
     def produce():
-        adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9)
-        resample = StreamResampler(*resample_ratio(fs, 48000))
         count = 0
         try:
+            adapter = ModemToIQ(SAMPLE_RATE, center_hz=waveform_center_hz(settings), peak_limit=0.9,
+                                narrowband=True)
+            resample = StreamResampler(*resample_ratio(fs, 48000))
             for audio in chunks:
                 if stopped.is_set() or cancel.is_set():
                     break
@@ -297,14 +344,29 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
                 for pos in range(0, len(audio), 48000):
                     if stopped.is_set() or cancel.is_set():
                         return
+                    before = time.perf_counter()
                     iq = adapter.feed(audio[pos:pos + 48000])
+                    health["headroom_gain"] = adapter.headroom_gain
+                    elapsed = time.perf_counter() - before
+                    health["conversion_seconds"] += elapsed
+                    health["conversion_max_ms"] = max(health["conversion_max_ms"], elapsed * 1000)
                     for offset in range(0, len(iq), SAMPLE_RATE // 10):
                         if stopped.is_set() or cancel.is_set():
                             return
-                        put(encode_iq(iq[offset:offset + SAMPLE_RATE // 10]))
+                        before = time.perf_counter()
+                        packed = encode_iq(iq[offset:offset + SAMPLE_RATE // 10])
+                        elapsed = time.perf_counter() - before
+                        health["packing_seconds"] += elapsed
+                        health["packing_max_ms"] = max(health["packing_max_ms"], elapsed * 1000)
+                        health["produced_samples"] += len(packed) // 2
+                        put(packed)
             # Drain the resampler and sideband FIR tail before the USB flush.
-            put(encode_iq(adapter.feed(resample(np.zeros(9600)))))
+            tail = adapter.feed(resample(np.zeros(round(fs * .2))))
+            health["produced_samples"] += len(tail)
+            put(encode_iq(tail))
         except Exception as error:
+            producer_errors.append(error)
+            health["producer_error"] = str(error)
             put(error)
         finally:
             put(end)
@@ -313,21 +375,29 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     producer = threading.Thread(target=produce, name="hackrf-modem", daemon=True)
     producer.start()
     try:
-        # Half a second of prepared IQ absorbs callback and encoder jitter.
-        while ready.qsize() < 5 and not produced.is_set() and not cancel.is_set():
+        # The old five-buffer threshold could start USB on the header alone,
+        # before the first video GOP had even been encoded. Prime nearly the
+        # bounded 1.6-second queue so normal first-GOP latency has a reserve.
+        while ready.qsize() < 15 and not produced.is_set() and not cancel.is_set():
             if time.monotonic() > deadline:
                 raise TimeoutError("HackRF TX preparation exceeded its duration watchdog")
             cancel.wait(0.02)
         if cancel.is_set():
             return False
+        if producer_errors and not health["produced_samples"]:
+            raise producer_errors[0]
         radio = HackRF(settings, "tx")
         radio.start_tx(ready, end, cancel)
+        health["usb_started"] = True
         while not cancel.is_set():
             if radio.error:
+                if "underrun" in radio.error:
+                    health["late_data_events"] += 1
                 raise RuntimeError(radio.error)
             if radio.flushed.wait(0.02):
                 if radio.error:
                     raise RuntimeError(radio.error)
+                health["completed"] = radio.tx_eof
                 return radio.tx_eof
             if time.monotonic() > deadline:
                 raise TimeoutError("HackRF TX exceeded its duration watchdog")
@@ -338,7 +408,11 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
         cancel.set()
         try:
             if radio is not None:
-                radio.close()
+                try:
+                    health["callback_samples"] = getattr(radio, "tx_samples", 0)
+                    health["device_state_at_close"] = radio.device_state()
+                finally:
+                    radio.close()
         finally:
             producer.join(timeout=5)
             if producer.is_alive():

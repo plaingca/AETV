@@ -194,3 +194,39 @@ def test_radio_controls_emit_operator_selection():
     assert panel.rx_gain.maximum() == 700
     panel.close()
     app.processEvents()
+
+
+@pytest.mark.parametrize('validated', [False, True])
+def test_sdr_retries_unvalidated_frequency_fit_but_keeps_valid_payload(monkeypatch, validated):
+    from aetv import sdr
+    clock = [0.]
+    messages, resets = [], []
+    capture = sdr.SDRCapture(
+        StationSettings(rx_source='hackrf', mode='V8', sdr_auto_correct=True),
+        AETV_MODES['V8'], SimpleNamespace(write=lambda _: None),
+        on_error=lambda _: None, on_status=messages.append,
+        on_discontinuity=lambda: resets.append(clock[0]),
+    )
+    monkeypatch.setattr(sdr.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(sdr, 'estimate_mode_signal_offset',
+                        lambda *a, **k: {'offset_hz': -101250.})
+    monkeypatch.setattr(sdr, 'IQToModem', lambda *a: SimpleNamespace(feed=lambda x: x.real))
+    monkeypatch.setattr(sdr, 'StreamResampler', lambda *a: lambda x: x)
+
+    class Input:
+        def get(self, **kwargs):
+            clock[0] += .1
+            if clock[0] >= 65:
+                capture._stop.set()
+            return np.zeros(16, np.complex64)
+
+    capture._queue = Input()
+    if validated:
+        capture.ring.write = lambda _: capture.confirm_signal()
+    capture._convert()
+    corrections = [m for m in messages if 'received-only' in m]
+    assert len(corrections) == (1 if validated else 3)
+    assert len(resets) == (0 if validated else 2)
+    capture.settings.sdr_auto_correct = False
+    clock[0] += 100
+    assert not capture._correction_expired()

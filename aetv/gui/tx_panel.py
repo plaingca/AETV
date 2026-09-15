@@ -213,6 +213,7 @@ class TransmitPanel(QWidget):
             problems.append(f"{self.station.settings.mode} checkpoint is still loading")
         if problems:
             self.status.setText(problems[0])
+            self.station.log("TX not started: " + "; ".join(problems))
             return
         if self.cam_radio.isChecked():
             source = "webcam"
@@ -642,7 +643,9 @@ class TransmitPanel(QWidget):
             return
         prepared = self._prepared_clips.get(index)
         if prepared is None:
-            self.status.setText(f"{cell.name.text()} is still being prepared")
+            message = f"{cell.name.text()} is still being prepared"
+            self.status.setText(message)
+            self.station.log("TX not started: " + message)
             return
         self._selected_clip = index
         self._file_path = prepared.path

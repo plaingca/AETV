@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from .hackrf import SAMPLE_RATE, decode_iq, encode_iq
+from .hackrf import SAMPLE_RATE, RX_DECIMATION, RX_SAMPLE_RATE, decode_iq, encode_iq
 from .modem import StreamingDemodulator, modulate_continuous_chunks
 from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ
 
@@ -12,9 +12,9 @@ from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ
 def transport_smoke():
     started = time.perf_counter()
     sent = np.random.default_rng(439).standard_normal((3, 19200)).astype(np.float32)
-    tx = ModemToIQ(SAMPLE_RATE)
-    decimator = IQDecimator(SAMPLE_RATE // 960000)
-    rx = IQToModem(signal_offset_hz=-100000)
+    tx = ModemToIQ(SAMPLE_RATE, narrowband=True)
+    decimator = IQDecimator(RX_DECIMATION, protected_fraction=150000 / RX_SAMPLE_RATE)
+    rx = IQToModem(RX_SAMPLE_RATE, signal_offset_hz=-100000)
     demod = StreamingDemodulator("A", continuous=True, mode_name="AC16", boundary_tracking=True)
     output = []
     count = 0

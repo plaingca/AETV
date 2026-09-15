@@ -178,10 +178,11 @@ class SDRCapture:
         self._hackrf = None
         self._decimator = None
         if settings.rx_source == "hackrf":
-            from .hackrf import SAMPLE_RATE
+            from .hackrf import SAMPLE_RATE, RX_DECIMATION
             self.rate = SAMPLE_RATE
-            self._decimator = IQDecimator(self.rate // 960000)
-        self.conversion_rate = 960000 if self._decimator else self.rate
+            self._decimator = IQDecimator(RX_DECIMATION,
+                                         protected_fraction=150000 / (self.rate / RX_DECIMATION))
+        self.conversion_rate = self.rate // self._decimator.factor if self._decimator else self.rate
         self.preview = IQPreview(self.rate, settings.sdr_frequency_mhz * 1e6, mode)
         if settings.waveform_mode == "analog_av":
             self.preview.bandwidth_hz = 2 * waveform_center_hz(settings)
@@ -198,6 +199,7 @@ class SDRCapture:
         self.error = ""
         self._clipped_buffers = 0
         self._overload_reported = False
+        self._frequency_confirmed_at = None
 
     def start(self):
         settings = self.settings
@@ -342,8 +344,25 @@ class SDRCapture:
                 self.health["iq_discarded_samples"] += discarded
                 self._queue.put_nowait(self._gap)
                 self._queue.put_nowait(iq)
-                self.on_status(f"SDR IQ queue overrun; discarded {discarded/self.conversion_rate:.1f} s and reacquiring")
+                detail = ""
+                if self._hackrf is not None and self.health["converted_samples"]:
+                    cost = self.health["conversion_total_s"] / (
+                        self.health["converted_samples"] / self.conversion_rate
+                    )
+                    detail = f"; I/Q conversion {cost:.2f} s per signal second"
+                self.on_status(f"SDR IQ queue overrun; discarded {discarded/self.conversion_rate:.1f} s and reacquiring{detail}")
             self.health["iq_queue_high_water"] = max(self.health["iq_queue_high_water"], self._queue.qsize())
+
+    def confirm_signal(self):
+        """Called after the modem validates payload, not merely a spectrum fit."""
+        self._frequency_confirmed_at = time.monotonic()
+
+    def _correction_expired(self):
+        # Allow the longest blind-acquisition window plus processing margin.
+        # A real payload refreshes this lease even before neural decoding.
+        return (self.settings.sdr_auto_correct
+                and self._frequency_confirmed_at is not None
+                and time.monotonic() - self._frequency_confirmed_at >= 30.0)
 
     def _convert(self):
         offset = -100000 + self.settings.sdr_rx_correction_hz
@@ -357,7 +376,11 @@ class SDRCapture:
                 iq = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if iq is self._gap:
+            expired = not auto and self._correction_expired()
+            if iq is self._gap or expired:
+                if expired:
+                    self.on_status("No validated AETV payload for 30 s; retrying SDR frequency correction")
+                self._frequency_confirmed_at = None
                 offset = -100000 + self.settings.sdr_rx_correction_hz
                 adapter = IQToModem(self.conversion_rate, offset, waveform_center_hz(self.settings))
                 resample = StreamResampler(*resample_ratio(48000, waveform_sample_rate(self.settings)))
@@ -415,6 +438,7 @@ class SDRCapture:
                 )
                 iq = np.concatenate(calibration)
                 auto = False
+                self._frequency_confirmed_at = time.monotonic()
                 calibration.clear()
                 self.on_status(
                     f"SDR received-only frequency correction: {offset + 100000:+.0f} Hz"

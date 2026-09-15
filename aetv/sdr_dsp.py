@@ -3,16 +3,25 @@
 import math
 
 import numpy as np
-from scipy.signal import firwin, lfilter, upfirdn, welch
+from scipy.signal import firwin, kaiserord, lfilter, upfirdn, welch
 from scipy.ndimage import median_filter
 
 
 class IQDecimator:
     """Reduce wideband hardware IQ before calibration, keeping FIR/phase state."""
 
-    def __init__(self, factor=10):
+    def __init__(self, factor=10, *, protected_fraction=None):
         self.factor = factor
-        self.taps = firwin(20 * factor + 1, 0.8 / factor)
+        if protected_fraction is None:
+            self.taps = firwin(20 * factor + 1, 0.8 / factor)
+        else:
+            # Protect +/- this fraction of the OUTPUT sample rate. The nearest
+            # alias into that interval starts at (1-fraction)*output_rate.
+            # HackRF needs +/-150 kHz at 960 kS/s, not the full Nyquist band.
+            if not 0 < protected_fraction < .5:
+                raise ValueError("Protected decimator fraction must be between 0 and 0.5")
+            taps, beta = kaiserord(85, 2 * (1 - 2 * protected_fraction) / factor)
+            self.taps = firwin(taps | 1, 1 / factor, window=("kaiser", beta))
         self.history = np.zeros(len(self.taps) - 1, np.complex64)
         self.input_count = 0
 
@@ -39,10 +48,13 @@ class ModemToIQ:
     sqrt(2) preserves the real-modem power in complex IQ. This causal adapter
     adds 522/48000 seconds of FIR delay without changing the wire geometry.
     AC16 A/V instead uses a 10 kHz center for its complete 20 kHz composite.
+    HackRF's narrowband interpolator protects +/-10 kHz with an 80 dB image
+    rejection target and reduces interpolation delay from ten to five samples
+    at 48 kHz (517/48000 seconds including the sideband filter).
     """
 
     def __init__(self, sample_rate=2400000, offset_hz=100000, center_hz=8000,
-                 *, peak_limit=None):
+                 *, peak_limit=None, narrowband=False):
         if (
             sample_rate % 48000
             or sample_rate <= 48000
@@ -57,13 +69,25 @@ class ModemToIQ:
         self.sample_rate, self.offset_hz = sample_rate, offset_hz
         self.center_hz = center_hz
         self.factor = sample_rate // 48000
+        if narrowband and center_hz > 10000:
+            raise ValueError("Narrowband interpolation supports at most +/-10 kHz")
         self.sideband_taps = firwin(1025, center_hz, fs=48000)
         self.sideband_state = np.zeros(1024, np.complex128)
         self.interpolation_taps = (
-            firwin(20 * self.factor + 1, 1 / self.factor, window=("kaiser", 5.0))
+            firwin((10 if narrowband else 20) * self.factor + 1, 1 / self.factor,
+                   window=("kaiser", 8.6 if narrowband else 5.0))
             * self.factor
         )
         self.history = np.zeros(20, np.complex128)
+        # Integer LO offsets repeat exactly. Avoid millions of transcendental
+        # evaluations and temporary float64 arrays per second at HackRF rates.
+        self.radio_cycle = None
+        if float(offset_hz).is_integer():
+            period = sample_rate // math.gcd(sample_rate, int(offset_hz))
+            if period <= 65536:
+                self.radio_cycle = np.exp(
+                    2j * np.pi * np.remainder(np.arange(period) * (offset_hz / sample_rate), 1)
+                )
         self.input_count = 0
 
     def feed(self, audio):
@@ -88,12 +112,18 @@ class ModemToIQ:
         begin = len(self.history) * self.factor
         result = interpolated[begin : begin + len(audio) * self.factor]
         self.history = joined[-20:].copy()
-        radio_positions = self.input_count * self.factor + np.arange(len(result))
-        result *= np.exp(
-            2j
-            * np.pi
-            * np.remainder(radio_positions * (self.offset_hz / self.sample_rate), 1)
-        )
+        if self.radio_cycle is not None:
+            phase = (self.input_count * self.factor) % len(self.radio_cycle)
+            cycle = np.roll(self.radio_cycle, -phase)
+            complete = len(result) // len(cycle) * len(cycle)
+            result[:complete].reshape(-1, len(cycle))[:] *= cycle
+            result[complete:] *= cycle[:len(result) - complete]
+        else:
+            radio_positions = self.input_count * self.factor + np.arange(len(result))
+            result *= np.exp(
+                2j * np.pi
+                * np.remainder(radio_positions * (self.offset_hz / self.sample_rate), 1)
+            )
         self.input_count += len(audio)
         if self.peak_limit is not None:
             # GUI transports submit complete GOP-sized blocks, then split the
