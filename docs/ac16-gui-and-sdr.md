@@ -2,7 +2,7 @@
 
 AC16 is available in the production GUI's mode selector and Model Manager.
 Its selected v4 checkpoint and portable ONNX graphs are published in
-[AETV/AETV](https://huggingface.co/AETV/AETV/blob/6f3a4cd4df1e8b261141da75988f3df2750666db/AC16.md).
+[AETV/AETV](https://huggingface.co/AETV/AETV/blob/32fff6e6691ae5b52e35b371550407fba5ec45e9/AC16.md).
 The application pins that immutable revision and checks each download's size
 and SHA-256 before installation. Existing V8 and V7 defaults remain available.
 
@@ -135,7 +135,7 @@ AETV-Benchmark --mode AC16 --device cpu --av-smoke \
 ## Runtime and validation
 
 The native selected checkpoint is `ac16-best-inference.pt`, SHA-256
-`ff451787feb2708310eebac4a47151cb0fef654c071af463022d8be2f1c618cb`.
+`87e9cb376928cfa03f3df5f8a6652968fdba7fc7941af2b36ca65ed744431312`.
 ONNX export preserves its fixed input shapes and receiver confidence inputs.
 Four held-out GOPs under clean, noisy, motion-outage and full-outage conditions
 matched FP32 native inference within one 8-bit RGB level (mean error below

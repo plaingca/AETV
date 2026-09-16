@@ -27,13 +27,13 @@ MODE_DEFAULT_CHECKPOINTS = {
 }
 DEFAULT_MODE = "V8"
 HF_MODEL_REPO = "AETV/AETV"
-HF_MODE_REVISIONS = {"AC16": "6f3a4cd4df1e8b261141da75988f3df2750666db"}
+HF_MODE_REVISIONS = {"AC16": "32fff6e6691ae5b52e35b371550407fba5ec45e9"}
 HF_MODEL_REVISION = "7ed90b4a902937248c4408d9e02c29b876b07a75"
 RELEASE_CHECKPOINTS = {
     "AC16": {
         "filename": "ac16-best-inference.pt",
-        "bytes": 77314707,
-        "sha256": "ff451787feb2708310eebac4a47151cb0fef654c071af463022d8be2f1c618cb",
+        "bytes": 77324791,
+        "sha256": "87e9cb376928cfa03f3df5f8a6652968fdba7fc7941af2b36ca65ed744431312",
     },
     "V7": {
         "filename": "v8-flex8k-ota-rxfix.pt",
@@ -49,16 +49,16 @@ RELEASE_CHECKPOINTS = {
 RELEASE_RUNTIME_FILES = {
     "AC16": {
         "ac16-v4.runtime.json": {
-            "bytes": 371,
-            "sha256": "a44cb440a6343c71010f6af4c7f58b62a19f05080d4a7c92714b9a7cc98a0fce",
+            "bytes": 370,
+            "sha256": "849badd73407f9e15611314ab226a61217d7c3ac84efe671c7403d66f7a56f67",
         },
         "ac16-v4.encoder.onnx": {
             "bytes": 21519698,
-            "sha256": "20743bb73d80ecf68ad0eeec31211f8d44493d2a1fe5fe2b6189a62e83432064",
+            "sha256": "ad661ac3f05511e0c560e3909a32a50988d52e678cad8f505c9a19fa1db54ab1",
         },
         "ac16-v4.decoder.onnx": {
             "bytes": 60018433,
-            "sha256": "91ea48e2508f8318caa7a620151e820fe50c562d8e430b741d0d4012687adbea",
+            "sha256": "e4959575c4fe0217de771e3b3ed6f11c59f3379b7eef195c5e9c115ce9bbb600",
         },
     },
     "V7": {
