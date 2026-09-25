@@ -8,9 +8,9 @@ and a lightweight SNR-gated denoiser cleans the latent before the frame decoder.
 This port keeps those three pieces and the paper's loss (frame MSE plus 0.7
 times latent denoising MSE). It does not use the paper's 256-subcarrier modem.
 The wire is the existing real coordinate budget, unit-RMS, with the project's
-AWGN. 108 is not divisible by 16, so the strided towers use two stride-2 stages
-instead of the paper's four. Channel width is 32 rather than 256 so the model
-fits the 2,816-coordinate bottleneck on this GPU.
+AWGN. Each frame is coded by the V8 deep residual/attention stack. The conv
+grid is 1x14x24; extra channels cover the packet, and the transmitted prefix
+is cropped to the exact coordinate count the way the V8 encoder hits its budget.
 
 Budgets, from the 6:2:2:2 split with any remainder given to the key frame:
 
@@ -21,21 +21,26 @@ Budgets, from the 6:2:2:2 split with any remainder given to the key frame:
 
 from __future__ import annotations
 
+import math
+from pathlib import Path
+
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .narrowband_jscc import resolve_bandwidth, unit_rms
+from .video_backbone import CausalConv3d, VideoDecoder, VideoEncoder
 
 HEIGHT = 108
 WIDTH = 192
 GOP_FRAMES = 4
 NOMINAL_SNR_DB = 15.0
 CLEAN_SNR_DB = 40.0
-FEAT_H = 27
-FEAT_W = 48
-REDUCED = 8
-FLAT = FEAT_H * FEAT_W * REDUCED
+# Non-compact V8 encoder, preserve_time, three stride-2 stages on 108x192.
+GRID_H = 14
+GRID_W = 24
+GRID = GRID_H * GRID_W
 
 
 def packet_split(budget: int) -> tuple[int, int]:
@@ -152,48 +157,201 @@ class LatentDenoiser(nn.Module):
         return code + self.exit(hidden).squeeze(1)
 
 
-class FrameCodec(nn.Module):
+def grid_channels(length: int) -> int:
+    """Channels of a 14x24 V8 grid whose prefix can hold ``length`` coordinates."""
+    if length < 1:
+        raise ValueError(f"packet length {length} is empty")
+    return max(1, math.ceil(length / GRID))
+
+
+class ResidualConv2d(nn.Module):
+    """Zero-init residual block, so it starts as the identity."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 3, padding=1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return value + self.net(value)
+
+
+class LogitVideoDecoder(VideoDecoder):
+    """V8 decoder that returns logits. Flows must not pass through a sigmoid."""
+
+    def __init__(self, c_out: int, **kwargs):
+        super().__init__(**kwargs)
+        latent_channels = kwargs["latent_channels"]
+        width = kwargs["width"]
+        causal = kwargs.get("causal", True)
+        self.temporal_skip = nn.Conv3d(latent_channels, c_out, 1)
+        self.output = CausalConv3d(width // 4, c_out, 3, causal=causal)
+
+    def forward(self, z, weights, output_shape: tuple[int, int, int]):
+        frames, height, width = output_shape
+        if self.smooth_temporal_skip:
+            temporal_skip = F.interpolate(
+                self.temporal_skip(z * weights), size=output_shape,
+                mode="trilinear", align_corners=False,
+            )
+        else:
+            temporal_skip = F.interpolate(
+                self.temporal_skip(z * weights), size=output_shape, mode="nearest"
+            )
+        x = self.attn(self.r0b(self.r0(self.input(torch.cat([z * weights, weights], dim=1)))))
+        if self.deeper:
+            x = self.m0b(self.m0a(x))
+        if self.deepest:
+            x = self.m0c(x)
+        if self.deep4:
+            x = self.m0d(x)
+        if self.compact:
+            x = self.r0c(self.up0(x))
+        x = self.r1b(self.r1(self.up1(x)))
+        if self.deeper:
+            x = self.m1b(self.m1a(x))
+        if self.deepest:
+            x = self.attn1(self.m1c(x))
+        x = F.interpolate(x, size=(frames, height // 4, width // 4), mode="nearest")
+        x = self.r2b(self.r2(self.up2(x)))
+        if self.deep_tail:
+            x = self.r2c(x)
+        if self.deeper:
+            x = self.r2d(x)
+        if self.deepest:
+            x = self.r2e(x)
+        if self.deep4:
+            x = self.attn2(x)
+        x = F.silu(self.up3(x))
+        if self.deep_tail:
+            x = self.r3b(self.r3(x))
+        if self.deeper:
+            x = self.r3d(self.r3c(x))
+        if self.deepest:
+            x = self.r3f(self.r3e(x))
+        if self.deep4:
+            x = self.r3h(self.r3g(x))
+        return self.output(x) + temporal_skip
+
+
+class DeepFrameCodec(nn.Module):
+    """One frame through the V8 conv stack, cropped to an exact packet length.
+
+    RGB is passed in [0, 1] so the encoder's ``x * 2 - 1`` maps it to [-1, 1].
+    Extra channels are context features; they are stored as ``(ctx + 1) / 2``
+    so the same map restores them instead of squashing the feature scale.
+    """
+
     def __init__(self, c_in: int, c_out: int, latent: int, width: int):
         super().__init__()
+        if width % 64:
+            raise ValueError(f"width {width} must be a multiple of 64 so attention heads fit")
+        self.c_in = c_in
+        self.c_out = c_out
         self.latent = latent
-        self.enc = nn.Sequential(
-            nn.Conv2d(c_in, width, 5, stride=2, padding=2),
-            nn.ReLU(),
-            nn.Conv2d(width, width, 5, stride=2, padding=2),
-            nn.ReLU(),
+        self.width = width
+        self.latent_channels = grid_channels(latent)
+        self.encoder = VideoEncoder(
+            width=width,
+            latent_channels=self.latent_channels,
+            compact=False,
+            preserve_time=True,
+            causal=False,
+            group_norm=True,
+            deep=True,
+            deep2=True,
+            deep3=True,
         )
-        self.af = AFModule(width)
-        self.reduce = nn.Conv2d(width, REDUCED, 1)
-        self.to_wire = nn.Linear(FLAT, latent)
-        self.from_wire = nn.Linear(latent, FLAT)
-        self.expand = nn.Conv2d(REDUCED, width, 1)
-        self.dec = nn.Sequential(
-            nn.ReLU(),
-            nn.ConvTranspose2d(width, width, 4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(width, c_out, 4, stride=2, padding=1),
+        if c_in != 3:
+            self.encoder.net[0] = CausalConv3d(
+                c_in, width // 2, (3, 5, 5), stride=(1, 2, 2), causal=False,
+            )
+        self.enc_af = AFModule(self.latent_channels)
+        self.decoder = LogitVideoDecoder(
+            c_out,
+            width=width,
+            latent_channels=self.latent_channels,
+            compact=False,
+            resize_conv_upsampling=True,
+            causal=False,
+            group_norm=True,
+            smooth_temporal_skip=True,
+            bilinear_upsampling=True,
+            deep_tail=True,
+            deeper=True,
+            deepest=True,
+            deep4=True,
         )
-        nn.init.normal_(self.dec[-1].weight, std=0.01)
-        nn.init.zeros_(self.dec[-1].bias)
+        self.dec_af = AFModule(self.latent_channels)
+
+    def _as_video(self, frame: torch.Tensor) -> torch.Tensor:
+        video = frame.unsqueeze(2)
+        if self.c_in == 3:
+            return video
+        rgb, ctx = video[:, :3], video[:, 3:]
+        return torch.cat([rgb, (ctx + 1.0) * 0.5], dim=1)
+
+    def _encode_grid(self, video: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
+        z = self.enc_af(self.encoder(video), snr_db)
+        if z.shape[-3:] != (1, GRID_H, GRID_W):
+            raise RuntimeError(f"encoder grid {tuple(z.shape[-3:])} != {(1, GRID_H, GRID_W)}")
+        return z
 
     def encode(self, frame: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
-        feat = self.reduce(self.af(self.enc(frame), snr_db))
-        if feat.shape[-2:] != (FEAT_H, FEAT_W):
-            raise RuntimeError(f"encoder spatial shape {tuple(feat.shape[-2:])} != {(FEAT_H, FEAT_W)}")
-        return self.to_wire(feat.flatten(1))
+        video = self._as_video(frame)
+        if self.training and not video.requires_grad:
+            video = video.requires_grad_(True)
+        if self.training:
+            z = checkpoint(self._encode_grid, video, snr_db, use_reentrant=False)
+        else:
+            z = self._encode_grid(video, snr_db)
+        flat = z.flatten(1)
+        if flat.shape[1] < self.latent:
+            raise RuntimeError(f"grid {flat.shape[1]} is smaller than packet {self.latent}")
+        return flat[:, : self.latent]
+
+    def _unpack(self, code: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch = code.shape[0]
+        total = self.latent_channels * GRID
+        flat = code.new_zeros(batch, total)
+        weight = code.new_zeros(batch, total)
+        count = min(code.shape[1], total)
+        flat[:, :count] = code[:, :count]
+        weight[:, :count] = 1
+        shape = (batch, self.latent_channels, 1, GRID_H, GRID_W)
+        return flat.view(shape), weight.view(shape)
+
+    def _decode_grid(
+        self, z: torch.Tensor, weight: torch.Tensor, snr_db: torch.Tensor
+    ) -> torch.Tensor:
+        gated = self.dec_af(z, snr_db)
+        return self.decoder(gated, weight, (1, HEIGHT, WIDTH))
 
     def decode(self, code: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
-        feat = self.from_wire(code).view(code.shape[0], REDUCED, FEAT_H, FEAT_W)
-        hidden = self.expand(feat)
-        hidden = self.af(hidden, snr_db)
-        return self.dec(hidden)
+        z, weight = self._unpack(code)
+        if self.training and not z.requires_grad:
+            z = z.requires_grad_(True)
+        if self.training:
+            logits = checkpoint(self._decode_grid, z, weight, snr_db, use_reentrant=False)
+        else:
+            logits = self._decode_grid(z, weight, snr_db)
+        if logits.shape[-3:] != (1, HEIGHT, WIDTH):
+            raise RuntimeError(f"decoder spatial shape {tuple(logits.shape)} is not a frame")
+        return logits.squeeze(2)
 
 
 class RVDJSCCNarrowband(nn.Module):
-    architecture = "rvdjscc-narrowband-v1"
+    architecture = "rvdjscc-narrowband-v2"
 
-    def __init__(self, bandwidth_khz: float = 2.2, width: int = 32, context_channels: int = 32):
+    def __init__(self, bandwidth_khz: float = 2.2, width: int = 128, context_channels: int = 64):
         super().__init__()
+        if width % 64:
+            raise ValueError(f"width {width} must be a multiple of 64 so attention heads fit")
         khz, budget, mode = resolve_bandwidth(bandwidth_khz)
         key_len, interp_len = packet_split(budget)
         self.bandwidth_khz = khz
@@ -206,39 +364,43 @@ class RVDJSCCNarrowband(nn.Module):
         self.nominal_snr_db = NOMINAL_SNR_DB
         self.clean_snr_db = CLEAN_SNR_DB
 
-        self.key_codec = FrameCodec(3, 3, key_len, width)
-        self.interp_codec = FrameCodec(3 + 2 * context_channels, 9, interp_len, width)
-        self.denoiser = LatentDenoiser(width=64)
+        self.key_codec = DeepFrameCodec(3, 3, key_len, width)
+        self.interp_codec = DeepFrameCodec(3 + 2 * context_channels, 9, interp_len, width)
+        self.denoiser = LatentDenoiser(width=min(width, 128))
         self.ssf = ScaleSpaceFlow(width)
         self.feature_extract = nn.Sequential(
             nn.Conv2d(3, context_channels, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(context_channels, context_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualConv2d(context_channels),
+            ResidualConv2d(context_channels),
         )
         self.gaussians = nn.ModuleList(
             [GaussianSmoothing(context_channels, kernel_size=7, sigma=(2**level) * 0.5) for level in range(3)]
         )
         self.flow_refine = nn.Sequential(
             nn.Conv2d(6, width, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Conv2d(width, 3, 3, padding=1),
         )
         nn.init.zeros_(self.flow_refine[-1].weight)
         nn.init.zeros_(self.flow_refine[-1].bias)
         self.context_refine = nn.Sequential(
             nn.Conv2d(context_channels, context_channels, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(context_channels, context_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            ResidualConv2d(context_channels),
         )
         self.contextual = nn.Sequential(
             nn.Conv2d(3 + 2 * context_channels, width, 3, padding=1),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
+            ResidualConv2d(width),
+            ResidualConv2d(width),
             nn.Conv2d(width, 3, 3, padding=1),
         )
-        nn.init.normal_(self.contextual[-1].weight, std=0.01)
+        nn.init.zeros_(self.contextual[-1].weight)
         nn.init.zeros_(self.contextual[-1].bias)
         self.prev_key: torch.Tensor | None = None
         self.config = {
+            "architecture": self.architecture,
             "bandwidth_khz": khz,
             "budget": budget,
             "modem_mode": mode,
@@ -246,6 +408,9 @@ class RVDJSCCNarrowband(nn.Module):
             "interp_len": interp_len,
             "width": width,
             "context_channels": context_channels,
+            "key_channels": self.key_codec.latent_channels,
+            "interp_channels": self.interp_codec.latent_channels,
+            "grid": [1, GRID_H, GRID_W],
         }
 
     def reset(self) -> None:
@@ -289,8 +454,9 @@ class RVDJSCCNarrowband(nn.Module):
         detail, flow_a, flow_b = raw.split(3, dim=1)
         ctx_a = self.context_from(flow_a, ref_a)
         ctx_b = self.context_from(flow_b, ref_b)
-        logits = self.contextual(torch.cat([detail, ctx_a, ctx_b], dim=1))
-        return torch.sigmoid(logits)
+        # Zero-init head: the deep decoder's detail is the image until context learns a residual.
+        delta = self.contextual(torch.cat([detail, ctx_a, ctx_b], dim=1))
+        return torch.sigmoid(detail + delta)
 
     def _encode_interp(
         self,
@@ -379,13 +545,68 @@ class RVDJSCCNarrowband(nn.Module):
         return torch.stack(losses).mean()
 
 
+def _shard_state(state: dict[str, torch.Tensor], limit_bytes: int) -> list[dict[str, torch.Tensor]]:
+    shards: list[dict[str, torch.Tensor]] = []
+    current: dict[str, torch.Tensor] = {}
+    size = 0
+    for key, value in state.items():
+        nbytes = int(value.numel() * value.element_size())
+        if current and size + nbytes > limit_bytes:
+            shards.append(current)
+            current = {}
+            size = 0
+        current[key] = value
+        size += nbytes
+    if current:
+        shards.append(current)
+    return shards
+
+
+def save_fp16_shards(payload: dict, directory: str | Path, limit_bytes: int = 90_000_000) -> Path:
+    """Write a float16 checkpoint as shards small enough for the git host."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    state = {
+        key: value.detach().cpu().half() if torch.is_floating_point(value) else value.detach().cpu()
+        for key, value in payload["model_state_dict"].items()
+    }
+    shards = _shard_state(state, limit_bytes)
+    names = []
+    for index, shard in enumerate(shards):
+        name = f"weights-{index:03d}.pt"
+        torch.save(shard, directory / name)
+        names.append(name)
+    meta = {key: value for key, value in payload.items() if key != "model_state_dict"}
+    meta["weight_shards"] = names
+    meta["dtype"] = "float16"
+    torch.save(meta, directory / "meta.pt")
+    return directory
+
+
+def read_checkpoint(path: str | Path) -> dict:
+    path = Path(path)
+    if path.is_dir():
+        payload = torch.load(path / "meta.pt", map_location="cpu", weights_only=False)
+        state: dict[str, torch.Tensor] = {}
+        for name in payload["weight_shards"]:
+            state.update(torch.load(path / name, map_location="cpu", weights_only=False))
+        payload["model_state_dict"] = state
+        return payload
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def load_rvdjscc(path: str, device: torch.device | str = "cpu") -> tuple[RVDJSCCNarrowband, dict]:
-    payload = torch.load(path, map_location=device, weights_only=False)
+    payload = read_checkpoint(path)
     config = payload.get("model_config") or payload.get("config") or {}
+    arch = payload.get("architecture") or config.get("architecture")
+    if arch != RVDJSCCNarrowband.architecture:
+        raise ValueError(
+            f"checkpoint architecture {arch!r} does not match {RVDJSCCNarrowband.architecture}"
+        )
     model = RVDJSCCNarrowband(
         bandwidth_khz=payload.get("bandwidth_khz", config.get("bandwidth_khz", 2.2)),
-        width=config.get("width", 32),
-        context_channels=config.get("context_channels", 32),
+        width=int(config.get("width", 128)),
+        context_channels=int(config.get("context_channels", 64)),
     )
     state = {
         key: value.float() if torch.is_floating_point(value) else value

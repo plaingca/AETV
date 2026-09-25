@@ -24,13 +24,13 @@ from scripts.eval_ac2k_psnr import score_model, val_tensor
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", default="models/rvdjscc-narrowband-2.2khz-best.pt")
+    parser.add_argument("--checkpoint", default="models/rvdjscc-narrowband-v2-2.2khz-best.pt")
     parser.add_argument("--baseline", default="models/ac2k-psnr-2.2khz-best.pt")
     parser.add_argument("--cache", default="data/openvid_aetv_cache/mode_ac6_192x108_12f")
     parser.add_argument("--val-clips", type=int, default=64)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--out", default="runs/rvdjscc-narrowband/eval64.json")
+    parser.add_argument("--out", default="runs/rvdjscc-narrowband-v2/eval64.json")
     args = parser.parse_args()
 
     device = torch.device(args.device)

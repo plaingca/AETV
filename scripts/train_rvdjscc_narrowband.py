@@ -16,7 +16,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aetv.narrowband_jscc import global_ssim, impair_wire, psnr, resolve_bandwidth, unit_rms
-from aetv.rvdjscc_narrowband import RVDJSCCNarrowband
+from aetv.rvdjscc_narrowband import RVDJSCCNarrowband, save_fp16_shards
 
 
 def load_clips(cache: Path, val_clips: int, seed: int) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
@@ -91,7 +91,7 @@ def reconstruct_pair(model: RVDJSCCNarrowband, gop0: torch.Tensor, gop1: torch.T
 def evaluate(model: RVDJSCCNarrowband, val: torch.Tensor, device: torch.device, clips: int) -> dict[str, float]:
     was_training = model.training
     model.eval()
-    clean, noisy, ssim = [], [], []
+    clean, noisy, ssim, key_scores, interp_scores = [], [], [], [], []
     for index in range(min(clips, val.shape[0])):
         clip = val[index].float().div(255.0).unsqueeze(0).to(device)
         model.reset()
@@ -104,6 +104,8 @@ def evaluate(model: RVDJSCCNarrowband, val: torch.Tensor, device: torch.device, 
         for gop, wire in zip(gops, wires):
             recon, _ = model.decode_gop(wire, retain_state=True)
             clean.append(psnr(gop, recon))
+            key_scores.append(psnr(gop[:, :, 3:], recon[:, :, 3:]))
+            interp_scores.append(psnr(gop[:, :, :3], recon[:, :, :3]))
             ssim.append(global_ssim(gop[0].permute(1, 0, 2, 3), recon[0].permute(1, 0, 2, 3)))
         model.reset()
         for gop, wire in zip(gops, wires):
@@ -116,26 +118,27 @@ def evaluate(model: RVDJSCCNarrowband, val: torch.Tensor, device: torch.device, 
         "clean_psnr": float(sum(clean) / len(clean)),
         "noisy_15db_psnr": float(sum(noisy) / len(noisy)),
         "clean_ssim": float(sum(ssim) / len(ssim)),
+        "key_psnr": float(sum(key_scores) / len(key_scores)),
+        "interp_psnr": float(sum(interp_scores) / len(interp_scores)),
     }
 
 
 def save_checkpoint(model: RVDJSCCNarrowband, path: Path, metrics: dict, step: int, val_names: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "architecture": model.architecture,
-            "bandwidth_khz": model.bandwidth_khz,
-            "budget": model.budget,
-            "modem_mode": model.modem_mode,
-            "model_config": model.config,
-            "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
-            "metrics": metrics,
-            "step": step,
-            "val_clips": val_names,
-            "paper": "arXiv:2601.01729",
-        },
-        path,
-    )
+    payload = {
+        "architecture": model.architecture,
+        "bandwidth_khz": model.bandwidth_khz,
+        "budget": model.budget,
+        "modem_mode": model.modem_mode,
+        "model_config": model.config,
+        "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "metrics": metrics,
+        "step": step,
+        "val_clips": val_names,
+        "paper": "arXiv:2601.01729",
+    }
+    torch.save(payload, path)
+    save_fp16_shards(payload, path.with_suffix(""))
 
 
 def main() -> None:
@@ -143,33 +146,38 @@ def main() -> None:
     parser.add_argument("--bandwidth", type=float, default=2.2, choices=[2.2, 8.0, 16.0])
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--key-steps", type=int, default=1500)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--key-steps", type=int, default=800)
     parser.add_argument("--lambda-latent", type=float, default=0.7)
-    parser.add_argument("--width", type=int, default=32)
+    parser.add_argument("--width", type=int, default=128)
+    parser.add_argument("--context-channels", type=int, default=64)
     parser.add_argument("--cache", default="data/openvid_aetv_cache/mode_ac6_192x108_12f")
     parser.add_argument("--val-clips", type=int, default=64)
-    parser.add_argument("--eval-clips", type=int, default=16)
-    parser.add_argument("--eval-interval", type=int, default=400)
+    parser.add_argument("--eval-clips", type=int, default=8)
+    parser.add_argument("--eval-interval", type=int, default=200)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--out", default="runs/rvdjscc-narrowband")
-    parser.add_argument("--checkpoint", default="models/rvdjscc-narrowband-2.2khz-best.pt")
+    parser.add_argument("--out", default="runs/rvdjscc-narrowband-v2")
+    parser.add_argument("--checkpoint", default="models/rvdjscc-narrowband-v2-2.2khz-best.pt")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     device = torch.device(args.device)
     khz, budget, mode = resolve_bandwidth(args.bandwidth)
     train_clips, val_clips, val_names = load_clips(Path(args.cache), args.val_clips, args.seed)
-    model = RVDJSCCNarrowband(args.bandwidth, width=args.width).to(device)
+    model = RVDJSCCNarrowband(
+        args.bandwidth, width=args.width, context_channels=args.context_channels
+    ).to(device)
     params = sum(item.numel() for item in model.parameters())
     print(
-        f"bandwidth {khz} kHz | budget {budget} | key {model.key_len} | interp {model.interp_len} | "
-        f"modem {mode} | params {params/1e6:.2f}M",
+        f"bandwidth {khz} kHz | budget {budget} | key {model.key_len} x{model.key_codec.latent_channels} | "
+        f"interp {model.interp_len} x{model.interp_codec.latent_channels} | "
+        f"modem {mode} | {model.architecture} | params {params/1e6:.2f}M",
         flush=True,
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.05)
     best = -1e9
+    joint_scoring = False
     log_path = Path(args.out)
     log_path.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -209,9 +217,16 @@ def main() -> None:
             )
         if step % args.eval_interval == 0 or step == args.steps:
             metrics = evaluate(model, val_clips, device, args.eval_clips)
-            score = 0.5 * metrics["clean_psnr"] + 0.5 * metrics["noisy_15db_psnr"]
+            if step <= args.key_steps:
+                score = metrics["key_psnr"]
+            else:
+                if not joint_scoring:
+                    best = -1e9
+                    joint_scoring = True
+                score = 0.5 * metrics["clean_psnr"] + 0.5 * metrics["noisy_15db_psnr"]
             print(
                 f"eval {step}: clean {metrics['clean_psnr']:.2f} dB | "
+                f"key {metrics['key_psnr']:.2f} | interp {metrics['interp_psnr']:.2f} | "
                 f"15 dB {metrics['noisy_15db_psnr']:.2f} dB | SSIM {metrics['clean_ssim']:.4f}",
                 flush=True,
             )
