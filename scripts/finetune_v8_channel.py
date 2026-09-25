@@ -69,6 +69,7 @@ from train import (  # noqa: E402
 
 RELEASE = "models/v8-hf3k-face-gan.pt"
 REAL_PROFILES = ("mpp12", "mpp12", "mpp12", "mpp6", "awgn12", "clean")
+REAL_PROFILES_CHANNEL_ONLY = ("mpp12",)
 
 
 def region_terms(recon, video, mask, boost):
@@ -79,8 +80,8 @@ def region_terms(recon, video, mask, boost):
     )
 
 
-def real_channel(wire: np.ndarray, seed: int, rng: random.Random) -> tuple[np.ndarray, np.ndarray]:
-    profile = rng.choice(REAL_PROFILES)
+def real_channel(wire: np.ndarray, seed: int, rng: random.Random, profiles=REAL_PROFILES) -> tuple[np.ndarray, np.ndarray]:
+    profile = rng.choice(profiles)
     received, confidence, _ = modem_exchange(wire, "V8", seed, profile)
     return received, confidence
 
@@ -123,6 +124,14 @@ def main() -> None:
     ap.add_argument("--train-seed0", type=int, default=1_000_000)
     ap.add_argument("--kill-mpp12", type=float, default=0.15, help="paired mpp12 gain required at --kill-step")
     ap.add_argument("--kill-clean", type=float, default=-0.10, help="paired clean change allowed at --kill-step")
+    ap.add_argument(
+        "--channel-only",
+        action="store_true",
+        help=(
+            "every row through the real V8 modem on mpp12; no clean render, clean anchor, consistency "
+            "or clean face term; selection and the kill check use mpp12 PSNR only"
+        ),
+    )
     ap.add_argument("--seed", type=int, default=20260925)
     # Release (face-GAN) generator weights.
     ap.add_argument("--mse-weight", type=float, default=0.25)
@@ -144,6 +153,12 @@ def main() -> None:
     ap.add_argument("--region-boost", type=float, default=12.0)
     ap.add_argument("--face-model", default="data/teachers/face_detection_yunet_2023mar.onnx")
     args = ap.parse_args()
+    if args.channel_only:
+        args.real_rows = args.batch
+        args.kill_clean = None
+        args.clean_anchor_weight = 0.0
+        args.consistency_weight = 0.0
+    profiles = REAL_PROFILES_CHANNEL_ONLY if args.channel_only else REAL_PROFILES
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -214,13 +229,16 @@ def main() -> None:
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             clean_z = model.encoder(video)
-            noisy_z, weights = channel(clean_z.float())
+            if args.real_rows < args.batch:
+                noisy_z, weights = channel(clean_z.float())
+            else:
+                noisy_z, weights = clean_z.float(), torch.ones_like(clean_z, dtype=torch.float32)
             if args.real_rows > 0:
                 wires = clean_z[: args.real_rows].detach().float().cpu().numpy()
                 seeds = list(range(real_seed, real_seed + args.real_rows))
                 real_seed += args.real_rows
                 rngs = [random.Random(sd) for sd in seeds]
-                results = list(pool_exec.map(real_channel, wires, seeds, rngs))
+                results = list(pool_exec.map(real_channel, wires, seeds, rngs, [profiles] * len(seeds)))
                 rx = torch.from_numpy(np.stack([r for r, _ in results])).to(device)
                 cf = torch.from_numpy(np.stack([c for _, c in results])).to(device)
                 real_z = clean_z[: args.real_rows].float() + (rx - clean_z[: args.real_rows].float()).detach()
@@ -228,30 +246,36 @@ def main() -> None:
                 weights = torch.cat([cf, weights[args.real_rows :]], 0)
             shape = (gop, spec.height, spec.width)
             recon = model.decoder(noisy_z.to(clean_z.dtype), weights.to(clean_z.dtype), output_shape=shape)
-            recon_clean = model.decoder(clean_z, torch.ones_like(clean_z), output_shape=shape)
+            recon_clean = None
+            if not args.channel_only:
+                recon_clean = model.decoder(clean_z, torch.ones_like(clean_z), output_shape=shape)
             with torch.no_grad():
                 err = (noisy_z.float() - clean_z.float()).pow(2).mean().clamp_min(1e-8)
                 snr = clean_z.float().pow(2).mean() / err
                 conf = snr / (1 + snr)
 
             loss_region, loss_detail, loss_contrast = region_terms(recon, video, attention_mask, args.region_boost)
-            anchor = (
-                args.mse_weight * F.mse_loss(recon_clean, video)
-                + args.l1_weight * F.l1_loss(recon_clean, video)
-                + args.grad_weight * spatial_gradient_loss(recon_clean, video)
-                + args.temporal_weight * temporal_delta_loss(recon_clean, video)
-                + args.temporal_accel_weight * temporal_acceleration_loss(recon_clean, video)
-            )
-            a_region, a_detail, a_contrast = region_terms(recon_clean, video, attention_mask, args.region_boost)
-            anchor = anchor + args.region_weight * a_region + args.detail_weight * a_detail + args.contrast_weight * a_contrast
+            anchor = torch.zeros((), device=device)
+            if recon_clean is not None:
+                anchor = (
+                    args.mse_weight * F.mse_loss(recon_clean, video)
+                    + args.l1_weight * F.l1_loss(recon_clean, video)
+                    + args.grad_weight * spatial_gradient_loss(recon_clean, video)
+                    + args.temporal_weight * temporal_delta_loss(recon_clean, video)
+                    + args.temporal_accel_weight * temporal_acceleration_loss(recon_clean, video)
+                )
+                a_region, a_detail, a_contrast = region_terms(recon_clean, video, attention_mask, args.region_boost)
+                anchor = anchor + args.region_weight * a_region + args.detail_weight * a_detail + args.contrast_weight * a_contrast
             recon_delta = (0.5 * (recon[:, :, 1:] - recon[:, :, :-1]) + 0.5).clamp(0, 1)
             video_delta = (0.5 * (video[:, :, 1:] - video[:, :, :-1]) + 0.5).clamp(0, 1)
             loss_face = torch.zeros((), device=device)
-            if face_target is not None:
+            if face_target is not None and recon_clean is not None:
                 loss_face = 0.5 * (
                     vgg(sample_face_crops(recon_clean, face_grid, face_indices), face_target)
                     + vgg(sample_face_crops(recon, face_grid, face_indices), face_target)
                 )
+            elif face_target is not None:
+                loss_face = vgg(sample_face_crops(recon, face_grid, face_indices), face_target)
             ramp = 0.5 + 0.5 * conf
             loss = (
                 args.mse_weight * F.mse_loss(recon, video)
@@ -266,7 +290,7 @@ def main() -> None:
                           + args.contrast_weight * loss_contrast)
                 + args.lpips_weight * vgg(recon, video)
                 + args.temporal_lpips_weight * vgg(recon_delta, video_delta)
-                + args.consistency_weight * F.l1_loss(recon, recon_clean.detach())
+                + (args.consistency_weight * F.l1_loss(recon, recon_clean.detach()) if recon_clean is not None else 0.0)
                 + args.clean_anchor_weight * anchor
                 + args.face_perceptual_weight * loss_face
             )
@@ -300,14 +324,16 @@ def main() -> None:
             state = {"mode": "V8", "stage": 2, "step": step, "args": {**adapter_args(args.init), "finetune": vars(args)},
                      "model_state_dict": model.state_dict(), "source_run": str(out), "init_checkpoint": args.init,
                      "select": record}
-            if s["mpp12"]["mean"] > best["mpp12"] and deltas["clean"]["mean"] >= args.kill_clean:
+            clean_ok = args.kill_clean is None or deltas["clean"]["mean"] >= args.kill_clean
+            if s["mpp12"]["mean"] > best["mpp12"] and clean_ok:
                 best = {"step": step, "mpp12": s["mpp12"]["mean"]}
                 torch.save(state, out / "best.pt")
                 print(f"  new best at step {step}", flush=True)
             torch.save(state, out / "latest.pt")
             if step == args.kill_step:
-                ok = (deltas["mpp12"]["mean"] >= args.kill_mpp12 and deltas["clean"]["mean"] >= args.kill_clean
-                      and deltas["lpips_mpp12"]["mean"] <= 0.0)
+                ok = deltas["mpp12"]["mean"] >= args.kill_mpp12
+                if not args.channel_only:
+                    ok = ok and clean_ok and deltas["lpips_mpp12"]["mean"] <= 0.0
                 verdict = {"step": step, "passed": ok, "mpp12": deltas["mpp12"], "clean": deltas["clean"],
                            "lpips_mpp12": deltas["lpips_mpp12"], "face_mpp12": deltas["face_mpp12"]}
                 (out / "kill_check.json").write_text(json.dumps(verdict, indent=1))
