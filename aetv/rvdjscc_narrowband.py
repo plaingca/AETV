@@ -399,6 +399,8 @@ class RVDJSCCNarrowband(nn.Module):
         nn.init.zeros_(self.contextual[-1].weight)
         nn.init.zeros_(self.contextual[-1].bias)
         self.prev_key: torch.Tensor | None = None
+        # Clean pretraining leaves the denoiser at its identity init.
+        self.bypass_denoiser = False
         self.config = {
             "architecture": self.architecture,
             "bandwidth_khz": khz,
@@ -438,6 +440,8 @@ class RVDJSCCNarrowband(nn.Module):
         return self.context_refine(warped)
 
     def _denoise_frame(self, code: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
+        if self.bypass_denoiser:
+            return code
         return self.denoiser(code, snr_db)
 
     def _decode_key(self, code: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:

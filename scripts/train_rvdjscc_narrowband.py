@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -147,7 +148,8 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--key-steps", type=int, default=800)
+    parser.add_argument("--key-steps", type=int, default=1500)
+    parser.add_argument("--clean-joint-steps", type=int, default=1500)
     parser.add_argument("--lambda-latent", type=float, default=0.7)
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--context-channels", type=int, default=64)
@@ -180,17 +182,29 @@ def main() -> None:
     joint_scoring = False
     log_path = Path(args.out)
     log_path.mkdir(parents=True, exist_ok=True)
+    clean_joint_end = args.key_steps + args.clean_joint_steps
     t0 = time.time()
     model.train()
     for step in range(1, args.steps + 1):
+        if step <= args.key_steps:
+            phase = "key"
+        elif step <= clean_joint_end:
+            phase = "clean"
+        else:
+            phase = "noise"
+        # Channel noise before the conv stack can reconstruct a frame drives it into a flat image.
+        model.bypass_denoiser = phase != "noise"
         gop0, gop1 = sample_pair(train_clips, args.batch, device)
-        snr_db = None if random.random() < 0.3 else float(torch.empty(()).uniform_(0.0, 20.0))
+        if phase == "noise":
+            snr_db = None if random.random() < 0.3 else float(torch.empty(()).uniform_(0.0, 20.0))
+        else:
+            snr_db = None
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            if step <= args.key_steps:
+            if phase == "key":
                 loss = 0.5 * (
-                    key_only_loss(model, gop0, snr_db, args.lambda_latent)
-                    + key_only_loss(model, gop1, snr_db, args.lambda_latent)
+                    key_only_loss(model, gop0, None, 0.0)
+                    + key_only_loss(model, gop1, None, 0.0)
                 )
                 frame = loss
                 latent = loss.new_zeros(())
@@ -198,32 +212,30 @@ def main() -> None:
             else:
                 recon, target, latent = reconstruct_pair(model, gop0, gop1, snr_db)
                 frame = F.mse_loss(recon.float(), target)
-                loss = frame + args.lambda_latent * latent.float()
+                latent_weight = args.lambda_latent if phase == "noise" else 0.0
+                loss = frame + latent_weight * latent.float()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
         if step % 50 == 0 or step == 1:
-            if step <= args.key_steps:
-                batch_psnr = float("nan")
-            else:
-                batch_psnr = psnr(target, recon.detach())
-            phase = "key" if step <= args.key_steps else "joint"
+            mse = float(frame.detach())
+            batch_psnr = 100.0 if mse <= 1e-10 else 10.0 * math.log10(1.0 / mse)
             print(
-                f"step {step:05d}/{args.steps} {phase} loss {loss.item():.4f} frame {frame.item():.4f} "
-                f"latent {float(latent):.4f} batch_psnr {batch_psnr:.2f} "
+                f"step {step:05d}/{args.steps} {phase} loss {float(loss.detach()):.4f} "
+                f"frame {mse:.4f} latent {float(latent.detach()):.4f} batch_psnr {batch_psnr:.2f} "
                 f"snr {snr_db if snr_db is not None else 'clean'} elapsed {time.time() - t0:.0f}s",
                 flush=True,
             )
         if step % args.eval_interval == 0 or step == args.steps:
             metrics = evaluate(model, val_clips, device, args.eval_clips)
-            if step <= args.key_steps:
+            if phase == "key":
                 score = metrics["key_psnr"]
             else:
                 if not joint_scoring:
                     best = -1e9
                     joint_scoring = True
-                score = 0.5 * metrics["clean_psnr"] + 0.5 * metrics["noisy_15db_psnr"]
+                score = metrics["clean_psnr"]
             print(
                 f"eval {step}: clean {metrics['clean_psnr']:.2f} dB | "
                 f"key {metrics['key_psnr']:.2f} | interp {metrics['interp_psnr']:.2f} | "
