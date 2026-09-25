@@ -387,6 +387,10 @@ def load_rvdjscc(path: str, device: torch.device | str = "cpu") -> tuple[RVDJSCC
         width=config.get("width", 32),
         context_channels=config.get("context_channels", 32),
     )
-    model.load_state_dict(payload["model_state_dict"])
+    state = {
+        key: value.float() if torch.is_floating_point(value) else value
+        for key, value in payload["model_state_dict"].items()
+    }
+    model.load_state_dict(state)
     model.to(device).eval()
     return model, payload

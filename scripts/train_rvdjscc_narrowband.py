@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aetv.narrowband_jscc import global_ssim, impair_wire, psnr, resolve_bandwidth
+from aetv.narrowband_jscc import global_ssim, impair_wire, psnr, resolve_bandwidth, unit_rms
 from aetv.rvdjscc_narrowband import RVDJSCCNarrowband
 
 
@@ -43,6 +43,24 @@ def sample_pair(clips: torch.Tensor, batch: int, device: torch.device) -> tuple[
         pair = pair.flip(-1)
     pair = pair.to(device)
     return pair[:, :, :4], pair[:, :, 4:]
+
+
+def key_only_loss(
+    model: RVDJSCCNarrowband, gop: torch.Tensor, snr_db: float | None, latent_weight: float
+) -> torch.Tensor:
+    """Paper's first stage: train the key codec before interpolation depends on it."""
+    frame = gop[:, :, 3]
+    nominal = model._snr(frame.shape[0], model.nominal_snr_db, frame.device, frame.dtype)
+    code = unit_rms(model.key_codec.encode(frame, nominal))
+    if snr_db is None:
+        received = code
+        snr = model._snr(frame.shape[0], model.clean_snr_db, frame.device, torch.float32)
+    else:
+        received, confidence = impair_wire(code, snr_db)
+        snr = model._snr_from_confidence(confidence, frame.shape[0], frame.device, frame.dtype)
+    denoised = model._denoise_frame(received, snr)
+    recon = model._decode_key(denoised, snr)
+    return F.mse_loss(recon.float(), frame) + latent_weight * F.mse_loss(denoised.float(), code.float())
 
 
 def reconstruct_pair(model: RVDJSCCNarrowband, gop0: torch.Tensor, gop1: torch.Tensor, snr_db: float | None):
@@ -125,7 +143,8 @@ def main() -> None:
     parser.add_argument("--bandwidth", type=float, default=2.2, choices=[2.2, 8.0, 16.0])
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--key-steps", type=int, default=1500)
     parser.add_argument("--lambda-latent", type=float, default=0.7)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--cache", default="data/openvid_aetv_cache/mode_ac6_192x108_12f")
@@ -160,18 +179,31 @@ def main() -> None:
         snr_db = None if random.random() < 0.3 else float(torch.empty(()).uniform_(0.0, 20.0))
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            recon, target, latent = reconstruct_pair(model, gop0, gop1, snr_db)
-            frame = F.mse_loss(recon.float(), target)
-            loss = frame + args.lambda_latent * latent.float()
+            if step <= args.key_steps:
+                loss = 0.5 * (
+                    key_only_loss(model, gop0, snr_db, args.lambda_latent)
+                    + key_only_loss(model, gop1, snr_db, args.lambda_latent)
+                )
+                frame = loss
+                latent = loss.new_zeros(())
+                recon = target = gop0
+            else:
+                recon, target, latent = reconstruct_pair(model, gop0, gop1, snr_db)
+                frame = F.mse_loss(recon.float(), target)
+                loss = frame + args.lambda_latent * latent.float()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step()
         if step % 50 == 0 or step == 1:
-            batch_psnr = psnr(target, recon.detach())
+            if step <= args.key_steps:
+                batch_psnr = float("nan")
+            else:
+                batch_psnr = psnr(target, recon.detach())
+            phase = "key" if step <= args.key_steps else "joint"
             print(
-                f"step {step:05d}/{args.steps} loss {loss.item():.4f} frame {frame.item():.4f} "
-                f"latent {latent.item():.4f} batch_psnr {batch_psnr:.2f} "
+                f"step {step:05d}/{args.steps} {phase} loss {loss.item():.4f} frame {frame.item():.4f} "
+                f"latent {float(latent):.4f} batch_psnr {batch_psnr:.2f} "
                 f"snr {snr_db if snr_db is not None else 'clean'} elapsed {time.time() - t0:.0f}s",
                 flush=True,
             )
