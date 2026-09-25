@@ -134,6 +134,7 @@ def main() -> None:
     for name in args.models:
         started = time.time()
         adapter = build_adapter(name, device)
+        name = adapter.name
         gains = list(dict.fromkeys(list(args.gains) + extra.get(name, [])))
         labels = [gain_label(g) for g in gains]
         records = []
