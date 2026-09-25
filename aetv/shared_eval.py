@@ -198,6 +198,10 @@ class AC16Adapter(CodecAdapter):
 
 
 def build_adapter(name: str, device) -> CodecAdapter:
+    """Build a named release/research codec, or ``label=path`` for any V8 checkpoint."""
+    if "=" in name:
+        label, path = name.split("=", 1)
+        return AutoencoderAdapter(label, path, "V8", device)
     if name == "v8-face-gan":
         return AutoencoderAdapter(name, "models/v8-hf3k-face-gan.pt", "V8", device)
     if name == "v7-rxfix":
