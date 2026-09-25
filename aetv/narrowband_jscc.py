@@ -127,6 +127,28 @@ def choose_blocks(in_features: int, out_features: int, target: int = 96) -> int:
     return blocks
 
 
+class MixedProjection(nn.Module):
+    """Block-diagonal map plus a low-rank path over the whole feature vector.
+
+    The low-rank branch starts at zero so early steps follow the local map.
+    """
+
+    def __init__(self, in_features: int, out_features: int, rank: int = 384):
+        super().__init__()
+        self.local = BlockLinear(in_features, out_features)
+        hidden = min(rank, in_features, out_features)
+        self.down = nn.Linear(in_features, hidden)
+        self.up = nn.Linear(hidden, out_features)
+        nn.init.xavier_uniform_(self.down.weight, gain=0.5)
+        nn.init.zeros_(self.down.bias)
+        nn.init.xavier_uniform_(self.up.weight, gain=0.1)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        global_term = self.up(F.gelu(self.down(value)))
+        return self.local(value) + global_term
+
+
 class BlockLinear(nn.Module):
     """Block-diagonal linear map.
 
@@ -194,7 +216,7 @@ class ResBlock3d(nn.Module):
             nn.SiLU(),
             nn.Conv3d(channels, channels, 3, padding=1),
         )
-        nn.init.zeros_(self.body[-1].weight)
+        nn.init.normal_(self.body[-1].weight, std=0.02)
         nn.init.zeros_(self.body[-1].bias)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
@@ -266,9 +288,10 @@ class NarrowbandJSCC(nn.Module):
         self.channel_mix = nn.Conv3d(width, width, 1)
         self.spacetime = SpaceTimeMix(TOKENS)
         feature_dim = width * TOKENS
-        self.to_wire = BlockLinear(feature_dim, budget)
-        # Received coordinates and Wiener confidence travel together.
-        self.from_wire = BlockLinear(budget * 2, feature_dim)
+        mix_rank = min(2048, budget)
+        self.to_wire = MixedProjection(feature_dim, budget, rank=mix_rank)
+        # Per-coordinate confidence gates the wire before the inverse map.
+        self.from_wire = MixedProjection(budget, feature_dim, rank=mix_rank)
         self.unmix = SpaceTimeMix(TOKENS)
         self.restore = nn.Conv3d(width, width, 1)
         self.dec_res = ResBlock3d(width)
@@ -287,7 +310,7 @@ class NarrowbandJSCC(nn.Module):
         self.head = nn.Conv3d(16, 3, 3, padding=1)
         nn.init.normal_(self.coarse.weight, std=0.01)
         nn.init.zeros_(self.coarse.bias)
-        nn.init.zeros_(self.head.weight)
+        nn.init.normal_(self.head.weight, std=0.01)
         nn.init.zeros_(self.head.bias)
         self.config = {
             "bandwidth_khz": khz,
@@ -318,7 +341,7 @@ class NarrowbandJSCC(nn.Module):
             raise ValueError(f"wire length {wire.shape[-1]} != budget {self.budget}")
         if confidence is None:
             confidence = torch.ones_like(wire)
-        features = self.from_wire(torch.cat([wire, confidence], dim=-1))
+        features = self.from_wire(wire * confidence)
         value = features.reshape(wire.shape[0], self.width, GOP_FRAMES, 7, 12)
         value = self.dec_res(self.restore(self.unmix(value)))
         coarse = F.interpolate(

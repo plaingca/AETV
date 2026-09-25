@@ -158,7 +158,8 @@ def train(args: argparse.Namespace) -> None:
         missing, unexpected = model.load_state_dict(payload["model_state_dict"], strict=False)
         print(f"warm start {args.init}: missing {len(missing)} unexpected {len(unexpected)}", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.05)
+    eta_min = args.lr * 0.05 if args.eta_min is None else args.eta_min
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=eta_min)
     best = -1e9
     log_path = out / "train_log.jsonl"
     t0 = time.time()
@@ -180,7 +181,7 @@ def train(args: argparse.Namespace) -> None:
         scheduler.step()
         if step % args.log_interval == 0 or step == 1:
             mse = F.mse_loss(recon.detach().float(), gop.float()).item()
-            train_psnr = 10.0 * math_log10(mse)
+            train_psnr = math_log10(mse)
             print(
                 f"step {step:05d}/{args.steps} loss {loss.item():.4f} "
                 f"train_psnr {train_psnr:.2f} lr {scheduler.get_last_lr()[0]:.2e} "
@@ -219,6 +220,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=8000)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--eta-min", type=float, default=None)
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--ssim-weight", type=float, default=0.05)
     parser.add_argument("--channel-prob", type=float, default=0.55)

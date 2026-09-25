@@ -31,7 +31,7 @@ def test_forward_uses_exact_budget_and_reconstructs_shape():
     assert recon.min() >= 0 and recon.max() <= 1
     loss = (recon - video).square().mean()
     loss.backward()
-    assert model.to_wire.blocks[0].weight.grad is not None
+    assert model.to_wire.local.blocks[0].weight.grad is not None
 
 
 def test_wider_budgets_stay_on_their_channels():
