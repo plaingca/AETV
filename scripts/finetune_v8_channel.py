@@ -95,6 +95,15 @@ def pixel_l1(recon, video, weight):
     return (weight * (recon - video).abs()).mean()
 
 
+def box_mask(boxes: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """(B, T, 4) xywh boxes (NaN = no face) -> (B, 1, T, H, W) float mask."""
+    ys = torch.arange(height, device=boxes.device).view(1, 1, height, 1) + 0.5
+    xs = torch.arange(width, device=boxes.device).view(1, 1, 1, width) + 0.5
+    x, y, w, h = (boxes[..., k].unsqueeze(-1).unsqueeze(-1) for k in range(4))
+    inside = (xs >= x) & (xs <= x + w) & (ys >= y) & (ys <= y + h)
+    return inside.float().unsqueeze(1)
+
+
 def real_channel(wire: np.ndarray, seed: int, rng: random.Random, profiles=REAL_PROFILES) -> tuple[np.ndarray, np.ndarray]:
     profile = rng.choice(profiles)
     received, confidence, _ = modem_exchange(wire, "V8", seed, profile)
@@ -102,13 +111,15 @@ def real_channel(wire: np.ndarray, seed: int, rng: random.Random, profiles=REAL_
 
 
 @torch.no_grad()
-def select_score(adapter, clips, names, faces, lpips_metric, device, seed0: int) -> dict:
+def select_score(adapter, clips, names, faces, lpips_metric, device, seed0: int, geometry=None) -> dict:
     adapter.model.eval()
     records = []
     for index in range(clips.shape[0]):
         mask = faces.mask(names[index], clips[index])
+        boxes = faces.boxes(names[index], clips[index]) if geometry is not None else None
         records.append(score_clip(adapter, clips[index], index, device, {"ft": 1.0}, seed0=seed0,
-                                  face_mask=mask, lpips_metric=lpips_metric)["ft"])
+                                  face_mask=mask, face_boxes=boxes, face_geometry=geometry,
+                                  lpips_metric=lpips_metric)["ft"])
     out = {"per_clip": {
         "mpp12": [r.rows["mpp12"] for r in records],
         "clean": [r.rows["clean"] for r in records],
@@ -117,6 +128,7 @@ def select_score(adapter, clips, names, faces, lpips_metric, device, seed0: int)
         "lpips_clean": [r.lpips["clean"] for r in records],
         "lpips_mpp12": [r.lpips["mpp12"] for r in records],
         "face_mpp12": [r.face.get("mpp12") for r in records],
+        "nme_mpp12": [r.nme.get("mpp12") for r in records],
     }}
     out["summary"] = {k: summarize(v) for k, v in out["per_clip"].items()}
     return out
@@ -175,6 +187,19 @@ def main() -> None:
     ap.add_argument("--aligned-windows", action="store_true",
                     help="train only on the two V8-aligned 6-frame GOPs of each clip (implied by --teacher-dir)")
     ap.add_argument("--stop-after-kill", action="store_true", help="stop at --kill-step whatever the verdict")
+    ap.add_argument("--face-goal", action="store_true",
+                    help=("select and kill-check on facial landmark error (2D-FAN NME) on pool face clips, "
+                          "with face PSNR not falling and whole-frame mpp12 within --kill-mpp12-floor"))
+    ap.add_argument("--face-roi-weight", type=float, default=0.0, help="extra pixel MSE inside YuNet face boxes")
+    ap.add_argument("--landmark-weight", type=float, default=0.0,
+                    help="MSE between frozen 2D-FAN heatmaps of channel output and source face crops")
+    ap.add_argument("--face-lowfreq-weight", type=float, default=0.0,
+                    help="MSE of 5x5-blurred channel output vs source inside face boxes")
+    ap.add_argument("--face-oversample", type=float, default=0.5, help="share of rows drawn from face clips")
+    ap.add_argument("--select-face-extra", type=int, default=16,
+                    help="extra pool face clips moved from training into selection (face goal)")
+    ap.add_argument("--landmark-crops", type=int, default=8, help="face crops per step for the landmark loss")
+    ap.add_argument("--kill-mpp12-floor", type=float, default=-0.10)
     args = ap.parse_args()
     if args.teacher_dir:
         args.aligned_windows = True
@@ -195,6 +220,24 @@ def main() -> None:
 
     pool = training_pool()
     select_paths, train_paths = pool[: args.select_clips], pool[args.select_clips :]
+    faces = FaceMasks(args.face_model)
+    box_of = {}
+    if args.face_goal:
+        cache = Path("data/face_boxes_pool.pt")
+        box_of = torch.load(cache) if cache.exists() else {}
+        missing = [p for p in pool if p.name not in box_of]
+        for n, path in enumerate(missing):
+            box_of[path.name] = faces.boxes(path.name, torch.load(path, map_location="cpu", weights_only=False))
+            if (n + 1) % 200 == 0:
+                print(f"face boxes {n + 1}/{len(missing)}", flush=True)
+        if missing:
+            torch.save(box_of, cache)
+        extra = [p for p in train_paths if torch.isfinite(box_of[p.name]).any()][: args.select_face_extra]
+        extra_names = {p.name for p in extra}
+        select_paths = select_paths + extra
+        train_paths = [p for p in train_paths if p.name not in extra_names]
+        n_face = sum(bool(torch.isfinite(box_of[p.name]).any()) for p in select_paths)
+        print(f"selection clips {len(select_paths)}, of which face clips {n_face}", flush=True)
     select_clips = load_clips(select_paths)
     select_names = [p.name for p in select_paths]
     print(f"train clips {len(train_paths)}, selection clips {len(select_paths)} (pool only)", flush=True)
@@ -218,7 +261,15 @@ def main() -> None:
     )).to(device)
     vgg = MultiLayerVGGPerceptualLoss().to(device).eval()
     teacher = RegionAttentionTeacher(args.face_model, device, face_score_threshold=0.72)
-    faces = FaceMasks(args.face_model)
+    geometry = None
+    train_boxes = face_rows = None
+    if args.face_goal:
+        from aetv.face_geometry import FaceGeometry
+
+        geometry = FaceGeometry(device)
+        train_boxes = torch.stack([box_of[p.name] for p in train_paths])
+        face_rows = [i for i, p in enumerate(train_paths) if torch.isfinite(box_of[p.name]).any()]
+        print(f"training face clips {len(face_rows)} of {len(train_paths)}", flush=True)
     import lpips
 
     lpips_metric = lpips.LPIPS(net="alex", verbose=False).to(device).eval()
@@ -231,13 +282,14 @@ def main() -> None:
         t = (step - args.warmup) / max(1, args.steps - args.warmup)
         return args.lr_min + 0.5 * (args.lr - args.lr_min) * (1 + math.cos(math.pi * t))
 
-    baseline = select_score(adapter, select_clips, select_names, faces, lpips_metric, device, args.select_seed0)
+    baseline = select_score(adapter, select_clips, select_names, faces, lpips_metric, device, args.select_seed0,
+                            geometry)
     s = baseline["summary"]
     print(f"step 0 (release): pool mpp12 {s['mpp12']['mean']:.3f} clean {s['clean']['mean']:.3f} "
           f"lpips_mpp12 {s['lpips_mpp12']['mean']:.4f}", flush=True)
     history = [{"step": 0, **{k: v["mean"] for k, v in s.items()}}]
     (out / "select_step0.json").write_text(json.dumps(baseline))
-    best = {"step": 0, "mpp12": s["mpp12"]["mean"]}
+    best = {"step": 0, "mpp12": s["mpp12"]["mean"], "nme_mpp12": s["nme_mpp12"]["mean"]}
 
     rng = random.Random(args.seed)
     pool_exec = ThreadPoolExecutor(max_workers=max(1, args.real_rows))
@@ -248,7 +300,11 @@ def main() -> None:
         model.train()
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step)
-        idx = [rng.randrange(train_clips.shape[0]) for _ in range(args.batch)]
+        if face_rows:
+            idx = [rng.choice(face_rows) if rng.random() < args.face_oversample else rng.randrange(train_clips.shape[0])
+                   for _ in range(args.batch)]
+        else:
+            idx = [rng.randrange(train_clips.shape[0]) for _ in range(args.batch)]
         if args.aligned_windows:
             starts = [rng.choice((0, gop)) for _ in idx]
         else:
@@ -260,10 +316,16 @@ def main() -> None:
             imp = torch.stack([teacher_map[i, s0 : s0 + gop] for i, s0 in zip(idx, starts)]).to(device).float().div(32)
             weight = (1.0 + args.importance_weight * (imp - 1.0)).clamp_min(0.0).unsqueeze(1)
             weight = weight / weight.mean(dim=(2, 3, 4), keepdim=True).clamp_min(1e-6)
+        boxes = None
+        if train_boxes is not None:
+            boxes = torch.stack([train_boxes[i, s0 : s0 + gop] for i, s0 in zip(idx, starts)]).to(device)
         if rng.random() < 0.5:
             video = video.flip(-1)
             if vvc is not None:
                 vvc, weight = vvc.flip(-1), weight.flip(-1)
+            if boxes is not None:
+                boxes = boxes.clone()
+                boxes[..., 0] = spec.width - boxes[..., 0] - boxes[..., 2]
         with torch.no_grad():
             attention_mask, face_clips = teacher(video)
         face_grid, face_indices = (None, torch.empty(0, dtype=torch.long, device=device))
@@ -339,6 +401,18 @@ def main() -> None:
                 + args.clean_anchor_weight * anchor
                 + args.face_perceptual_weight * loss_face
             )
+            if boxes is not None:
+                fmask = box_mask(boxes, spec.height, spec.width)
+                area = fmask.sum().clamp_min(1.0) * 3
+                if args.face_roi_weight > 0:
+                    loss = loss + args.face_roi_weight * ((recon - video).square() * fmask).sum() / area
+                if args.face_lowfreq_weight > 0:
+                    blur_r = F.avg_pool3d(recon, (1, 5, 5), 1, (0, 2, 2), count_include_pad=False)
+                    blur_v = F.avg_pool3d(video, (1, 5, 5), 1, (0, 2, 2), count_include_pad=False)
+                    loss = loss + args.face_lowfreq_weight * ((blur_r - blur_v).square() * fmask).sum() / area
+                if args.landmark_weight > 0:
+                    loss = loss + args.landmark_weight * geometry.heatmap_loss(
+                        recon, video, boxes, max_crops=args.landmark_crops)
         optimizer.zero_grad(set_to_none=True)
         if not torch.isfinite(loss):
             print(f"step {step}: non-finite loss, skipped", flush=True)
@@ -353,7 +427,8 @@ def main() -> None:
             log.flush()
 
         if step % args.eval_interval == 0 or step == args.kill_step:
-            scored = select_score(adapter, select_clips, select_names, faces, lpips_metric, device, args.select_seed0)
+            scored = select_score(adapter, select_clips, select_names, faces, lpips_metric, device, args.select_seed0,
+                                  geometry)
             base = baseline["per_clip"]
             deltas = {k: paired(scored["per_clip"][k], base[k]) for k in base}
             s = scored["summary"]
@@ -370,17 +445,30 @@ def main() -> None:
                      "model_state_dict": model.state_dict(), "source_run": str(out), "init_checkpoint": args.init,
                      "select": record}
             clean_ok = args.kill_clean is None or deltas["clean"]["mean"] >= args.kill_clean
-            if s["mpp12"]["mean"] > best["mpp12"] and clean_ok:
-                best = {"step": step, "mpp12": s["mpp12"]["mean"]}
+            if args.face_goal:
+                print(f"  face: nme_mpp12 {s['nme_mpp12']['mean']:.3f} (Δ {deltas['nme_mpp12']['mean']:+.3f} ± "
+                      f"{deltas['nme_mpp12']['se']:.3f}, n={deltas['nme_mpp12']['n']}) face_mpp12 Δ "
+                      f"{deltas['face_mpp12']['mean']:+.3f} ± {deltas['face_mpp12']['se']:.3f}", flush=True)
+                guards = deltas["face_mpp12"]["mean"] >= 0.0 and deltas["mpp12"]["mean"] >= args.kill_mpp12_floor
+                improved = guards and s["nme_mpp12"]["mean"] < best["nme_mpp12"]
+            else:
+                improved = s["mpp12"]["mean"] > best["mpp12"] and clean_ok
+            if improved:
+                best = {"step": step, "mpp12": s["mpp12"]["mean"], "nme_mpp12": s["nme_mpp12"]["mean"]}
                 torch.save(state, out / "best.pt")
                 print(f"  new best at step {step}", flush=True)
             torch.save(state, out / "latest.pt")
             if step == args.kill_step:
                 ok = deltas["mpp12"]["mean"] >= args.kill_mpp12
-                if not args.channel_only:
+                if args.face_goal:
+                    d = deltas["nme_mpp12"]
+                    ok = (d["mean"] < 0 and -d["mean"] > 2 * d["se"] and deltas["face_mpp12"]["mean"] >= 0.0
+                          and deltas["mpp12"]["mean"] >= args.kill_mpp12_floor)
+                elif not args.channel_only:
                     ok = ok and clean_ok and deltas["lpips_mpp12"]["mean"] <= 0.0
                 verdict = {"step": step, "passed": ok, "mpp12": deltas["mpp12"], "clean": deltas["clean"],
-                           "lpips_mpp12": deltas["lpips_mpp12"], "face_mpp12": deltas["face_mpp12"]}
+                           "lpips_mpp12": deltas["lpips_mpp12"], "face_mpp12": deltas["face_mpp12"],
+                           "nme_mpp12": deltas["nme_mpp12"]}
                 (out / "kill_check.json").write_text(json.dumps(verdict, indent=1))
                 print(f"KILL CHECK {'PASSED' if ok else 'FAILED'} at step {step}", flush=True)
                 if not ok or args.stop_after_kill:

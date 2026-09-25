@@ -246,6 +246,12 @@ class FaceMasks:
         self.cv2, self.upscale = cv2, upscale
         self.detector = cv2.FaceDetectorYN.create(str(model_path), "", (192 * upscale, 108 * upscale), threshold)
         self._cache: dict[str, torch.Tensor] = {}
+        self._boxes: dict[str, torch.Tensor] = {}
+
+    def boxes(self, key: str, clip_uint8: torch.Tensor) -> torch.Tensor:
+        """(T, 4) largest face box per frame as x, y, w, h in 192x108 pixels; NaN where no face."""
+        self.mask(key, clip_uint8)
+        return self._boxes[key]
 
     def mask(self, key: str, clip_uint8: torch.Tensor) -> torch.Tensor:
         """(T, 108, 192) bool mask for a (3, T, 108, 192) uint8 clip."""
@@ -253,6 +259,7 @@ class FaceMasks:
             return self._cache[key]
         _, frames, height, width = clip_uint8.shape
         out = torch.zeros(frames, height, width, dtype=torch.bool)
+        largest = torch.full((frames, 4), float("nan"))
         for t in range(frames):
             rgb = clip_uint8[:, t].permute(1, 2, 0).numpy()
             bgr = self.cv2.resize(rgb[:, :, ::-1], (width * self.upscale, height * self.upscale),
@@ -262,11 +269,14 @@ class FaceMasks:
                 continue
             for face in faces:
                 x, y, w, h = (float(v) / self.upscale for v in face[:4])
+                if math.isnan(float(largest[t, 2])) or w * h > float(largest[t, 2] * largest[t, 3]):
+                    largest[t] = torch.tensor([x, y, w, h])
                 x0, y0 = max(0, int(math.floor(x))), max(0, int(math.floor(y)))
                 x1, y1 = min(width, int(math.ceil(x + w))), min(height, int(math.ceil(y + h)))
                 if x1 > x0 and y1 > y0:
                     out[t, y0:y1, x0:x1] = True
         self._cache[key] = out
+        self._boxes[key] = largest
         return out
 
 
@@ -309,6 +319,7 @@ class ClipRecord:
     face: dict[str, float | None] = field(default_factory=dict)
     lpips: dict[str, float] = field(default_factory=dict)
     ssim: dict[str, float] = field(default_factory=dict)
+    nme: dict[str, float | None] = field(default_factory=dict)
     failures: int = 0
 
 
@@ -321,6 +332,8 @@ def score_clip(
     gains: dict[str, float],
     seed0: int = 2026,
     face_mask: torch.Tensor | None = None,
+    face_boxes: torch.Tensor | None = None,
+    face_geometry=None,
     lpips_metric: Callable | None = None,
     latent_rows: bool = True,
     keep: bool = False,
@@ -340,6 +353,11 @@ def score_clip(
         if (adapter.height, adapter.width) != tuple(mask.shape[-2:]):
             mask = F.interpolate(mask[None].float(), size=(adapter.height, adapter.width), mode="nearest")[0].bool()
         mask = mask.to(device)
+    boxes = None
+    if face_boxes is not None and face_geometry is not None and torch.isfinite(face_boxes).any():
+        boxes = face_boxes[frame_index].clone()
+        boxes[:, 0::2] *= adapter.width / 192.0
+        boxes[:, 1::2] *= adapter.height / 108.0
     received: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
     failures = 0
     if latent_rows:
@@ -376,6 +394,8 @@ def score_clip(
                     ]))
                 if mask is not None:
                     record.face[row] = masked_psnr(source, joined, mask)
+                if boxes is not None:
+                    record.nme[row] = face_geometry.nme(source, joined, boxes)
                 if keep:
                     kept[(label, row)] = joined.cpu().half()
         records[label] = record

@@ -48,7 +48,7 @@ def gain_label(gain: float) -> str:
 
 
 def collect(records: list[dict], label: str) -> dict:
-    out: dict = {"rows": {}, "ssim": {}, "lpips": {}, "face": {}}
+    out: dict = {"rows": {}, "ssim": {}, "lpips": {}, "face": {}, "nme": {}}
     for kind in out:
         keys = sorted({k for r in records for k in getattr(r[label], kind)})
         for key in keys:
@@ -63,7 +63,7 @@ def report(per_clip: dict, labels: list[str]) -> dict:
     for label in labels:
         values = per_clip[label]
         entry = {"failures": values["failures"]}
-        for kind in ("rows", "ssim", "lpips", "face"):
+        for kind in ("rows", "ssim", "lpips", "face", "nme"):
             for key, series in values[kind].items():
                 name = key if kind == "rows" else f"{kind}_{key}"
                 entry[name] = summarize(series)
@@ -91,6 +91,8 @@ def main() -> None:
     parser.add_argument("--no-latent", action="store_true", help="skip clean / AWGN latent rows")
     parser.add_argument("--no-lpips", action="store_true")
     parser.add_argument("--no-face", action="store_true")
+    parser.add_argument("--landmarks", action="store_true",
+                        help="add 2D-FAN landmark error (NME, %% of face crop) on face clips")
     parser.add_argument("--frames-dir", help="save source and reconstructions for --frame-clips")
     parser.add_argument("--frame-clips", nargs="+", type=int, default=[0, 24, 48])
     parser.add_argument("--out", required=True)
@@ -110,6 +112,11 @@ def main() -> None:
 
         lpips_metric = lpips.LPIPS(net="alex", verbose=False).to(device).eval()
     faces = None if args.no_face else FaceMasks()
+    geometry = None
+    if args.landmarks:
+        from aetv.face_geometry import FaceGeometry
+
+        geometry = FaceGeometry(device)
     extra: dict[str, list[float]] = {}
     for item in args.model_gain:
         name, value = item.split("=")
@@ -140,10 +147,11 @@ def main() -> None:
         records = []
         for index in range(clips.shape[0]):
             mask = faces.mask(paths[index].name, clips[index]) if faces is not None else None
+            boxes = faces.boxes(paths[index].name, clips[index]) if faces is not None else None
             keep = frames_dir is not None and index in args.frame_clips
             scored = score_clip(
                 adapter, clips[index], index, device, dict(zip(labels, gains)), seed0=args.seed0,
-                face_mask=mask, lpips_metric=lpips_metric, latent_rows=not args.no_latent, keep=keep,
+                face_mask=mask, face_boxes=boxes, face_geometry=geometry, lpips_metric=lpips_metric, latent_rows=not args.no_latent, keep=keep,
             )
             if keep:
                 scored, kept = scored
