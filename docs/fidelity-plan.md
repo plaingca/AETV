@@ -24,7 +24,8 @@ No attempt before this plan was compared against V8.
 
 - **Steps E0 and E1 are done.** The shared scorer is in [PR #28](https://github.com/plaingca/AETV/pull/28).
 - **Receiver confidence scaling:** the best setting found gives V8 **+0.107 ± 0.016 dB** on `mpp12`, below the 0.2 dB ship bar. It does nothing for V7 or AC16. No receiver setting ships.
-- **Next step is E2**, the V8 channel-matched fine-tune.
+- **E2 (V8 fine-tune with real modem rows) failed its kill check.** At step 500 on the pool, `mpp12` was up **+0.100 ± 0.048 dB**, against a required +0.15. Scored once on eval for the record: **+0.066 ± 0.028 dB** `mpp12`, clean −0.039 ± 0.006, clean LPIPS +0.004 ± 0.001. No PR. See E2 results.
+- **Next:** E3 (ROI fidelity) is now the gating experiment for 2.2 kHz. The E2 checkpoint's face-region `mpp12` gain (+0.20 ± 0.08) is the one signal worth following.
 
 ---
 
@@ -135,7 +136,7 @@ Shared rules for every experiment:
 |---|---|---|---|---|---|---|
 | **E0** | Shared scorer: per-clip JSON, paired SE, face-region PSNR, pool split | — | Reproduce AC2K 24.80 / 19.62 and V8 23.92 / 20.48 within ±0.02 | ~3 min | n/a | **Done.** Reproduced exactly; [PR #28](https://github.com/plaingca/AETV/pull/28) |
 | **E1** | Receiver confidence gain (scale weights only when they spread > 0.05 across the GOP) for V8, V7 and AC16 | release checkpoints | Gains 0.5–3.0 on 24 pool clips. Must gain ≥ 0.10 dB `mpp12` | ~2 min | +0.2 dB and > 2× paired SE | **Done, no ship.** See E1 results below |
-| **E2** | **V8 channel-matched fine-tune.** Keep the face-GAN loss stack (LPIPS 0.18, DWT, face ROI, clean anchor) and add real V8 + `mpp12` rows in the forward pass on 1 of 4 steps, with lr 1e-6 → 3e-6 | `v8-hf3k-face-gan.pt` | 500-step probe on 16 pool clips: `mpp12` ≥ +0.15 dB paired, clean ≥ −0.10, `mpp12` LPIPS not worse | 3–5k steps, ~1–1.5 h | **`mpp12` ≥ 20.68 (paired ≥ +0.2 over the release, > 2 SE), clean ≥ 23.72, LPIPS clean ≤ 0.215 / `mpp12` ≤ 0.255** | **Next** |
+| **E2** | **V8 channel-matched fine-tune.** Keep the face-GAN loss stack (LPIPS 0.18, DWT, face ROI, clean anchor) and add real V8 + `mpp12` rows in the forward pass on 1 of 4 steps, with lr 1e-6 → 3e-6 | `v8-hf3k-face-gan.pt` | 500-step probe on 16 pool clips: `mpp12` ≥ +0.15 dB paired, clean ≥ −0.10, `mpp12` LPIPS not worse | 3–5k steps, ~1–1.5 h | **`mpp12` ≥ 20.68 (paired ≥ +0.2 over the release, > 2 SE), clean ≥ 23.72, LPIPS clean ≤ 0.215 / `mpp12` ≤ 0.255** | **Killed at step 500** (pool +0.100 ± 0.048). See E2 results |
 | **E3** | **V8 ROI fidelity.** Raise the face-region L1/MSE weight and cut `face_adv_weight` from 0.01 to about 0.003 | best of E2, else V8 release | 500 steps: face PSNR on `mpp12` ≥ +0.3 dB paired (n = 38), full-frame LPIPS within +0.01 | 2k steps, ~1 h | E2's bar **plus** face PSNR `mpp12` ≥ 18.87 and a visual A/B pass | |
 | **E4** | **AC2K fading-aware fine-tune** (4 fps contract only), with the two-path fade surrogate + real `mpp12` rows | `ac2k-psnr-2.2khz-best.pt` | 1k steps on 8 pool clips: `mpp12` ≥ +0.40 dB, clean drop ≤ 0.30 | 5k steps, ~1 h | **`mpp12` ≥ 20.08** at clean ≥ 24.5. Does not replace V8 unless the product accepts 4 fps | |
 | **E5** | **AC6 from AC2K** at the V8 contract, long schedule, fading from the start. Run only if E4 passes | AC2K-v2 fidelity via `load_warmstart_from_ac2k` | At 10k steps on 8 pool clips: clean ≥ 22.5 and `mpp12` ≥ 18.5. Otherwise stop | 100k steps, ~6–8 h | **V8: `mpp12` ≥ 20.68, LPIPS `mpp12` ≤ 0.255** | gated |
@@ -151,6 +152,50 @@ Shared rules for every experiment:
 | AC16 | 1.0. Gains > 1 hurt fast (1.25: −0.20 ± 0.05; 3.0: −1.18 ± 0.15); 0.75: −0.19 | 1.0 | 0 | 0 | — | Confidence is not pessimistic; its losses are acquisition (E7). No change |
 
 **Takeaway.** The ×1.5–1.75 receiver trick that gave AC2K +0.24 dB is worth only about +0.1 dB on V8 and nothing on V7 or AC16. The V8 decoder already uses its modem confidence close to optimally, so the remaining V8 `mpp12` gap must come from training (E2/E3), not from receiver tuning. Gain 1.5 may be stacked on an E2 candidate, but the candidate is scored against the release at gain 1.0.
+
+### E2 results (V8 fine-tune with real modem rows)
+
+**Recipe.** `scripts/finetune_v8_channel.py` on branch `cursor/v8-channel-ft-eee2` (no PR).
+
+- **Warm start:** `models/v8-hf3k-face-gan.pt`, which is not modified (SHA-256 still `f218376a…`).
+- **Batch:** 8 rows per step.
+  - 6 rows go through the release's differentiable waveform channel (0–16 dB, p_fading 0.5, measured-path 0.4).
+  - 2 rows go through the real V8 OFDM modem plus `emulate`, drawn from `mpp12` ×3, `mpp6`, `awgn12` and `clean`, with training-only fade seeds from 1,000,000. The channel error is passed straight through to the encoder.
+- **Loss:** the release generator objective and weights (pixel, DWT, gradient, temporal, VGG, region/detail/contrast, face-crop VGG, consistency, clean anchor). **The face critic and PatchGAN are not trained.**
+- **Schedule:** lr 3e-6 with a 50-step warmup and cosine decay. About 1.7 steps/s on the 4090.
+- **Data:** training pool minus 24 selection clips (1,325 clips).
+- **Selection:** 24 pool clips, fade seed base 7300. The 64 eval clips were not used for selection.
+- **Checkpoint:** `runs/v8-channel-ft/best.pt` (step 500), a new path.
+
+**Kill check (pool, 24 clips, paired against the release):**
+
+| Step | `mpp12` Δ | Clean Δ | LPIPS clean Δ | LPIPS `mpp12` Δ | Face `mpp12` Δ | Verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 250 | +0.085 ± 0.039 | −0.004 ± 0.012 | +0.012 ± 0.002 | −0.001 ± 0.003 | +0.14 ± 0.11 | — |
+| **500** | **+0.100 ± 0.048** | −0.035 ± 0.013 | +0.006 ± 0.002 | −0.011 ± 0.004 | +0.18 ± 0.13 | **Failed** (needs ≥ +0.15). Stopped |
+
+**Scored once on the 64 eval clips, for the record (not for selection).** Paired against the V8 release at receiver gain 1.0.
+
+| | Clean | Modem clean | AWGN 6 | **mpp12** | LPIPS clean | LPIPS mpp12 | Face PSNR mpp12 (n=38) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| V8 release, gain 1.0 | 23.92 ± 0.48 | 23.35 ± 0.46 | 22.40 ± 0.44 | 20.48 ± 0.52 | 0.210 | 0.255 | 18.57 |
+| E2 step 500, gain 1.0 (**fine-tune effect**) | 23.88 (−0.039 ± 0.006) | 23.31 (−0.041 ± 0.007) | 22.39 (−0.007 ± 0.006) | **20.55 (+0.066 ± 0.028)** | 0.213 (+0.004 ± 0.001) | 0.248 (−0.007 ± 0.002) | 18.77 (+0.20 ± 0.08) |
+| V8 release, gain 1.5 (receiver only, E1) | 23.92 | 23.35 | 22.40 | 20.59 (+0.107 ± 0.016) | 0.210 | 0.250 | 18.61 |
+| E2 step 500, gain 1.5 (fine-tune + receiver, **reported separately**) | 23.88 | 23.31 | 22.39 | 20.65 (+0.167 ± 0.035) | 0.213 | 0.251 | 18.83 |
+
+On the eval set, the fine-tune adds +0.060 ± 0.027 dB over the release when both use gain 1.5.
+
+**Ship rule:** fails. The `mpp12` gain is +0.066 dB, against a bar of +0.2 (20.68 dB). Clean LPIPS also regresses by +0.004 ± 0.001. Even the stacked receiver + fine-tune row (+0.167 dB) is below the bar.
+
+**Frames:** `media/fidelity-step3/v8ft-val{00,24,48}-f{02,05,09}.png` (source | V8 release | fine-tune, `mpp12`, gain 1.0) and `media/fidelity-step3/v8ft-mpp12-side-by-side.mp4` (3 clips, 12 frames at 6 fps, played twice). Release and fine-tune are visually near-identical.
+
+**Reading:**
+
+1. **Real-modem rows give a small, real but slow `mpp12` gain.** +0.10 on the pool and +0.07 on eval at 500 steps. The step-250 to step-500 slope (+0.015 dB per 250 steps) does not project to +0.2 dB inside the planned 3–5k steps.
+2. **Dropping the face critic softens clean texture.** That shows up as clean LPIPS +0.004 to +0.012.
+3. **The face region moved most.** +0.20 ± 0.08 dB on `mpp12` faces, which is the E3 signal.
+
+Do not rerun E2 as specified. A restart needs a changed hypothesis, for example the face critic restored, or more real rows per batch. It also needs its own kill check.
 
 **Paused** until a kill check says otherwise: RVDJSCC / codebook / DeepStream / joint-AE ports, sub-192×108 contracts, and side codes in slack bits.
 
@@ -182,3 +227,6 @@ Remaining budget: E2–E4 + E6 is about 6 GPU-hours. E5 and E7 are gated.
 - E0/E1 JSON: `internal/fidelity-step2/` (`eval64.json`, `pool-calibration.json`, `pool-calibration-low.json`).
 - First-pass harness, JSON and incumbent frames: `internal/fidelity-baseline/`.
 - E1 frames: `media/fidelity-step2/v8-gain-val{00,24,48}-f{02,05,09}.png`.
+- E2 fine-tune script: `scripts/finetune_v8_channel.py` on `cursor/v8-channel-ft-eee2` (no PR). Checkpoint: `runs/v8-channel-ft/best.pt` (step 500, gitignored).
+- E2 JSON: `internal/fidelity-step3/` (`eval64-v8ft.json`, `kill_check.json`, `history.json`, `train_log.jsonl`, `select_step0.json`).
+- E2 frames: `media/fidelity-step3/v8ft-val{00,24,48}-f{02,05,09}.png` and `media/fidelity-step3/v8ft-mpp12-side-by-side.mp4`.
