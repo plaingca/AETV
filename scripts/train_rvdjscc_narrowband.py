@@ -17,7 +17,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aetv.narrowband_jscc import global_ssim, impair_wire, psnr, resolve_bandwidth, unit_rms
-from aetv.rvdjscc_narrowband import RVDJSCCNarrowband, save_fp16_shards
+from aetv.rvdjscc_narrowband import RVDJSCCNarrowband, load_rvdjscc, save_fp16_shards
 
 
 def load_clips(cache: Path, val_clips: int, seed: int) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
@@ -160,15 +160,21 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--out", default="runs/rvdjscc-narrowband-v2")
     parser.add_argument("--checkpoint", default="models/rvdjscc-narrowband-v2-2.2khz-best.pt")
+    parser.add_argument("--init", default="", help="Resume weights. Only replaced when clean PSNR improves.")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     device = torch.device(args.device)
     khz, budget, mode = resolve_bandwidth(args.bandwidth)
     train_clips, val_clips, val_names = load_clips(Path(args.cache), args.val_clips, args.seed)
-    model = RVDJSCCNarrowband(
-        args.bandwidth, width=args.width, context_channels=args.context_channels
-    ).to(device)
+    if args.init:
+        model, payload = load_rvdjscc(args.init, device)
+        resumed = float((payload.get("metrics") or {}).get("clean_psnr", -1e9))
+    else:
+        model = RVDJSCCNarrowband(
+            args.bandwidth, width=args.width, context_channels=args.context_channels
+        ).to(device)
+        resumed = None
     params = sum(item.numel() for item in model.parameters())
     print(
         f"bandwidth {khz} kHz | budget {budget} | key {model.key_len} x{model.key_codec.latent_channels} | "
@@ -178,8 +184,10 @@ def main() -> None:
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.steps, eta_min=args.lr * 0.05)
-    best = -1e9
-    joint_scoring = False
+    best = -1e9 if resumed is None else resumed
+    joint_scoring = resumed is not None
+    if resumed is not None:
+        print(f"resumed {args.init} | clean {resumed:.2f} dB", flush=True)
     log_path = Path(args.out)
     log_path.mkdir(parents=True, exist_ok=True)
     clean_joint_end = args.key_steps + args.clean_joint_steps
