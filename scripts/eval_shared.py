@@ -48,7 +48,7 @@ def gain_label(gain: float) -> str:
 
 
 def collect(records: list[dict], label: str) -> dict:
-    out: dict = {"rows": {}, "ssim": {}, "lpips": {}, "face": {}, "nme": {}}
+    out: dict = {"rows": {}, "ssim": {}, "lpips": {}, "face": {}, "nme": {}, "face_lpips": {}}
     for kind in out:
         keys = sorted({k for r in records for k in getattr(r[label], kind)})
         for key in keys:
@@ -63,7 +63,7 @@ def report(per_clip: dict, labels: list[str]) -> dict:
     for label in labels:
         values = per_clip[label]
         entry = {"failures": values["failures"]}
-        for kind in ("rows", "ssim", "lpips", "face", "nme"):
+        for kind in ("rows", "ssim", "lpips", "face", "nme", "face_lpips"):
             for key, series in values[kind].items():
                 name = key if kind == "rows" else f"{kind}_{key}"
                 entry[name] = summarize(series)

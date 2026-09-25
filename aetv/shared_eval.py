@@ -159,13 +159,28 @@ class AutoencoderAdapter(CodecAdapter):
             compact=bool(args.get("compact", False)),
             causal=spec.causal,
         )
+        self.face_priority = bool(payload.get("face_priority_input", False))
+        if self.face_priority:
+            from .face_priority import add_mask_input
+
+            add_mask_input(self.model)
+            self.detector = FaceMasks()
         self.model.load_state_dict(payload["model_state_dict"], strict=True)
         self.model.to(device).eval()
         self.name, self.mode, self.spec = name, mode_name, spec
         self.gop, self.height, self.width = spec.gop_frames, spec.height, spec.width
 
     def encode(self, gops):
-        return [self.model.encoder(gop) for gop in gops]
+        if not self.face_priority:
+            return [self.model.encoder(gop) for gop in gops]
+        from .face_priority import encode_with_mask
+
+        wires = []
+        for gop in gops:
+            frames = gop[0].clamp(0, 1).mul(255).round().to(torch.uint8).cpu()
+            _, boxes = self.detector.detect(frames)
+            wires.append(encode_with_mask(self.model, gop, boxes[None]))
+        return wires
 
     def decode(self, wires, confidences):
         shape = (self.spec.gop_frames, self.spec.height, self.spec.width)
@@ -257,6 +272,13 @@ class FaceMasks:
         """(T, 108, 192) bool mask for a (3, T, 108, 192) uint8 clip."""
         if key in self._cache:
             return self._cache[key]
+        out, largest = self.detect(clip_uint8)
+        self._cache[key] = out
+        self._boxes[key] = largest
+        return out
+
+    def detect(self, clip_uint8: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Uncached detection: (T, H, W) bool mask of all boxes and (T, 4) largest box per frame."""
         _, frames, height, width = clip_uint8.shape
         out = torch.zeros(frames, height, width, dtype=torch.bool)
         largest = torch.full((frames, 4), float("nan"))
@@ -275,9 +297,7 @@ class FaceMasks:
                 x1, y1 = min(width, int(math.ceil(x + w))), min(height, int(math.ceil(y + h)))
                 if x1 > x0 and y1 > y0:
                     out[t, y0:y1, x0:x1] = True
-        self._cache[key] = out
-        self._boxes[key] = largest
-        return out
+        return out, largest
 
 
 def masked_psnr(reference: torch.Tensor, reconstruction: torch.Tensor, mask: torch.Tensor) -> float | None:
@@ -320,6 +340,7 @@ class ClipRecord:
     lpips: dict[str, float] = field(default_factory=dict)
     ssim: dict[str, float] = field(default_factory=dict)
     nme: dict[str, float | None] = field(default_factory=dict)
+    face_lpips: dict[str, float | None] = field(default_factory=dict)
     failures: int = 0
 
 
@@ -396,6 +417,13 @@ def score_clip(
                     record.face[row] = masked_psnr(source, joined, mask)
                 if boxes is not None:
                     record.nme[row] = face_geometry.nme(source, joined, boxes)
+                    if lpips_metric is not None:
+                        src_crops, index = face_geometry.frame_crops(source.float(), boxes)
+                        if index.numel():
+                            rec_crops, _ = face_geometry.frame_crops(joined.float().to(source.device), boxes)
+                            record.face_lpips[row] = float(lpips_metric(rec_crops * 2 - 1, src_crops * 2 - 1).mean())
+                        else:
+                            record.face_lpips[row] = None
                 if keep:
                     kept[(label, row)] = joined.cpu().half()
         records[label] = record

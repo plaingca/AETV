@@ -129,6 +129,7 @@ def select_score(adapter, clips, names, faces, lpips_metric, device, seed0: int,
         "lpips_mpp12": [r.lpips["mpp12"] for r in records],
         "face_mpp12": [r.face.get("mpp12") for r in records],
         "nme_mpp12": [r.nme.get("mpp12") for r in records],
+        "face_lpips_mpp12": [r.face_lpips.get("mpp12") for r in records],
     }}
     out["summary"] = {k: summarize(v) for k, v in out["per_clip"].items()}
     return out
@@ -200,7 +201,17 @@ def main() -> None:
                     help="extra pool face clips moved from training into selection (face goal)")
     ap.add_argument("--landmark-crops", type=int, default=8, help="face crops per step for the landmark loss")
     ap.add_argument("--kill-mpp12-floor", type=float, default=-0.10)
+    ap.add_argument("--face-priority", action="store_true",
+                    help=("feed the encoder a transmitter-side YuNet face mask (4th input plane) and kill-check / "
+                          "select on landmark error, face PSNR and face-crop LPIPS; whole-frame mpp12 only stops a "
+                          "run below --whole-frame-stop"))
+    ap.add_argument("--face-loss-weight", type=float, default=1.0,
+                    help="pixel MSE/L1 weight inside the expanded face boxes (background weight 1)")
+    ap.add_argument("--whole-frame-stop", type=float, default=-1.5)
+    ap.add_argument("--mask-lr-scale", type=float, default=30.0, help="learning-rate multiplier for the face-mask stem")
     args = ap.parse_args()
+    if args.face_priority:
+        args.face_goal = True
     if args.teacher_dir:
         args.aligned_windows = True
     if args.channel_only:
@@ -254,6 +265,12 @@ def main() -> None:
 
     adapter = AutoencoderAdapter("v8-ft", args.init, "V8", device)
     model = adapter.model
+    if args.face_priority:
+        from aetv.face_priority import add_mask_input, boxes_to_mask, encode_with_mask
+
+        add_mask_input(model)
+        adapter.face_priority = True
+        adapter.detector = FaceMasks(args.face_model)
     spec = AETV_MODES["V8"]
     gop = spec.gop_frames
     channel = AETVWaveformChannel(band=spec.band, cfg=AETVChannelConfig(
@@ -274,7 +291,15 @@ def main() -> None:
 
     lpips_metric = lpips.LPIPS(net="alex", verbose=False).to(device).eval()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if args.face_priority:
+        from aetv.face_priority import mask_parameters
+
+        mask_ids = {id(q) for q in mask_parameters(model)}
+        groups = [{"params": [q for q in model.parameters() if id(q) not in mask_ids], "lr_scale": 1.0},
+                  {"params": mask_parameters(model), "lr_scale": args.mask_lr_scale}]
+        optimizer = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     def lr_at(step: int) -> float:
         if step <= args.warmup:
@@ -299,7 +324,7 @@ def main() -> None:
     for step in range(1, args.steps + 1):
         model.train()
         for group in optimizer.param_groups:
-            group["lr"] = lr_at(step)
+            group["lr"] = lr_at(step) * group.get("lr_scale", 1.0)
         if face_rows:
             idx = [rng.choice(face_rows) if rng.random() < args.face_oversample else rng.randrange(train_clips.shape[0])
                    for _ in range(args.batch)]
@@ -326,6 +351,9 @@ def main() -> None:
             if boxes is not None:
                 boxes = boxes.clone()
                 boxes[..., 0] = spec.width - boxes[..., 0] - boxes[..., 2]
+        if args.face_priority and args.face_loss_weight != 1.0:
+            face_weight = 1.0 + (args.face_loss_weight - 1.0) * boxes_to_mask(boxes, spec.height, spec.width)
+            weight = face_weight if weight is None else weight * face_weight
         with torch.no_grad():
             attention_mask, face_clips = teacher(video)
         face_grid, face_indices = (None, torch.empty(0, dtype=torch.long, device=device))
@@ -335,7 +363,7 @@ def main() -> None:
             face_target = sample_face_crops(video, face_grid, face_indices)
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            clean_z = model.encoder(video)
+            clean_z = encode_with_mask(model, video, boxes) if args.face_priority else model.encoder(video)
             if args.real_rows < args.batch:
                 noisy_z, weights = channel(clean_z.float())
             else:
@@ -443,24 +471,38 @@ def main() -> None:
                   f"clean Δ {deltas['clean']['mean']:+.3f} lpips_mpp12 Δ {deltas['lpips_mpp12']['mean']:+.4f}", flush=True)
             state = {"mode": "V8", "stage": 2, "step": step, "args": {**adapter_args(args.init), "finetune": vars(args)},
                      "model_state_dict": model.state_dict(), "source_run": str(out), "init_checkpoint": args.init,
-                     "select": record}
+                     "select": record, "face_priority_input": bool(args.face_priority)}
             clean_ok = args.kill_clean is None or deltas["clean"]["mean"] >= args.kill_clean
+            if args.face_priority:
+                print(f"  face-priority: face_lpips_mpp12 {s['face_lpips_mpp12']['mean']:.4f} (Δ "
+                      f"{deltas['face_lpips_mpp12']['mean']:+.4f} ± {deltas['face_lpips_mpp12']['se']:.4f})", flush=True)
             if args.face_goal:
                 print(f"  face: nme_mpp12 {s['nme_mpp12']['mean']:.3f} (Δ {deltas['nme_mpp12']['mean']:+.3f} ± "
                       f"{deltas['nme_mpp12']['se']:.3f}, n={deltas['nme_mpp12']['n']}) face_mpp12 Δ "
                       f"{deltas['face_mpp12']['mean']:+.3f} ± {deltas['face_mpp12']['se']:.3f}", flush=True)
                 guards = deltas["face_mpp12"]["mean"] >= 0.0 and deltas["mpp12"]["mean"] >= args.kill_mpp12_floor
                 improved = guards and s["nme_mpp12"]["mean"] < best["nme_mpp12"]
+                if args.face_priority:
+                    guards = (deltas["nme_mpp12"]["mean"] <= 0.0 and deltas["face_lpips_mpp12"]["mean"] <= 0.0
+                              and deltas["mpp12"]["mean"] >= args.whole_frame_stop)
+                    improved = guards and s["face_mpp12"]["mean"] > best.get("face_mpp12", -1e9)
             else:
                 improved = s["mpp12"]["mean"] > best["mpp12"] and clean_ok
             if improved:
-                best = {"step": step, "mpp12": s["mpp12"]["mean"], "nme_mpp12": s["nme_mpp12"]["mean"]}
+                best = {"step": step, "mpp12": s["mpp12"]["mean"], "nme_mpp12": s["nme_mpp12"]["mean"],
+                        "face_mpp12": s["face_mpp12"]["mean"]}
                 torch.save(state, out / "best.pt")
                 print(f"  new best at step {step}", flush=True)
             torch.save(state, out / "latest.pt")
             if step == args.kill_step:
                 ok = deltas["mpp12"]["mean"] >= args.kill_mpp12
-                if args.face_goal:
+                if args.face_priority:
+                    def clear(key, sign):
+                        d = deltas[key]
+                        return sign * d["mean"] > 0 and abs(d["mean"]) > 2 * d["se"]
+                    ok = (clear("nme_mpp12", -1) and clear("face_mpp12", 1) and clear("face_lpips_mpp12", -1)
+                          and deltas["mpp12"]["mean"] >= args.whole_frame_stop)
+                elif args.face_goal:
                     d = deltas["nme_mpp12"]
                     ok = (d["mean"] < 0 and -d["mean"] > 2 * d["se"] and deltas["face_mpp12"]["mean"] >= 0.0
                           and deltas["mpp12"]["mean"] >= args.kill_mpp12_floor)
@@ -468,7 +510,7 @@ def main() -> None:
                     ok = ok and clean_ok and deltas["lpips_mpp12"]["mean"] <= 0.0
                 verdict = {"step": step, "passed": ok, "mpp12": deltas["mpp12"], "clean": deltas["clean"],
                            "lpips_mpp12": deltas["lpips_mpp12"], "face_mpp12": deltas["face_mpp12"],
-                           "nme_mpp12": deltas["nme_mpp12"]}
+                           "nme_mpp12": deltas["nme_mpp12"], "face_lpips_mpp12": deltas["face_lpips_mpp12"]}
                 (out / "kill_check.json").write_text(json.dumps(verdict, indent=1))
                 print(f"KILL CHECK {'PASSED' if ok else 'FAILED'} at step {step}", flush=True)
                 if not ok or args.stop_after_kill:
