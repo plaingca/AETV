@@ -80,6 +80,21 @@ def region_terms(recon, video, mask, boost):
     )
 
 
+def pixel_mse(recon, video, vvc, weight, distill):
+    if weight is None:
+        weight = torch.ones_like(recon[:, :1])
+    source = (weight * (recon - video).square()).mean()
+    if vvc is None or distill <= 0.0:
+        return source
+    return (1.0 - distill) * source + distill * (weight * (recon - vvc).square()).mean()
+
+
+def pixel_l1(recon, video, weight):
+    if weight is None:
+        return (recon - video).abs().mean()
+    return (weight * (recon - video).abs()).mean()
+
+
 def real_channel(wire: np.ndarray, seed: int, rng: random.Random, profiles=REAL_PROFILES) -> tuple[np.ndarray, np.ndarray]:
     profile = rng.choice(profiles)
     received, confidence, _ = modem_exchange(wire, "V8", seed, profile)
@@ -152,7 +167,17 @@ def main() -> None:
     ap.add_argument("--contrast-weight", type=float, default=2.5)
     ap.add_argument("--region-boost", type=float, default=12.0)
     ap.add_argument("--face-model", default="data/teachers/face_detection_yunet_2023mar.onnx")
+    ap.add_argument("--teacher-dir", help="VVC teacher npz files from scripts/precompute_vvc_teacher.py")
+    ap.add_argument("--importance-weight", type=float, default=0.0,
+                    help="alpha: pixel MSE/L1 weight is 1 + alpha * (VVC bit-allocation map - 1)")
+    ap.add_argument("--distill-weight", type=float, default=0.0,
+                    help="lambda: pixel MSE target mixes (1 - lambda) * source + lambda * VVC decode")
+    ap.add_argument("--aligned-windows", action="store_true",
+                    help="train only on the two V8-aligned 6-frame GOPs of each clip (implied by --teacher-dir)")
+    ap.add_argument("--stop-after-kill", action="store_true", help="stop at --kill-step whatever the verdict")
     args = ap.parse_args()
+    if args.teacher_dir:
+        args.aligned_windows = True
     if args.channel_only:
         args.real_rows = args.batch
         args.kill_clean = None
@@ -174,6 +199,15 @@ def main() -> None:
     select_names = [p.name for p in select_paths]
     print(f"train clips {len(train_paths)}, selection clips {len(select_paths)} (pool only)", flush=True)
     train_clips = load_clips(train_paths)
+    teacher_decode = teacher_map = None
+    if args.teacher_dir:
+        decodes, maps = [], []
+        for path in train_paths:
+            data = np.load(Path(args.teacher_dir) / (path.stem + ".npz"))
+            decodes.append(torch.from_numpy(data["decode"]))
+            maps.append(torch.from_numpy(data["importance"]))
+        teacher_decode, teacher_map = torch.stack(decodes), torch.stack(maps)
+        print(f"VVC teacher loaded for {len(decodes)} clips", flush=True)
 
     adapter = AutoencoderAdapter("v8-ft", args.init, "V8", device)
     model = adapter.model
@@ -215,10 +249,21 @@ def main() -> None:
         for group in optimizer.param_groups:
             group["lr"] = lr_at(step)
         idx = [rng.randrange(train_clips.shape[0]) for _ in range(args.batch)]
-        starts = [rng.randrange(0, 12 - gop + 1) for _ in idx]
+        if args.aligned_windows:
+            starts = [rng.choice((0, gop)) for _ in idx]
+        else:
+            starts = [rng.randrange(0, 12 - gop + 1) for _ in idx]
         video = torch.stack([train_clips[i, :, s0 : s0 + gop] for i, s0 in zip(idx, starts)]).to(device).float().div(255)
+        vvc = weight = None
+        if teacher_decode is not None:
+            vvc = torch.stack([teacher_decode[i, :, s0 : s0 + gop] for i, s0 in zip(idx, starts)]).to(device).float().div(255)
+            imp = torch.stack([teacher_map[i, s0 : s0 + gop] for i, s0 in zip(idx, starts)]).to(device).float().div(32)
+            weight = (1.0 + args.importance_weight * (imp - 1.0)).clamp_min(0.0).unsqueeze(1)
+            weight = weight / weight.mean(dim=(2, 3, 4), keepdim=True).clamp_min(1e-6)
         if rng.random() < 0.5:
             video = video.flip(-1)
+            if vvc is not None:
+                vvc, weight = vvc.flip(-1), weight.flip(-1)
         with torch.no_grad():
             attention_mask, face_clips = teacher(video)
         face_grid, face_indices = (None, torch.empty(0, dtype=torch.long, device=device))
@@ -278,8 +323,8 @@ def main() -> None:
                 loss_face = vgg(sample_face_crops(recon, face_grid, face_indices), face_target)
             ramp = 0.5 + 0.5 * conf
             loss = (
-                args.mse_weight * F.mse_loss(recon, video)
-                + args.l1_weight * (recon - video).abs().mean()
+                args.mse_weight * pixel_mse(recon, video, vvc, weight, args.distill_weight)
+                + args.l1_weight * pixel_l1(recon, video, weight)
                 + args.dwt_weight * dwt3d_loss(recon, video, levels=3)
                 + args.grad_weight * spatial_gradient_loss(recon, video)
                 + args.temporal_weight * temporal_delta_loss(recon, video)
@@ -338,7 +383,7 @@ def main() -> None:
                            "lpips_mpp12": deltas["lpips_mpp12"], "face_mpp12": deltas["face_mpp12"]}
                 (out / "kill_check.json").write_text(json.dumps(verdict, indent=1))
                 print(f"KILL CHECK {'PASSED' if ok else 'FAILED'} at step {step}", flush=True)
-                if not ok:
+                if not ok or args.stop_after_kill:
                     break
     (out / "history.json").write_text(json.dumps({"history": history, "best": best, "kill_check": verdict}, indent=1))
     print(f"done. best {best}", flush=True)
