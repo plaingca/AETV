@@ -95,6 +95,22 @@ def pixel_l1(recon, video, weight):
     return (weight * (recon - video).abs()).mean()
 
 
+def face_crop_loss(recon, video, boxes, geometry, mse_w, l1_w, grad_w, size: int = 64):
+    """Per-pixel reconstruction loss on 64x64 face crops, so the face counts as a full frame's worth of loss."""
+    src, index = geometry.frame_crops(video, boxes)
+    if index.numel() == 0:
+        return recon.new_zeros(())
+    b, c, t, h, w = recon.shape
+    from aetv.face_geometry import crop_faces, fan_boxes
+
+    flat = fan_boxes(boxes.reshape(b * t, 4).to(recon.device, recon.dtype))[index]
+    rec = crop_faces(recon.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)[index], flat, size)
+    src = F.interpolate(src, size=(size, size), mode="area")
+    grad = ((rec[..., 1:, :] - rec[..., :-1, :]) - (src[..., 1:, :] - src[..., :-1, :])).abs().mean() + \
+        ((rec[..., :, 1:] - rec[..., :, :-1]) - (src[..., :, 1:] - src[..., :, :-1])).abs().mean()
+    return mse_w * F.mse_loss(rec, src) + l1_w * (rec - src).abs().mean() + grad_w * grad
+
+
 def box_mask(boxes: torch.Tensor, height: int, width: int) -> torch.Tensor:
     """(B, T, 4) xywh boxes (NaN = no face) -> (B, 1, T, H, W) float mask."""
     ys = torch.arange(height, device=boxes.device).view(1, 1, height, 1) + 0.5
@@ -205,8 +221,9 @@ def main() -> None:
                     help=("feed the encoder a transmitter-side YuNet face mask (4th input plane) and kill-check / "
                           "select on landmark error, face PSNR and face-crop LPIPS; whole-frame mpp12 only stops a "
                           "run below --whole-frame-stop"))
-    ap.add_argument("--face-loss-weight", type=float, default=1.0,
-                    help="pixel MSE/L1 weight inside the expanded face boxes (background weight 1)")
+    ap.add_argument("--face-loss-weight", type=float, default=0.0,
+                    help=("weight k of the per-pixel reconstruction loss (MSE, L1, gradient) on 64x64 face crops; "
+                          "the background keeps weight 1 on the whole-frame loss"))
     ap.add_argument("--whole-frame-stop", type=float, default=-1.5)
     ap.add_argument("--mask-lr-scale", type=float, default=30.0, help="learning-rate multiplier for the face-mask stem")
     args = ap.parse_args()
@@ -266,7 +283,7 @@ def main() -> None:
     adapter = AutoencoderAdapter("v8-ft", args.init, "V8", device)
     model = adapter.model
     if args.face_priority:
-        from aetv.face_priority import add_mask_input, boxes_to_mask, encode_with_mask
+        from aetv.face_priority import add_mask_input, encode_with_mask
 
         add_mask_input(model)
         adapter.face_priority = True
@@ -351,9 +368,6 @@ def main() -> None:
             if boxes is not None:
                 boxes = boxes.clone()
                 boxes[..., 0] = spec.width - boxes[..., 0] - boxes[..., 2]
-        if args.face_priority and args.face_loss_weight != 1.0:
-            face_weight = 1.0 + (args.face_loss_weight - 1.0) * boxes_to_mask(boxes, spec.height, spec.width)
-            weight = face_weight if weight is None else weight * face_weight
         with torch.no_grad():
             attention_mask, face_clips = teacher(video)
         face_grid, face_indices = (None, torch.empty(0, dtype=torch.long, device=device))
@@ -441,6 +455,9 @@ def main() -> None:
                 if args.landmark_weight > 0:
                     loss = loss + args.landmark_weight * geometry.heatmap_loss(
                         recon, video, boxes, max_crops=args.landmark_crops)
+                if args.face_priority and args.face_loss_weight > 0:
+                    loss = loss + args.face_loss_weight * face_crop_loss(
+                        recon, video, boxes, geometry, args.mse_weight, args.l1_weight, args.grad_weight)
         optimizer.zero_grad(set_to_none=True)
         if not torch.isfinite(loss):
             print(f"step {step}: non-finite loss, skipped", flush=True)
