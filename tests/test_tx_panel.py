@@ -407,6 +407,49 @@ def test_open_saved_video_directory_uses_configured_receive_path(
     assert opened == [receive_dir.resolve()]
 
 
+def _qrl_panel(*, emulating=False, problems=()):
+    started = []
+    panel = SimpleNamespace(
+        transmitting=lambda: False,
+        _apply_panel_settings=lambda: None,
+        emulating=lambda: emulating,
+        station=SimpleNamespace(
+            settings=SimpleNamespace(validate=lambda **_kwargs: list(problems)),
+            codec=None,
+        ),
+        engine=SimpleNamespace(transmit_qrl=object()),
+        status=SimpleNamespace(setText=lambda text: setattr(panel.status, "text", text)),
+        _begin_transmit=lambda job, message: started.append((job, message)),
+    )
+    return panel, started
+
+
+def test_qrl_starts_without_a_loaded_checkpoint():
+    panel, started = _qrl_panel()
+
+    TransmitPanel.send_qrl(panel)
+
+    assert started == [(panel.engine.transmit_qrl, "preparing QRL?…")]
+
+
+def test_qrl_is_refused_on_loopback_routes():
+    panel, started = _qrl_panel(emulating=True)
+
+    TransmitPanel.send_qrl(panel)
+
+    assert started == []
+    assert panel.status.text == "QRL? needs the Radio route"
+
+
+def test_qrl_respects_radio_settings_validation():
+    panel, started = _qrl_panel(problems=["callsign must be 1-8 characters from A-Z, 0-9, /"])
+
+    TransmitPanel.send_qrl(panel)
+
+    assert started == []
+    assert panel.status.text.startswith("callsign")
+
+
 def test_ac16_av_selection_uses_ac16_checkpoint_and_exposes_audio_controls():
     requested = []
     panel = SimpleNamespace(

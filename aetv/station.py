@@ -53,6 +53,7 @@ from .modem import (
     modulate_gop_chunks,
     modulate_gop_stream,
 )
+from .qrl import qrl_band, qrl_message, qrl_offsets, qrl_waveform
 from .ringbuffer import RingBuffer
 from .recording import BufferedWriter
 from .settings import StationSettings
@@ -659,21 +660,10 @@ class TxEngine:
                     channel_profile, tx_recorder,
                 )
             if settings.tx_backend in {"pluto", "hackrf"}:
-                from .sdr import transmit_pluto
-                from .hackrf import transmit_hackrf
-                transport = transmit_hackrf if settings.tx_backend == "hackrf" else transmit_pluto
-                label = "HackRF" if settings.tx_backend == "hackrf" else "Pluto"
-                self._set(TxPhase.ENCODING, 0.0, f"Preparing {label} transmit")
-                complete = transport(
-                    leveled_chunks(), transmit_rate, settings, self._cancel,
-                    lambda progress: self._set(TxPhase.SENDING, progress, f"{label} transmitting"),
+                return self._sdr_send(
+                    leveled_chunks(), transmit_rate,
                     max_seconds=n_gops + (1.65 if settings.waveform_mode == "analog_av" else 0.65),
-                    **({"diagnostics": self.sdr_health} if settings.tx_backend == "pluto" else {}),
                 )
-                self._set(TxPhase.DONE if complete else TxPhase.CANCELLED,
-                          1.0 if complete else self.state.progress,
-                          f"{label} off · sent" if complete else f"{label} off · cancelled")
-                return complete
             return self._keyed_send_stream(leveled_chunks(), transmit_rate, n_gops)
         except Exception as error:
             self._on_error(str(error))
@@ -695,6 +685,60 @@ class TxEngine:
                     json.dumps(tx_metadata, indent=2, allow_nan=True) + "\n",
                     encoding="utf-8",
                 )
+
+    def transmit_qrl(self) -> bool:
+        """Key identical CW QRL? queries across the selected mode's band."""
+        self._cancel.clear()
+        settings = self.station.settings
+        try:
+            if settings.tx_channel_profile != "radio":
+                raise RuntimeError("QRL? needs the Radio route")
+            low, high, fs = qrl_band(settings)
+            offsets = qrl_offsets(low, high)
+            wave = qrl_waveform(settings.callsign, fs, offsets, peak=settings.tx_level)
+            self.last_wav = wave
+            self._report_transmit_output_levels(wave)
+            chunks = [wave[start : start + fs] for start in range(0, len(wave), fs)]
+            done = (
+                f"QRL? sent on {len(offsets)} × 2.5 kHz slot"
+                f"{'s' if len(offsets) != 1 else ''} · watch the waterfall for replies"
+            )
+            self.station.log(
+                f"QRL? {qrl_message(settings.callsign)!r}: carriers at +"
+                + ", +".join(f"{offset / 1000:g}" for offset in offsets)
+                + f" kHz, {len(wave) / fs:.1f} s"
+            )
+            if settings.tx_backend in {"pluto", "hackrf"}:
+                return self._sdr_send(
+                    iter(chunks), fs, max_seconds=len(wave) / fs, done=done
+                )
+            return self._keyed_send_stream(
+                iter(chunks), fs, len(chunks),
+                preparing="preparing QRL?", sending="sending QRL?", done=done,
+            )
+        except Exception as error:
+            self._on_error(str(error))
+            self._set(TxPhase.FAILED, self.state.progress, str(error))
+            return False
+
+    def _sdr_send(self, chunks, fs: int, *, max_seconds: float, done: str | None = None) -> bool:
+        from .sdr import transmit_pluto
+        from .hackrf import transmit_hackrf
+
+        settings = self.station.settings
+        transport = transmit_hackrf if settings.tx_backend == "hackrf" else transmit_pluto
+        label = "HackRF" if settings.tx_backend == "hackrf" else "Pluto"
+        self._set(TxPhase.ENCODING, 0.0, f"Preparing {label} transmit")
+        complete = transport(
+            chunks, fs, settings, self._cancel,
+            lambda progress: self._set(TxPhase.SENDING, progress, f"{label} transmitting"),
+            max_seconds=max_seconds,
+            **({"diagnostics": self.sdr_health} if settings.tx_backend == "pluto" else {}),
+        )
+        self._set(TxPhase.DONE if complete else TxPhase.CANCELLED,
+                  1.0 if complete else self.state.progress,
+                  (done or f"{label} off · sent") if complete else f"{label} off · cancelled")
+        return complete
 
     def _composite_chunks(
         self,
@@ -1063,7 +1107,16 @@ class TxEngine:
         self._set(TxPhase.DONE, 1.0, "sent")
         return True
 
-    def _keyed_send_stream(self, chunks, fs: int, n_gops: int) -> bool:
+    def _keyed_send_stream(
+        self,
+        chunks,
+        fs: int,
+        n_gops: int,
+        *,
+        preparing: str = "preparing first live GOP before PTT",
+        sending: str = "encoding and sending live GOPs",
+        done: str = "sent",
+    ) -> bool:
         """Key once while GOPs are encoded, modulated, and written incrementally."""
         settings = self.station.settings
         # Build a small rolling buffer before keying. The previous path first
@@ -1102,7 +1155,7 @@ class TxEngine:
                 if item is sentinel or isinstance(item, Exception):
                     return
 
-        self._set(TxPhase.ENCODING, 0.0, "preparing first live GOP before PTT")
+        self._set(TxPhase.ENCODING, 0.0, preparing)
         producer = threading.Thread(target=produce, name="aetv-tx-producer", daemon=True)
         producer.start()
         first = ready.get()
@@ -1189,7 +1242,7 @@ class TxEngine:
             watchdog.start()
             if self._cancel.wait(settings.ptt_lead_s):
                 return False
-            self._set(TxPhase.SENDING, 0.0, "encoding and sending live GOPs")
+            self._set(TxPhase.SENDING, 0.0, sending)
             if flex_session is not None:
                 flex_chunks = chunks
                 flex_rate = fs
@@ -1240,7 +1293,7 @@ class TxEngine:
             except Exception:
                 pass
             producer.join(timeout=30.0)
-        self._set(TxPhase.DONE, 1.0, "sent")
+        self._set(TxPhase.DONE, 1.0, done)
         return True
 
     def _live_webcam_gops(self, codec, n_gops: int):
