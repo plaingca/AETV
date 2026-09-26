@@ -56,6 +56,18 @@ LATENTS_PER_FRAME_U = NC_LATENT_U * DATA_SYMS_PER_FRAME * 2  # 158 * 4 * 2 = 126
 LATENTS_PER_GOP_U = FRAMES_PER_GOP * LATENTS_PER_FRAME_U  # 8 * 1264 = 10112 real values
 FS_U = 24000  # 24 kHz audio sample rate for Ultra-Wide / Flex VITA-49
 
+# Variant M (Mid / Wide-4k): 76 carriers (75 latent + 1 beacon), 1100-4850 Hz (~3.8 kHz)
+# Sized for 6 kHz transmit filters: the occupied band sits inside 900-5050 Hz,
+# and 3.8 kHz of video leaves ~2 kHz of the same filter for program audio.
+NC_M = 76
+CARRIER0_M = 1100
+FCENTER_M = 3000
+BEACON_CARRIER_M = NC_M - 1  # index 75
+NC_LATENT_M = NC_M - 1  # 75
+LATENTS_PER_FRAME_M = NC_LATENT_M * DATA_SYMS_PER_FRAME * 2  # 75 * 4 * 2 = 600 real values
+LATENTS_PER_GOP_M = FRAMES_PER_GOP * LATENTS_PER_FRAME_M  # 8 * 600 = 4800 real values
+FS_M = 12000  # 12 kHz audio sample rate; Nyquist clears the 4.85 kHz top carrier
+
 # --- Beacon side-channel ---------------------------------------------------
 # Base beacon rate is 4 chips/frame = 32 chips/s. U/V7 uses I/Q on its
 # beacon and spare guard carriers for four lanes = 128 chips/s.
@@ -91,6 +103,7 @@ CLIP_HEADROOM_DB = 0.5
 TX_BANDPASS_N = (850.0, 2200.0)  # Hz
 TX_BANDPASS_W = (350.0, 2750.0)  # Hz
 TX_BANDPASS_U = (500.0, 9500.0)  # Hz; margin around 1000..8950 Hz carriers
+TX_BANDPASS_M = (900.0, 5050.0)  # Hz; margin around 1100..4850 Hz carriers
 DEMOD_BACKOFF = 8  # samples
 SNR_REF_BW_HZ = 2500.0
 PROTOCOL_VERSION = 4
@@ -117,6 +130,12 @@ PILOT_QUADRANTS_45 = (
     0, 3, 2, 0, 2, 3, 0, 1, 2, 0, 1, 2, 3, 3, 0,
     0, 2, 3, 1, 2, 2, 2, 0, 3, 2, 1, 2, 0, 3, 1,
     0, 3, 1, 0, 0, 1, 0, 2, 3, 2, 3, 2, 0, 3, 3,
+)
+
+# Lowest preamble PAPR (7.7 dB, 4x oversampled) of 4,000 random.Random seeds; seed 3881.
+PILOT_QUADRANTS_76 = (
+    1, 2, 1, 3, 0, 1, 0, 3, 2, 3, 2, 1, 2, 2, 1, 0, 3, 3, 2, 0, 0, 1, 2, 1, 2, 2, 0, 0, 1, 1, 1, 3, 0, 2, 0, 3, 1, 3,
+    0, 2, 2, 1, 0, 2, 2, 2, 2, 2, 0, 3, 2, 3, 3, 0, 3, 2, 2, 3, 1, 3, 2, 3, 3, 3, 3, 1, 2, 0, 2, 2, 0, 3, 3, 2, 2, 0,
 )
 
 PILOT_QUADRANTS_160 = (
@@ -185,6 +204,20 @@ BAND_U = AETVBandGeometry(
     fs=FS_U,
 )
 
+BAND_M = AETVBandGeometry(
+    name="M",
+    carriers=NC_M,
+    carrier0_hz=CARRIER0_M,
+    fcenter_hz=FCENTER_M,
+    beacon_carrier=BEACON_CARRIER_M,
+    latent_carriers=NC_LATENT_M,
+    latents_per_frame=LATENTS_PER_FRAME_M,
+    latents_per_gop=LATENTS_PER_GOP_M,
+    tx_bandpass=TX_BANDPASS_M,
+    pilot_quadrants=PILOT_QUADRANTS_76,
+    fs=FS_M,
+)
+
 # AC16 is a separate guarded 16 kHz waveform. Slot 300 is reserved (zero
 # during data); slot 301 is the beacon. Neither carries video side information.
 BAND_A = AETVBandGeometry(
@@ -196,7 +229,7 @@ BAND_A = AETVBandGeometry(
     fs=48000,
 )
 
-BANDS = {"N": BAND_N, "W": BAND_W, "U": BAND_U, "A": BAND_A}
+BANDS = {"N": BAND_N, "W": BAND_W, "M": BAND_M, "U": BAND_U, "A": BAND_A}
 
 
 
@@ -336,6 +369,18 @@ AETV_MODES: dict[str, AETVModeSpec] = {
         causal=False,
         description="Standard channel: 192x108 16:9 @ 6 fps for typical HF/VHF SSB audio",
     ),
+    "V9": AETVModeSpec(
+        name="V9",
+        index=9,
+        band="M",
+        width=192,
+        height=108,
+        fps=6.0,
+        gop_frames=6,
+        latents_per_gop=LATENTS_PER_GOP_M,  # 4800
+        causal=False,
+        description="Wide 4 kHz: 192x108 16:9 @ 6 fps for 6 kHz transmit filters (12 kHz audio)",
+    ),
 }
 
 
@@ -348,10 +393,11 @@ AETV_MODES["AC16"] = AETVModeSpec(
 # Modes with pinned, checksum-verified release checkpoints. Historical modes
 # remain decodable at the protocol layer, but are intentionally hidden from the
 # release GUI until they have validated weights of their own.
-RELEASE_MODES: tuple[str, ...] = ("V8", "V7", "AC16")
+RELEASE_MODES: tuple[str, ...] = ("V8", "V9", "V7", "AC16")
 RELEASE_MODE_LABELS = {
     "AC16": "AC16 · 16 kHz — 256×144 @ 10 fps",
     "V8": "Standard channel — 192×108 @ 6 fps",
+    "V9": "Wide 4 kHz — 192×108 @ 6 fps",
     "V7": "Wide 8 kHz — 256×144 @ 12 fps",
 }
 

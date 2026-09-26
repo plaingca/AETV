@@ -32,7 +32,7 @@ from .config import (
     SYMS_PER_FRAME,
     reference_noise_bandwidth_scale,
 )
-from .framing import GOP_INTERLEAVER_N, GOP_INTERLEAVER_W, GOP_INTERLEAVER_U
+from .framing import GOP_INTERLEAVER_M, GOP_INTERLEAVER_N, GOP_INTERLEAVER_U, GOP_INTERLEAVER_W, derive_gop_interleaver
 from .ofdm import pilot_sequence
 
 
@@ -169,8 +169,12 @@ class AETVWaveformChannel(nn.Module):
             perm = GOP_INTERLEAVER_N
         elif band == "W":
             perm = GOP_INTERLEAVER_W
-        else:
+        elif band == "M":
+            perm = GOP_INTERLEAVER_M
+        elif band == "U":
             perm = GOP_INTERLEAVER_U
+        else:
+            perm = derive_gop_interleaver(self.geometry.latents_per_gop)
         self.register_buffer("tx_perm", torch.from_numpy(perm).long())
         inv_perm = np.empty_like(perm)
         inv_perm[perm] = np.arange(len(perm))

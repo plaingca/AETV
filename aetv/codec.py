@@ -23,6 +23,7 @@ from .tls import download_ssl_context
 DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-face-gan.pt"
 MODE_DEFAULT_CHECKPOINTS = {
     "V7": Path("models") / "v8-flex8k-ota-rxfix.pt",
+    "V9": Path("models") / "v9-wide4k.pt",
     "AC16": Path("models") / "ac16-best-inference.pt",
 }
 DEFAULT_MODE = "V8"
@@ -44,6 +45,11 @@ RELEASE_CHECKPOINTS = {
         "filename": "v8-hf3k-face-gan.pt",
         "bytes": 215759785,
         "sha256": "f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40",
+    },
+    "V9": {
+        "filename": "v9-wide4k.pt",
+        "bytes": 215987409,
+        "sha256": "15ada7b19f24a6e475dd7d0cab3c130903a45e41c4287e2817674b9e3bb4a51b",
     },
 }
 RELEASE_RUNTIME_FILES = {
@@ -87,6 +93,20 @@ RELEASE_RUNTIME_FILES = {
         "v8-hf3k-face-gan.decoder.onnx": {
             "bytes": 98874127,
             "sha256": "34f881ba7d5095cc01991f70d51c4821f584cba0473ca77f9aa393a2f8ac9d1a",
+        },
+    },
+    "V9": {
+        "v9-wide4k.runtime.json": {
+            "bytes": 351,
+            "sha256": "699b8be541cf6c83c92cbc2fef575879052fc115616bd23b83beb087db031a2f",
+        },
+        "v9-wide4k.encoder.onnx": {
+            "bytes": 117166474,
+            "sha256": "fdb19bd793e60fc3726cda03e708a05a41c550db1702d7fd314e3de4876e8779",
+        },
+        "v9-wide4k.decoder.onnx": {
+            "bytes": 99094395,
+            "sha256": "3cc63423ab7cb77a2f0f43933aa474ed2e4609f6bc147029855d2434e35fb98f",
         },
     },
 }

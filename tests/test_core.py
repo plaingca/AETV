@@ -9,6 +9,7 @@ from aetv import (
     AETV_MODES,
     AETV_MODES_BY_INDEX,
     RELEASE_MODES,
+    BAND_M,
     BAND_N,
     BAND_U,
     BAND_W,
@@ -149,11 +150,11 @@ def test_aetv_band_geometries():
 
 
 def test_aetv_modes_specs():
-    for name in ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8"]:
+    for name in ["V0", "V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9"]:
         mode = AETV_MODES[name]
         assert mode.name == name
         assert mode.index in AETV_MODES_BY_INDEX
-        assert mode.latents_per_gop in (1472, 2816, 10112)
+        assert mode.latents_per_gop in (1472, 2816, 4800, 10112)
         assert mode.gop_frames in (1, 6, 10, 12)
         assert mode.pixels_per_latent > 10.0
     assert AETV_MODES["V7"].band == "U"
@@ -165,7 +166,7 @@ def test_aetv_modes_specs():
     assert AETV_MODES["V8"].height == 108
     assert AETV_MODES["V8"].fps == 6.0
     assert AETV_MODES["V8"].geometry.tx_bandpass[1] <= 3000.0
-    assert RELEASE_MODES == ("V8", "V7", "AC16")
+    assert RELEASE_MODES == ("V8", "V9", "V7", "AC16")
 
 
 def test_v8_transmit_waveform_stays_inside_nominal_3khz_channel():
@@ -204,7 +205,7 @@ def test_v8_modem_decodes_through_stereo_iq_audio_loopback():
 
 
 def test_pilot_sequence_and_papr():
-    for band, geom in [("N", BAND_N), ("W", BAND_W), ("U", BAND_U)]:
+    for band, geom in [("N", BAND_N), ("W", BAND_W), ("M", BAND_M), ("U", BAND_U)]:
         p = ofdm.pilot_sequence(band)
         assert len(p) == geom.carriers
         assert np.allclose(np.abs(p), 1.0)
@@ -897,7 +898,7 @@ def test_v7_header_repetition_survives_loss_of_legacy_carriers():
 
 
 def test_gop_framing_and_interleaving():
-    for band, geom in [("N", BAND_N), ("W", BAND_W), ("U", BAND_U)]:
+    for band, geom in [("N", BAND_N), ("W", BAND_W), ("M", BAND_M), ("U", BAND_U)]:
         latents = np.random.randn(geom.latents_per_gop).astype(np.float32)
         beacon_chips = np.ones(32, dtype=np.float32)
 
@@ -1066,6 +1067,7 @@ def test_aetv_end_to_end_modem_clean_loopback():
         ("V0", "N", BAND_N),
         ("V1", "W", BAND_W),
         ("V8", "W", BAND_W),
+        ("V9", "M", BAND_M),
         ("V7", "U", BAND_U),
     ]:
         gop_lat = rng.standard_normal(geom.latents_per_gop).astype(np.float32)
