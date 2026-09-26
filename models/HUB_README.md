@@ -21,7 +21,15 @@ from this repository and verifies each byte count and SHA-256 before use.
 | Mode | Training checkpoint | Runtime bundle | Video/waveform |
 |---|---|---|---|
 | V7 | `v8-flex8k-ota-rxfix.pt` | `v8-flex8k-ota-rxfix.{encoder,decoder}.onnx` | 256×144 at 12 fps; receiver-corrected Flex-8k OTA model |
-| V8 | `v8-hf3k-face-gan.pt` | `v8-hf3k-face-gan.{encoder,decoder}.onnx` | 192×108 at 6 fps; face-perceptual/GAN model |
+| V8 | `v8-hf3k-mpp12-ft.pt` | `v8-hf3k-mpp12-ft.{encoder,decoder}.onnx` | 192×108 at 6 fps; face-GAN model fine-tuned through the V8 modem and `mpp12` fading |
+| V9 | `v9-wide4k.pt` | `v9-wide4k.{encoder,decoder}.onnx` | 192×108 at 6 fps on a 3.8 kHz band for 6 kHz transmit filters |
+
+`v8-hf3k-face-gan.pt` and its runtime bundle remain available as the previous
+V8 default. Both ends of a V8 link should use the same checkpoint.
+
+`v8-gop-refiner-motion.pt` is an optional receiver-side GOP-boundary refiner
+(`aetv.gop_boundary`) for `v8-hf3k-mpp12-ft.pt`. It adds one GOP (1 s) of
+latency and is listed under `receiver_files` in `manifest.json`.
 
 The other files are reproducibility snapshots and operating-point variants.
 `v7-flex8k-severe*.pt` are inference-only exports; optimizer and discriminator

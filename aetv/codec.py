@@ -20,7 +20,7 @@ import numpy as np
 from .config import AETV_MODES, AETVModeSpec
 from .tls import download_ssl_context
 
-DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-face-gan.pt"
+DEFAULT_CHECKPOINT = Path("models") / "v8-hf3k-mpp12-ft.pt"
 MODE_DEFAULT_CHECKPOINTS = {
     "V7": Path("models") / "v8-flex8k-ota-rxfix.pt",
     "V9": Path("models") / "v9-wide4k.pt",
@@ -28,7 +28,11 @@ MODE_DEFAULT_CHECKPOINTS = {
 }
 DEFAULT_MODE = "V8"
 HF_MODEL_REPO = "AETV/AETV"
-HF_MODE_REVISIONS = {"AC16": "6f3a4cd4df1e8b261141da75988f3df2750666db"}
+HF_MODE_REVISIONS = {
+    "AC16": "6f3a4cd4df1e8b261141da75988f3df2750666db",
+    "V8": "526c439230c367d024f11e039785e303843a024a",
+    "V9": "526c439230c367d024f11e039785e303843a024a",
+}
 HF_MODEL_REVISION = "7ed90b4a902937248c4408d9e02c29b876b07a75"
 RELEASE_CHECKPOINTS = {
     "AC16": {
@@ -42,9 +46,9 @@ RELEASE_CHECKPOINTS = {
         "sha256": "294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f",
     },
     "V8": {
-        "filename": "v8-hf3k-face-gan.pt",
-        "bytes": 215759785,
-        "sha256": "f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40",
+        "filename": "v8-hf3k-mpp12-ft.pt",
+        "bytes": 215739153,
+        "sha256": "a8a60ade9d7f6e178c7595b2c10b96c26f5bd003d44c9c03d5bedbfdfe67f2f7",
     },
     "V9": {
         "filename": "v9-wide4k.pt",
@@ -82,17 +86,17 @@ RELEASE_RUNTIME_FILES = {
         },
     },
     "V8": {
-        "v8-hf3k-face-gan.runtime.json": {
-            "bytes": 256,
-            "sha256": "02e0297d4102eb08e96daec2579f1f5fe2ba45631334f1b48659461420b10890",
+        "v8-hf3k-mpp12-ft.runtime.json": {
+            "bytes": 372,
+            "sha256": "5386dee6759f08e0006178c87f2b96e903290aff0c7f0489d46f9034d0423779",
         },
-        "v8-hf3k-face-gan.encoder.onnx": {
+        "v8-hf3k-mpp12-ft.encoder.onnx": {
             "bytes": 117083518,
-            "sha256": "48659a6caf57cdca848a9b2a2bb475020e2d247bb59452a135f705dedb9d2362",
+            "sha256": "44db8d474abe29d812bd25f9989b86278d7fb2300a9d47791b1ddeb428b57465",
         },
-        "v8-hf3k-face-gan.decoder.onnx": {
+        "v8-hf3k-mpp12-ft.decoder.onnx": {
             "bytes": 98874127,
-            "sha256": "34f881ba7d5095cc01991f70d51c4821f584cba0473ca77f9aa393a2f8ac9d1a",
+            "sha256": "88070586d80939b2caa11db911e89c9ff84aa4503582d9d2ae4b3d03d1e60d48",
         },
     },
     "V9": {

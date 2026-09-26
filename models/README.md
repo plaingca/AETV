@@ -8,11 +8,12 @@ chooser opens automatically at startup. Set `AETV_MODEL_DIR` to choose another
 cache directory or `AETV_OFFLINE=1` to disable network access. Command-line
 tools continue to download a missing default automatically.
 
-The two GUI modes use these defaults:
+The V8, V9 and V7 GUI modes use these defaults:
 
 | GUI mode | File | Purpose | SHA-256 |
 |---|---|---|---|
-| Standard channel | `v8-hf3k-face-gan.pt` | Default app mode; face/detail-tuned 192×108 model for standard radio audio | `f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40` |
+| Standard channel | `v8-hf3k-mpp12-ft.pt` | Default app mode; the face-GAN model fine-tuned through the V8 modem and `mpp12` fading ([report](../docs/v8-mpp12-ft.md)) | `a8a60ade9d7f6e178c7595b2c10b96c26f5bd003d44c9c03d5bedbfdfe67f2f7` |
+| Wide 4 kHz | `v9-wide4k.pt` | 192×108 on a 3.8 kHz band for 6 kHz transmit filters ([report](../docs/v9-wide4k.md)) | `15ada7b19f24a6e475dd7d0cab3c130903a45e41c4287e2817674b9e3bb4a51b` |
 | Wide 8 kHz | `v8-flex8k-ota-rxfix.pt` | Receiver-adapted 256×144 model verified on a 71-GOP OTA sweep | `294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f` |
 
 Additional Wide 8 kHz research checkpoints:
@@ -76,7 +77,9 @@ not stored in git; copy the exported inference checkpoints into `models/`:
 
 | File | Purpose | SHA-256 |
 |---|---|---|
-| `v8-hf3k-face-gan.pt` | V8 default; OpenVid-1M stage-2 model with localized face perceptual/GAN fine-tuning | `f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40` |
+| `v8-hf3k-mpp12-ft.pt` | V8 default; `v8-hf3k-face-gan.pt` fine-tuned through the V8 modem and `mpp12` | `a8a60ade9d7f6e178c7595b2c10b96c26f5bd003d44c9c03d5bedbfdfe67f2f7` |
+| `v8-gop-refiner-motion.pt` | Optional receiver-side GOP-boundary refiner for `v8-hf3k-mpp12-ft.pt` (`aetv.gop_boundary`, one GOP of latency; not used by the live receiver) | `9afda104e9c0801bc62356ea5dcb5d745f625319506a00e2a1bc26829871a833` |
+| `v8-hf3k-face-gan.pt` | Former V8 default; OpenVid-1M stage-2 model with localized face perceptual/GAN fine-tuning | `f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40` |
 | `v8-hf3k-perceptual.pt` | Former V8 default; motion-aware perceptual fine-tune | `35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707` |
 | `v8-hf3k-robust.pt` | Alternate for 0 dB and severe MPP fading | `4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd` |
 

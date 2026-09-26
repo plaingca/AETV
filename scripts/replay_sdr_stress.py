@@ -39,7 +39,7 @@ def finite(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("iq", type=Path)
-    parser.add_argument("--mode", choices=["V8", "V7", "AC16", "V8_AV", "AC16_AV"], required=True)
+    parser.add_argument("--mode", choices=["V8", "V9", "V7", "AC16", "V8_AV", "AC16_AV"], required=True)
     parser.add_argument("--output", type=Path, required=True, help="Output prefix (.json/.npz)")
     parser.add_argument("--join", type=float, default=0, help="Seconds discarded before starting a fresh receiver")
     parser.add_argument("--limit", type=float, default=0)
@@ -96,6 +96,10 @@ def main():
 
     class Input:
         position = 0
+
+        def empty(self):
+            # A live receiver keeping up with the radio sees an empty queue between blocks.
+            return True
 
         def get(self, timeout):
             if self.position >= len(raw):
