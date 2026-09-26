@@ -37,8 +37,9 @@ def to_bgr(frame: torch.Tensor) -> np.ndarray:
 
 
 def label(img: np.ndarray, text: str, y: int = 22, color=(255, 255, 255)) -> None:
-    cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1, cv2.LINE_AA)
+    (w, h), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.rectangle(img, (4, y - h - 4), (12 + w, y + base), (0, 0, 0), -1)
+    cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
 
 def panel_row(views: list[torch.Tensor], t: int, psnrs: list[list[float] | None]) -> np.ndarray:
