@@ -1241,6 +1241,7 @@ class TxEngine:
                 return False
             watchdog.start()
             if self._cancel.wait(settings.ptt_lead_s):
+                self._set(TxPhase.CANCELLED, 0.0, "cancelled")
                 return False
             self._set(TxPhase.SENDING, 0.0, sending)
             if flex_session is not None:
