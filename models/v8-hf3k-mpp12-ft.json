@@ -1,0 +1,11 @@
+{
+  "path": "models/v8-hf3k-mpp12-ft.pt",
+  "mode": "V8",
+  "step": 3000,
+  "source_run": "runs/v8-mpp-only-ft (channel-only fine-tune of v8-hf3k-face-gan)",
+  "init_checkpoint": "models/v8-hf3k-face-gan.pt",
+  "bytes": 215739153,
+  "sha256": "a8a60ade9d7f6e178c7595b2c10b96c26f5bd003d44c9c03d5bedbfdfe67f2f7",
+  "model_width": 128,
+  "latent_channels": 3
+}
