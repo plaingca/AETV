@@ -2,7 +2,8 @@
   "repo_id": "AETV/AETV",
   "default_by_mode": {
     "V7": "v8-flex8k-ota-rxfix.pt",
-    "V8": "v8-hf3k-face-gan.pt"
+    "V8": "v8-hf3k-face-gan.pt",
+    "V9": "v9-wide4k.pt"
   },
   "files": {
     "v7-flex8k.pt": {"bytes": 215756107, "sha256": "afe476e5c5681210817a8e0598ec38ef40bdbd609485ad10d7a13ae9e6cd460b"},
@@ -16,6 +17,7 @@
     "v8-hf3k-openvid-step30000.pt": {"bytes": 215762731, "sha256": "632a195c616d02d789e4386f120d9e7b148c1353bec3918f37773e2df7fc2930"},
     "v8-hf3k-openvid-step56000.pt": {"bytes": 215762731, "sha256": "8ca3c1642214640e6d4c479ae5af01af7d9e9fc11b843dfb5fd9de15e9d6e89d"},
     "v8-hf3k-perceptual.pt": {"bytes": 215759629, "sha256": "35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707"},
-    "v8-hf3k-robust.pt": {"bytes": 215757893, "sha256": "4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd"}
+    "v8-hf3k-robust.pt": {"bytes": 215757893, "sha256": "4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd"},
+    "v9-wide4k.pt": {"bytes": 215987409, "sha256": "15ada7b19f24a6e475dd7d0cab3c130903a45e41c4287e2817674b9e3bb4a51b"}
   }
 }

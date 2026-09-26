@@ -17,6 +17,7 @@ from aetv.codec import (
     AETVCodec,
     DEFAULT_MODE,
     RELEASE_CHECKPOINTS,
+    RELEASE_RUNTIME_FILES,
     download_default_checkpoint,
     download_runtime_bundle,
     inspect_release_model,
@@ -31,7 +32,8 @@ WIDE_CHECKPOINT = Path("models") / "v8-flex8k-ota-rxfix.pt"
 
 def test_default_mode_is_the_standard_channel_release():
     assert DEFAULT_MODE == "V8"
-    assert set(RELEASE_CHECKPOINTS) == {"V7", "V8", "AC16"}
+    assert set(RELEASE_CHECKPOINTS) == {"V7", "V8", "V9", "AC16"}
+    assert set(RELEASE_RUNTIME_FILES) == set(RELEASE_CHECKPOINTS)
 
 
 def test_resolve_checkpoint_from_environment(tmp_path, monkeypatch):
