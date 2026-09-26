@@ -240,21 +240,38 @@ class TransmitPanel(QWidget):
                 self.status.setText("Live preview did not stop; transmit was not started")
                 return
             self._camera_preview_queued.clear()
+        self._begin_transmit(lambda: self.engine.transmit(source), "preparing transmit…")
+
+    def send_qrl(self) -> None:
+        """Ask "QRL?" on every 2.5 kHz slot the selected mode would occupy."""
+        if self.transmitting():
+            return
+        self._apply_panel_settings()
+        if self.emulating():
+            self.status.setText("QRL? needs the Radio route")
+            return
+        problems = self.station.settings.validate(radio_tx=True, receive=False)
+        if problems:
+            self.status.setText(problems[0])
+            return
+        self._begin_transmit(self.engine.transmit_qrl, "preparing QRL?…")
+
+    def _begin_transmit(self, job, message: str) -> None:
         self.send_button.setEnabled(False)
+        self.qrl_button.setEnabled(False)
         self.mode.setEnabled(False)
         self.cancel_button.setEnabled(True)
-        self.mode.setEnabled(False)
         self.microphone.setEnabled(False)
         self.output.setEnabled(False)
         for button in self.channel_buttons.buttons():
             button.setEnabled(False)
         self._reset_audio_levels()
         self.progress.setValue(0)
-        self.status.setText("preparing transmit…")
+        self.status.setText(message)
         self._start_gate.clear()
         self._cancel_requested.clear()
         self.transmitStarted.emit()
-        self._thread = threading.Thread(target=self._run_send, args=(source,), daemon=True, name="aetv-tx")
+        self._thread = threading.Thread(target=self._run_transmit, args=(job,), daemon=True, name="aetv-tx")
         self._thread.start()
 
     def cancel(self) -> None:
@@ -263,7 +280,7 @@ class TransmitPanel(QWidget):
         self.engine.cancel()
         self.status.setText("cancelling…")
 
-    def _run_send(self, source: str | ScreenCaptureSpec | PreparedClip) -> None:
+    def _run_transmit(self, job) -> None:
         try:
             self._start_gate.wait()
             if self._cancel_requested.is_set():
@@ -271,7 +288,7 @@ class TransmitPanel(QWidget):
                     TxState(TxPhase.CANCELLED, 0.0, "cancelled")
                 )
                 return
-            self.engine.transmit(source)
+            job()
         finally:
             # Terminal state signals can reach the event loop before this
             # thread returns.  Clear the worker first, then let the UI restart
@@ -335,7 +352,13 @@ class TransmitPanel(QWidget):
         self.send_button = QPushButton("Send")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
+        self.qrl_button = QPushButton("QRL?")
+        self.qrl_button.setToolTip(
+            "Ask if the frequency is in use: keys a short CW \"QRL? DE <call>\" on every "
+            "2.5 kHz SSB slot the selected mode would occupy. Watch the waterfall for replies."
+        )
         self.send_button.clicked.connect(self.send)
+        self.qrl_button.clicked.connect(self.send_qrl)
         self.cancel_button.clicked.connect(self.cancel)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -411,6 +434,7 @@ class TransmitPanel(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(self.send_button)
         buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.qrl_button)
         buttons.addStretch(1)
         strip.addLayout(src)
         strip.addLayout(screen_row)
@@ -910,6 +934,7 @@ class TransmitPanel(QWidget):
         self.station.settings.tx_channel_profile = profile
         testing = profile != "radio"
         self.output.setEnabled(not testing)
+        self.qrl_button.setEnabled(not testing)
         self.send_button.setText("Run loopback" if testing else "Send")
 
     def _selected_mode_name(self) -> str:
