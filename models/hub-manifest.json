@@ -2,7 +2,7 @@
   "repo_id": "AETV/AETV",
   "default_by_mode": {
     "V7": "v8-flex8k-ota-rxfix.pt",
-    "V8": "v8-hf3k-face-gan.pt",
+    "V8": "v8-hf3k-mpp12-ft.pt",
     "V9": "v9-wide4k.pt"
   },
   "files": {
@@ -12,6 +12,7 @@
     "v8-flex8k-ota-perceptual.pt": {"bytes": 215761913, "sha256": "425f112924693170c61cebb6ab5865bd526714a4afae9aec88a37709441b5d47"},
     "v8-flex8k-ota-rxfix.pt": {"bytes": 215759999, "sha256": "294987591b8ece1cb6fd6ad10349a160192e4e6fefc26d47bbbefd9cce9a778f"},
     "v8-hf3k-detail-face-step12000.pt": {"bytes": 215764467, "sha256": "d50cd2cf0bd05eaf9422b1bc9320f0a854c3ad85884114c4f2bf6cbae1381404"},
+    "v8-hf3k-mpp12-ft.pt": {"bytes": 215739153, "sha256": "a8a60ade9d7f6e178c7595b2c10b96c26f5bd003d44c9c03d5bedbfdfe67f2f7"},
     "v8-hf3k-face-gan.pt": {"bytes": 215759785, "sha256": "f218376af9f9916050c9e345353da0c0970c392f58755efaa81d01e7ded8fc40"},
     "v8-hf3k-openvid-best.pt": {"bytes": 215760817, "sha256": "5e6c24f334d25edcfae6b770ee84bccce311061a4f5db89112f1047792f536d3"},
     "v8-hf3k-openvid-step30000.pt": {"bytes": 215762731, "sha256": "632a195c616d02d789e4386f120d9e7b148c1353bec3918f37773e2df7fc2930"},
@@ -19,5 +20,8 @@
     "v8-hf3k-perceptual.pt": {"bytes": 215759629, "sha256": "35fb34a981976070ca7cb6b54e157b3e8ec9f1b44f12f9fc55d26288bc83e707"},
     "v8-hf3k-robust.pt": {"bytes": 215757893, "sha256": "4620845d282064b2007d1cd620892f96ae3fc8dfc62caf1bb3f244897ebb7cbd"},
     "v9-wide4k.pt": {"bytes": 215987409, "sha256": "15ada7b19f24a6e475dd7d0cab3c130903a45e41c4287e2817674b9e3bb4a51b"}
+  },
+  "receiver_files": {
+    "v8-gop-refiner-motion.pt": {"bytes": 27460830, "sha256": "9afda104e9c0801bc62356ea5dcb5d745f625319506a00e2a1bc26829871a833", "codec": "v8-hf3k-mpp12-ft.pt"}
   }
 }

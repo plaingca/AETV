@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 
 from aetv.config import AETV_MODES
+from aetv.gop_boundary import load_refiner
 from aetv.models import AETVAutoencoder
 
 
@@ -26,10 +27,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("release_dir", type=Path)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--only", nargs="+", help="verify just these staged files")
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text())
+    wanted = set(args.only or [])
+    unknown = wanted - set(manifest["files"]) - set(manifest.get("receiver_files", {}))
+    assert not unknown, f"not in manifest: {sorted(unknown)}"
 
     for filename, expected in manifest["files"].items():
+        if wanted and filename not in wanted:
+            continue
         path = args.release_dir / filename
         assert path.stat().st_size == expected["bytes"], filename
         assert sha256_file(path) == expected["sha256"], filename
@@ -46,6 +53,16 @@ def main() -> None:
         )
         model.load_state_dict(payload["model_state_dict"], strict=True)
         print(f"ok {filename} ({mode_name}, step {payload.get('step')})", flush=True)
+
+    for filename, expected in manifest.get("receiver_files", {}).items():
+        if wanted and filename not in wanted:
+            continue
+        path = args.release_dir / filename
+        assert path.stat().st_size == expected["bytes"], filename
+        assert sha256_file(path) == expected["sha256"], filename
+        assert expected["codec"] in manifest["files"], (filename, expected["codec"])
+        load_refiner(path, "cpu")
+        print(f"ok {filename} (receiver refiner for {expected['codec']})", flush=True)
 
 
 if __name__ == "__main__":
