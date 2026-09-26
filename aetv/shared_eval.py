@@ -26,7 +26,29 @@ import torch.nn.functional as F
 from .config import AETV_MODES
 from .hfchannel import emulate
 from .modem import demodulate_gop_stream, modulate_gop_stream
-from .narrowband_jscc import global_ssim, impair_wire
+
+
+def impair_wire(wire: torch.Tensor, snr_db: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """AWGN for a unit-RMS latent, with the scalar Wiener gain as confidence."""
+    snr_linear = 10.0 ** (float(snr_db) / 10.0)
+    noise = torch.randn_like(wire) / math.sqrt(snr_linear)
+    return wire + noise, torch.full_like(wire, snr_linear / (snr_linear + 1.0))
+
+
+def global_ssim(reference: torch.Tensor, reconstruction: torch.Tensor) -> float:
+    """Per-frame global SSIM."""
+    c1, c2 = 0.01**2, 0.03**2
+    dims = (-2, -1)
+    mu_x = reference.mean(dim=dims, keepdim=True)
+    mu_y = reconstruction.mean(dim=dims, keepdim=True)
+    var_x = reference.square().mean(dim=dims, keepdim=True) - mu_x.square()
+    var_y = reconstruction.square().mean(dim=dims, keepdim=True) - mu_y.square()
+    cov = (reference * reconstruction).mean(dim=dims, keepdim=True) - mu_x * mu_y
+    value = ((2 * mu_x * mu_y + c1) * (2 * cov + c2)) / (
+        (mu_x.square() + mu_y.square() + c1) * (var_x.clamp_min(0) + var_y.clamp_min(0) + c2)
+    )
+    return float(value.clamp(0, 1).mean().item())
+
 
 DEFAULT_CACHE = "data/openvid_aetv_cache/mode_ac6_192x108_12f"
 DEFAULT_FACE_MODEL = "data/teachers/face_detection_yunet_2023mar.onnx"
