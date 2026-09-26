@@ -31,6 +31,22 @@ class IQDecimator:
         return result.astype(np.complex64)
 
 
+def _oscillator(start, count, frequency_hz, sample_rate):
+    """exp(2j*pi*f*n/fs) for n in [start, start+count), tiled when periodic.
+
+    A complex exp per sample dominated 9.6 MS/s HackRF conversion. Integer
+    offsets repeat after fs/gcd(f, fs) samples, so a short exact table suffices.
+    """
+    if float(frequency_hz).is_integer():
+        period = sample_rate // math.gcd(abs(int(frequency_hz)), sample_rate)
+        if period <= 1 << 16:
+            table = np.exp(2j * np.pi * np.remainder(
+                np.arange(period) * (frequency_hz / sample_rate), 1))
+            return np.resize(np.roll(table, -(start % period)), count)
+    positions = start + np.arange(count)
+    return np.exp(2j * np.pi * np.remainder(positions * (frequency_hz / sample_rate), 1))
+
+
 class ModemToIQ:
     """Select the analytic sideband, interpolate and translate with retained state.
 
@@ -39,6 +55,11 @@ class ModemToIQ:
     sqrt(2) preserves the real-modem power in complex IQ. This causal adapter
     adds 522/48000 seconds of FIR delay without changing the wire geometry.
     AC16 A/V instead uses a 10 kHz center for its complete 20 kHz composite.
+
+    Rates above 960 kHz that are multiples of it (HackRF's 9.6 MS/s)
+    interpolate to 960 kHz with the same filter, then use a short image-reject
+    stage: one 200x FIR cost more than real time. That stage adds
+    30 output samples of delay.
     """
 
     def __init__(self, sample_rate=2400000, offset_hz=100000, center_hz=8000,
@@ -59,11 +80,19 @@ class ModemToIQ:
         self.factor = sample_rate // 48000
         self.sideband_taps = firwin(1025, center_hz, fs=48000)
         self.sideband_state = np.zeros(1024, np.complex128)
+        self.image_factor = 1
+        if sample_rate > 960000 and sample_rate % 960000 == 0:
+            self.image_factor = sample_rate // 960000
+        first = self.factor // self.image_factor
         self.interpolation_taps = (
-            firwin(20 * self.factor + 1, 1 / self.factor, window=("kaiser", 5.0))
-            * self.factor
+            firwin(20 * first + 1, 1 / first, window=("kaiser", 5.0)) * first
         )
         self.history = np.zeros(20, np.complex128)
+        if self.image_factor > 1:
+            self.image_taps = firwin(
+                6 * self.image_factor + 1, 1 / self.image_factor, window=("kaiser", 8.0)
+            ) * self.image_factor
+            self.image_history = np.zeros(6, np.complex128)
         self.input_count = 0
 
     def feed(self, audio):
@@ -83,17 +112,13 @@ class ModemToIQ:
         low, self.sideband_state = lfilter(
             self.sideband_taps, [1.0], shifted, zi=self.sideband_state
         )
-        joined = np.concatenate((self.history, low))
-        interpolated = upfirdn(self.interpolation_taps, joined, up=self.factor)
-        begin = len(self.history) * self.factor
-        result = interpolated[begin : begin + len(audio) * self.factor]
-        self.history = joined[-20:].copy()
-        radio_positions = self.input_count * self.factor + np.arange(len(result))
-        result *= np.exp(
-            2j
-            * np.pi
-            * np.remainder(radio_positions * (self.offset_hz / self.sample_rate), 1)
-        )
+        result = self._interpolate(low, "history", self.interpolation_taps,
+                                   self.factor // self.image_factor)
+        if self.image_factor > 1:
+            result = self._interpolate(result, "image_history", self.image_taps,
+                                       self.image_factor)
+        result *= _oscillator(self.input_count * self.factor, len(result),
+                              self.offset_hz, self.sample_rate)
         self.input_count += len(audio)
         if self.peak_limit is not None:
             # GUI transports submit complete GOP-sized blocks, then split the
@@ -108,6 +133,14 @@ class ModemToIQ:
         if max(abs(result.real).max(), abs(result.imag).max()) >= 1:
             raise ValueError("IQ exceeds DAC component range; reduce explicit TX RMS")
         return result.astype(np.complex64)
+
+    def _interpolate(self, values, history_name, taps, factor):
+        history = getattr(self, history_name)
+        joined = np.concatenate((history, values))
+        interpolated = upfirdn(taps, joined, up=factor)
+        begin = len(history) * factor
+        setattr(self, history_name, joined[-len(history):].copy())
+        return interpolated[begin : begin + len(values) * factor]
 
 
 def estimate_signal_offset(iq, sample_rate=960000, nominal_hz=-100000, *, composite=False):
