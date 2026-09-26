@@ -49,10 +49,10 @@ def refiner_loss(recon: torch.Tensor, video: torch.Tensor, temporal_weight: floa
     return loss
 
 
-def frames(video: torch.Tensor) -> torch.Tensor:
-    """(B, 3, T, H, W) in [0, 1] -> (B * T, 3, H, W) in [-1, 1]."""
-    b, c, t, h, w = video.shape
-    return video.transpose(1, 2).reshape(b * t, c, h, w) * 2 - 1
+def frames(video: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """Frames ``index`` of (B, 3, T, H, W) in [0, 1] -> (B * len(index), 3, H, W) in [-1, 1]."""
+    b, c, _, h, w = video.shape
+    return video[:, :, index].transpose(1, 2).reshape(-1, c, h, w) * 2 - 1
 
 
 def main() -> None:
@@ -73,6 +73,7 @@ def main() -> None:
     ap.add_argument("--lpips-weight", type=float, default=0.0,
                     help="perceptual term; when > 0, selection and the kill check also require no LPIPS rise")
     ap.add_argument("--lpips-net", default="vgg", help="training LPIPS network (scoring always uses alex)")
+    ap.add_argument("--lpips-frames", type=int, default=4, help="random frames per clip in the perceptual term")
     ap.add_argument("--eval-interval", type=int, default=500)
     ap.add_argument("--kill-step", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=20260926)
@@ -128,7 +129,10 @@ def main() -> None:
             video, decoded = video.flip(-1), decoded.flip(-1)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             recon = model(decoded, conf)
-            perceptual = train_lpips(frames(recon), frames(video)).mean() if train_lpips is not None else 0.0
+            perceptual = 0.0
+            if train_lpips is not None:
+                index = torch.randperm(video.shape[2], device=device)[: args.lpips_frames]
+                perceptual = train_lpips(frames(recon, index), frames(video, index)).mean()
         loss = refiner_loss(recon.float(), video, args.temporal_weight) + args.lpips_weight * perceptual
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

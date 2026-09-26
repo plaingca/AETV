@@ -1,0 +1,12 @@
+{
+  "path": "models/v8-gop-refiner-hq.pt",
+  "mode": "V8",
+  "role": "receiver-side post-filter across GOP boundaries (aetv.gop_boundary.BoundaryRefiner)",
+  "codec": "models/v8-hf3k-mpp12-ft.pt",
+  "step": 8000,
+  "source_run": "runs/gop-refiner-lp3 (scripts/train_gop_refiner.py --lpips-weight 3)",
+  "config": {"gop": 6, "width": 64, "blocks": 3, "causal": false, "per_gop": false},
+  "parameters": 6857347,
+  "bytes": 27459883,
+  "sha256": "ce46b570d1ddd3dbcf026c4b9b0cdf3eacd5017b46b492b70c94cea6ce7e65fc"
+}
