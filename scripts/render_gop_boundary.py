@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from aetv.gop_boundary import frame_psnr, load_refiner  # noqa: E402
 from eval_gop_boundary import GOP, gop_confidence_frames  # noqa: E402
 
-SCALE = 3
+SCALE = 2
 LABELS = ("source", "current (mpp12)", "fixed (mpp12)")
 
 
@@ -64,8 +64,9 @@ def main() -> None:
     ap.add_argument("--prefix", default="eval")
     ap.add_argument("--out", required=True)
     ap.add_argument("--fps", type=float, default=3.0, help="MP4 frame rate (V8 is 6 fps; slower shows the jump)")
+    ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
-    device = torch.device("cuda")
+    device = torch.device(args.device)
     cache = torch.load(args.cache, map_location="cpu", weights_only=False)
     refiner = load_refiner(args.refiner, device)
     out = Path(args.out)

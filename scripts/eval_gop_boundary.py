@@ -84,8 +84,9 @@ def main() -> None:
     ap.add_argument("--refiner", action="append", default=[], help="label=path")
     ap.add_argument("--no-lpips", action="store_true")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
-    device = torch.device("cuda")
+    device = torch.device(args.device)
     cache = torch.load(args.cache, map_location="cpu", weights_only=False)
     refiners = {}
     for item in args.refiner:
