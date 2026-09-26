@@ -1,0 +1,12 @@
+{
+  "path": "models/v8-gop-refiner-causal.pt",
+  "mode": "V8",
+  "role": "receiver-side post-filter conditioned on earlier decoded frames only (aetv.gop_boundary.BoundaryRefiner, causal)",
+  "codec": "models/v8-hf3k-mpp12-ft.pt",
+  "step": 4500,
+  "source_run": "runs/gop-refiner-causal-lp3 (scripts/train_gop_refiner.py --causal --lpips-weight 3)",
+  "config": {"gop": 6, "width": 64, "blocks": 3, "causal": true, "per_gop": false},
+  "parameters": 6857347,
+  "bytes": 27460243,
+  "sha256": "b4d7221fcf1b48572940c47e913593d6ecbd85bed68d7c2bb94e3e4f480d3a87"
+}
