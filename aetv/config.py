@@ -393,10 +393,11 @@ AETV_MODES["AC16"] = AETVModeSpec(
 # Modes with pinned, checksum-verified release checkpoints. Historical modes
 # remain decodable at the protocol layer, but are intentionally hidden from the
 # release GUI until they have validated weights of their own.
-RELEASE_MODES: tuple[str, ...] = ("V8", "V7", "AC16")
+RELEASE_MODES: tuple[str, ...] = ("V8", "V9", "V7", "AC16")
 RELEASE_MODE_LABELS = {
     "AC16": "AC16 · 16 kHz — 256×144 @ 10 fps",
     "V8": "Standard channel — 192×108 @ 6 fps",
+    "V9": "Wide 4 kHz — 192×108 @ 6 fps",
     "V7": "Wide 8 kHz — 256×144 @ 12 fps",
 }
 
