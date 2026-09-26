@@ -7,10 +7,17 @@ training-pool clips. The loss is the mean per-GOP ``log10`` MSE (the shared
 ``mpp12`` statistic) plus ``--temporal-weight`` times the mean ``log10``
 frame-difference MSE over all transitions.
 
+``--motion-weight`` adds a hinge that stops the refiner from reducing
+frame-difference energy below the decoder's inside healthy GOPs;
+``--faded-motion-weight`` asks for at least ``--faded-motion-floor`` of the
+source's motion inside faded GOPs. ``--healthy-gate`` gates the correction on
+healthy GOPs (see ``BoundaryRefiner``).
+
 Selection: best ``mpp12`` PSNR on the 24 pool selection clips (fade seed base
-7300). Kill check at ``--kill-step``: selection ``mpp12`` must not fall and
-the boundary frame-difference PSNR must rise by more than twice its paired
-standard error.
+7300) among checkpoints whose LPIPS did not rise and whose healthy inside-GOP
+motion (energy and Farneback flow, relative to the current receiver) is at
+least ``--min-motion``. Kill check at ``--kill-step``: ``mpp12`` gain of at
+least ``--kill-mpp12``, no LPIPS rise, motion at least ``--kill-motion``.
 
     python scripts/train_gop_refiner.py --train runs/gop-boundary/train4.pt \
         --select runs/gop-boundary/select24.pt --out runs/gop-refiner
@@ -27,6 +34,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -34,6 +42,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from aetv.gop_boundary import BoundaryRefiner  # noqa: E402
 from eval_gop_boundary import GOP, gop_confidence_frames, score_cache, summarise  # noqa: E402
+from eval_gop_motion import collect, healthy_motion_vs_current  # noqa: E402
 
 
 def refiner_loss(recon: torch.Tensor, video: torch.Tensor, temporal_weight: float) -> torch.Tensor:
@@ -47,6 +56,34 @@ def refiner_loss(recon: torch.Tensor, video: torch.Tensor, temporal_weight: floa
         t_mse = (dr - dv).square().mean(dim=(1, 3, 4)).clamp_min(1e-8)
         loss = loss + temporal_weight * torch.log10(t_mse).mean()
     return loss
+
+
+def transition_energy(video: torch.Tensor, pool: int = 1) -> torch.Tensor:
+    """(B, T-1) mean squared frame difference, optionally after ``pool``x spatial averaging."""
+    if pool > 1:
+        video = F.avg_pool3d(video, (1, pool, pool))
+    return (video[:, :, 1:] - video[:, :, :-1]).square().mean(dim=(1, 3, 4))
+
+
+def motion_loss(recon, decoded, video, gop_conf, threshold: float, faded_floor: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """Hinges on log frame-difference energy for inside-GOP transitions, at full and 1/4 resolution.
+
+    Healthy GOPs: the refiner must not have less motion than the decoder gave it.
+    Faded GOPs: it must have at least ``faded_floor`` times the source's motion.
+    """
+    t = torch.arange(1, video.shape[2], device=video.device)
+    inside = (t % GOP != 0)
+    faded = (gop_conf < threshold)[:, t // GOP]
+    healthy_mask = (inside & ~faded).float()
+    faded_mask = (inside & faded).float()
+    healthy_loss = faded_loss = recon.new_zeros(())
+    for pool in (1, 4):
+        er = torch.log(transition_energy(recon, pool) + 1e-5)
+        ed = torch.log(transition_energy(decoded, pool) + 1e-5)
+        es = torch.log(faded_floor * transition_energy(video, pool) + 1e-5)
+        healthy_loss = healthy_loss + (F.relu(ed - er) * healthy_mask).sum() / healthy_mask.sum().clamp_min(1)
+        faded_loss = faded_loss + (F.relu(es - er) * faded_mask).sum() / faded_mask.sum().clamp_min(1)
+    return healthy_loss / 2, faded_loss / 2
 
 
 def frames(video: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
@@ -74,6 +111,18 @@ def main() -> None:
                     help="perceptual term; when > 0, selection and the kill check also require no LPIPS rise")
     ap.add_argument("--lpips-net", default="vgg", help="training LPIPS network (scoring always uses alex)")
     ap.add_argument("--lpips-frames", type=int, default=4, help="random frames per clip in the perceptual term")
+    ap.add_argument("--init", help="warm start from a refiner checkpoint")
+    ap.add_argument("--healthy-gate", default=None, help="'learned' or a fixed gain on healthy GOPs")
+    ap.add_argument("--gate-init", type=float, default=0.0)
+    ap.add_argument("--gate-lr", type=float, default=1e-2)
+    ap.add_argument("--faded-threshold", type=float, default=0.35)
+    ap.add_argument("--motion-weight", type=float, default=0.0, help="healthy-GOP no-less-motion-than-decoder hinge")
+    ap.add_argument("--faded-motion-weight", type=float, default=0.0)
+    ap.add_argument("--faded-motion-floor", type=float, default=0.35)
+    ap.add_argument("--min-motion", type=float, default=0.97,
+                    help="selection: healthy inside-GOP energy and flow ratios vs current must be at least this")
+    ap.add_argument("--kill-motion", type=float, default=0.95)
+    ap.add_argument("--kill-mpp12", type=float, default=0.0)
     ap.add_argument("--eval-interval", type=int, default=500)
     ap.add_argument("--kill-step", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=20260926)
@@ -93,8 +142,23 @@ def main() -> None:
     print(f"train {n} clips x {draws} draws, selection {len(cache['names'])} clips", flush=True)
 
     config = {"gop": GOP, "width": args.width, "blocks": args.blocks, "causal": args.causal, "per_gop": args.per_gop}
+    init = torch.load(args.init, map_location="cpu", weights_only=False) if args.init else None
+    if init is not None:
+        config = dict(init["config"])
+    if args.healthy_gate is not None:
+        gate = args.healthy_gate if args.healthy_gate == "learned" else float(args.healthy_gate)
+        config.update(healthy_gate=gate, faded_threshold=args.faded_threshold, gate_init=args.gate_init)
     model = BoundaryRefiner(**config).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    if init is not None:
+        result = model.load_state_dict(init["state_dict"], strict=False)
+        if result.unexpected_keys or set(result.missing_keys) - {"gate_logit"}:
+            raise SystemExit(f"init mismatch: {result}")
+    gate_params = [p for n_, p in model.named_parameters() if n_ == "gate_logit"]
+    other = [p for n_, p in model.named_parameters() if n_ != "gate_logit"]
+    groups = [{"params": other, "scale": 1.0}]
+    if gate_params:
+        groups.append({"params": gate_params, "scale": args.gate_lr / args.lr, "weight_decay": 0.0})
+    optimizer = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
 
     def lr_at(step: int) -> float:
         if step <= args.warmup:
@@ -120,11 +184,14 @@ def main() -> None:
     started = time.time()
     for step in range(1, args.steps + 1):
         for group in optimizer.param_groups:
-            group["lr"] = lr_at(step)
+            group["lr"] = lr_at(step) * group["scale"]
         picks = [(rng.randrange(n), rng.randrange(draws)) for _ in range(args.batch)]
         video = torch.stack([train["source"][i] for i, _ in picks]).to(device, non_blocking=True).float().div(255)
         decoded = torch.stack([train["decoded"][i, d] for i, d in picks]).to(device, non_blocking=True).float()
-        conf = gop_confidence_frames(torch.stack([train["gop_confidence"][i, d] for i, d in picks]).float()).to(device)
+        if train["decoded"].dtype == torch.uint8:
+            decoded = decoded / 255
+        gop_conf = torch.stack([train["gop_confidence"][i, d] for i, d in picks]).float().to(device)
+        conf = gop_confidence_frames(gop_conf)
         if rng.random() < 0.5:
             video, decoded = video.flip(-1), decoded.flip(-1)
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -134,6 +201,10 @@ def main() -> None:
                 index = torch.randperm(video.shape[2], device=device)[: args.lpips_frames]
                 perceptual = train_lpips(frames(recon, index), frames(video, index)).mean()
         loss = refiner_loss(recon.float(), video, args.temporal_weight) + args.lpips_weight * perceptual
+        if args.motion_weight or args.faded_motion_weight:
+            m_healthy, m_faded = motion_loss(recon.float(), decoded, video, gop_conf, args.faded_threshold,
+                                             args.faded_motion_floor)
+            loss = loss + args.motion_weight * m_healthy + args.faded_motion_weight * m_faded
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -154,23 +225,34 @@ def main() -> None:
                       "boundary_tpsnr": s["boundary_tpsnr"]["mean"], "d_boundary": d_bnd["mean"],
                       "se_boundary": d_bnd["se"], "boundary_jump": s["boundary_jump"]["mean"],
                       "lpips_mpp12": s["lpips_mpp12"]["mean"], "d_lpips": d_lp["mean"], "se_lpips": d_lp["se"]}
+            motion_rows, _, _ = collect(cache, {"refined": model.eval()}, device, args.faded_threshold)
+            model.train()
+            motion = healthy_motion_vs_current(motion_rows, "refined")
+            record.update(motion_energy=motion["energy"], motion_flow=motion["flow"])
+            if hasattr(model, "gate_logit"):
+                record["gate"] = torch.sigmoid(model.gate_logit).tolist()
             history.append(record)
             log.write(json.dumps({"select": record}) + "\n")
             log.flush()
             print(f"select step {step}: mpp12 {record['mpp12']:.3f} (Δ {d_mpp['mean']:+.3f} ± {d_mpp['se']:.3f}) "
                   f"boundary tpsnr Δ {d_bnd['mean']:+.3f} ± {d_bnd['se']:.3f} jump {record['boundary_jump']:.2f} "
-                  f"lpips Δ {d_lp['mean']:+.4f} ± {d_lp['se']:.4f}", flush=True)
+                  f"lpips Δ {d_lp['mean']:+.4f} ± {d_lp['se']:.4f} healthy motion energy x{motion['energy']:.3f} "
+                  f"flow x{motion['flow']:.3f}" + (f" gate {[round(g, 2) for g in record['gate']]}" if "gate" in record else ""),
+                  flush=True)
             state = {"config": config, "state_dict": model.state_dict(), "step": step, "select": record,
                      "codec": train["model"], "args": vars(args)}
             lpips_ok = not args.lpips_weight or d_lp["mean"] <= 0
-            if record["mpp12"] > best["mpp12"] and lpips_ok:
+            motion_ok = min(motion["energy"], motion["flow"]) >= args.min_motion
+            if record["mpp12"] > best["mpp12"] and lpips_ok and motion_ok:
                 best = {"step": step, "mpp12": record["mpp12"]}
                 torch.save(state, out / "best.pt")
                 print(f"  new best at step {step}", flush=True)
             torch.save(state, out / "latest.pt")
             if step == args.kill_step:
-                ok = d_mpp["mean"] >= 0 and d_bnd["mean"] > 2 * d_bnd["se"] and lpips_ok
-                verdict = {"step": step, "passed": ok, "mpp12": d_mpp, "boundary_tpsnr": d_bnd, "lpips_mpp12": d_lp}
+                ok = (d_mpp["mean"] >= args.kill_mpp12 and lpips_ok
+                      and min(motion["energy"], motion["flow"]) >= args.kill_motion)
+                verdict = {"step": step, "passed": ok, "mpp12": d_mpp, "boundary_tpsnr": d_bnd, "lpips_mpp12": d_lp,
+                           "healthy_motion": motion}
                 (out / "kill_check.json").write_text(json.dumps(verdict, indent=1))
                 print(f"KILL CHECK {'PASSED' if ok else 'FAILED'} at step {step}", flush=True)
                 if not ok:

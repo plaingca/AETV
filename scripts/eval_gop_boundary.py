@@ -23,7 +23,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aetv.gop_boundary import boundary_record, load_refiner  # noqa: E402
+from aetv.gop_boundary import boundary_record, refiner_from_spec  # noqa: E402
 from aetv.shared_eval import clip_psnr, paired, summarize  # noqa: E402
 
 GOP = 6
@@ -81,17 +81,14 @@ def summarise(records: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cache", required=True)
-    ap.add_argument("--refiner", action="append", default=[], help="label=path")
+    ap.add_argument("--refiner", action="append", default=[], help="label=path or label=path@healthy_gain")
     ap.add_argument("--no-lpips", action="store_true")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
     device = torch.device(args.device)
     cache = torch.load(args.cache, map_location="cpu", weights_only=False)
-    refiners = {}
-    for item in args.refiner:
-        label, path = item.split("=", 1)
-        refiners[label] = load_refiner(path, device)
+    refiners = dict(refiner_from_spec(item, device) for item in args.refiner)
     lpips_metric = None
     if not args.no_lpips:
         import lpips

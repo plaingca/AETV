@@ -1,0 +1,14 @@
+{
+  "path": "models/v8-gop-refiner-motion.pt",
+  "mode": "V8",
+  "role": "receiver-side boundary refiner, confidence-gated and motion-preserving (aetv.gop_boundary.BoundaryRefiner)",
+  "codec": "models/v8-hf3k-mpp12-ft.pt",
+  "init": "models/v8-gop-refiner-hq.pt",
+  "step": 2000,
+  "source_run": "runs/gop-refiner-motion-a (scripts/train_gop_refiner.py --init models/v8-gop-refiner-hq.pt --healthy-gate learned --motion-weight 2 --lpips-weight 3)",
+  "config": {"gop": 6, "width": 64, "blocks": 3, "causal": false, "per_gop": false, "healthy_gate": "learned", "faded_threshold": 0.35, "gate_init": 0.0},
+  "healthy_gate_by_position": [0.581, 0.504, 0.464, 0.483, 0.516, 0.588],
+  "parameters": 6857353,
+  "bytes": 27460830,
+  "sha256": "9afda104e9c0801bc62356ea5dcb5d745f625319506a00e2a1bc26829871a833"
+}

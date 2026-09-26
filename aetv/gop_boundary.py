@@ -120,11 +120,21 @@ class BoundaryRefiner(nn.Module):
     first frames of a GOP are conditioned on the previous GOP's decoded frames
     at no added latency. The last layer starts at zero: an untrained refiner
     is the identity. Temporal resolution is never reduced.
+
+    ``healthy_gate`` scales the correction on healthy GOPs (mean confidence at
+    or above ``faded_threshold``) by a per-GOP-position gain; faded GOPs always
+    get the full correction. ``None`` disables gating, a float fixes the gain,
+    and ``"learned"`` learns one gain per position (sigmoid of a logit starting
+    at ``gate_init``).
     """
 
-    def __init__(self, gop: int = 6, width: int = 64, blocks: int = 3, causal: bool = False, per_gop: bool = False):
+    def __init__(self, gop: int = 6, width: int = 64, blocks: int = 3, causal: bool = False, per_gop: bool = False,
+                 healthy_gate: float | str | None = None, faded_threshold: float = 0.35, gate_init: float = 2.0):
         super().__init__()
         self.gop, self.per_gop = gop, per_gop
+        self.healthy_gate, self.faded_threshold = healthy_gate, faded_threshold
+        if healthy_gate == "learned":
+            self.gate_logit = nn.Parameter(torch.full((gop,), float(gate_init)))
         cin = 3 + gop + 1
         w1, w2, w3 = width, width * 3 // 2, width * 2
         self.head = nn.Sequential(_Conv(cin, w1, causal=causal), nn.SiLU(), _Res3d(w1, causal))
@@ -168,11 +178,32 @@ class BoundaryRefiner(nn.Module):
         u1 = F.interpolate(u2, size=s1.shape[2:], mode="trilinear", align_corners=False)
         u1 = self.res1(F.silu(self.up1(torch.cat([u1, s1], 1))))
         residual = self.tail(u1)[..., :h, :w]
+        if self.healthy_gate is not None:
+            residual = residual * self.gate(gop_confidence.to(video), t, offset)[:, None, :, None, None]
         return (video + residual).clamp(0, 1)
 
+    def gate(self, gop_confidence: torch.Tensor, frames: int, offset: int = 0) -> torch.Tensor:
+        """(B, T) correction gain: 1 on faded GOPs, the healthy gain elsewhere."""
+        if self.healthy_gate == "learned":
+            position = (torch.arange(frames, device=gop_confidence.device) + offset) % self.gop
+            healthy = torch.sigmoid(self.gate_logit)[position][None].expand_as(gop_confidence)
+        else:
+            healthy = torch.full_like(gop_confidence, float(self.healthy_gate))
+        return torch.where(gop_confidence < self.faded_threshold, torch.ones_like(healthy), healthy)
 
-def load_refiner(path, device) -> BoundaryRefiner:
+
+def load_refiner(path, device, **overrides) -> BoundaryRefiner:
+    """Load a refiner; ``overrides`` replace config entries (e.g. a fixed ``healthy_gate``)."""
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    model = BoundaryRefiner(**payload["config"])
-    model.load_state_dict(payload["state_dict"])
+    model = BoundaryRefiner(**{**payload["config"], **overrides})
+    result = model.load_state_dict(payload["state_dict"], strict=False)
+    if result.unexpected_keys or set(result.missing_keys) - {"gate_logit"}:
+        raise RuntimeError(f"refiner state mismatch: {result}")
     return model.to(device).eval()
+
+
+def refiner_from_spec(spec: str, device) -> tuple[str, BoundaryRefiner]:
+    """``label=path`` or ``label=path@gain`` (a fixed healthy-GOP gate on any checkpoint)."""
+    label, rest = spec.split("=", 1)
+    path, _, gain = rest.partition("@")
+    return label, load_refiner(path, device, **({"healthy_gate": float(gain)} if gain else {}))
