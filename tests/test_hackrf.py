@@ -1,7 +1,10 @@
 import ctypes as C
+import itertools
 import queue
 import threading
+import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -226,6 +229,136 @@ def test_transport_cleans_up_on_completion_cancel_and_failure(monkeypatch, failu
             worker.join(timeout=2)
     assert [name for name, _ in lib.calls][-2:] == ["hackrf_close", "hackrf_exit"]
     assert not any(t.name == "hackrf-modem" and t.is_alive() for t in threading.enumerate())
+
+
+class RealtimeLibrary(FakeLibrary):
+    """Pull TX buffers on the sample clock, several transfers ahead like libhackrf."""
+
+    def __init__(self, sample_rate, transfer_bytes=16384, in_flight=4):
+        super().__init__()
+        self.rate, self.size, self.in_flight = sample_rate, transfer_bytes, in_flight
+        self.results = []
+
+    def hackrf_start_tx(self, device, callback, context):
+        self.transmit = callback
+        self.worker = threading.Thread(target=self._pump, daemon=True)
+        self.worker.start()
+        return 0
+
+    def _pump(self):
+        started = time.monotonic()
+        for index in itertools.count():
+            due = started + max(0, index - self.in_flight) * self.size / 2 / self.rate
+            time.sleep(max(0, due - time.monotonic()))
+            result = self.tx(self.size)
+            self.results.append(result)
+            if result:
+                break
+        self.flush(None, 1)
+
+
+def live_gops(count, seconds=1.0):
+    """Release one GOP only after its capture interval, like the webcam/microphone."""
+    started = time.monotonic()
+    for index in range(count):
+        time.sleep(max(0, started + (index + 1) * seconds - time.monotonic()))
+        yield np.sin(2 * np.pi * 8000 * np.arange(round(48000 * seconds)) / 48000) * .1
+
+
+def test_live_gop_source_does_not_underrun_realtime_usb(monkeypatch):
+    import aetv.hackrf as module
+    rate = 480000  # Same code path at a CI-friendly rate; the pacing is identical.
+    lib = RealtimeLibrary(rate)
+    monkeypatch.setattr(module, "SAMPLE_RATE", rate)
+    monkeypatch.setattr(module, "load_library", lambda: lib)
+    radio = []
+    original = module.HackRF
+    monkeypatch.setattr(module, "HackRF", lambda *a, **k: radio.append(original(*a, **k)) or radio[-1])
+    assert transmit_hackrf(live_gops(3), 48000, settings(), threading.Event(), lambda _: None,
+                           max_seconds=3)
+    lib.worker.join(timeout=2)
+    assert not radio[0].error
+    # All three GOPs and the FIR tail reach the radio contiguously.
+    assert radio[0].tx_samples >= 3 * rate
+    assert lib.results.count(0) == len(lib.results) - 1
+
+
+def _single_stage_modem_to_iq(audio, sample_rate):
+    """The original one-FIR 48 kHz -> radio-rate conversion, for reference."""
+    from scipy.signal import firwin, lfilter, upfirdn
+    factor = sample_rate // 48000
+    shifted = np.sqrt(2) * audio * np.exp(-2j * np.pi * np.remainder(np.arange(len(audio)) / 6, 1))
+    low = lfilter(firwin(1025, 8000, fs=48000), [1.0], shifted)
+    taps = firwin(20 * factor + 1, 1 / factor, window=("kaiser", 5.0)) * factor
+    result = upfirdn(taps, low, up=factor)[:len(audio) * factor]
+    positions = np.arange(len(result))
+    return result * np.exp(2j * np.pi * np.remainder(positions * (100000 / sample_rate), 1))
+
+
+def test_tx_conversion_matches_single_stage_filter_and_is_much_faster():
+    from aetv.sdr_dsp import ModemToIQ
+    audio = np.random.default_rng(19).standard_normal(48000) * .05
+    started = time.perf_counter()
+    reference = _single_stage_modem_to_iq(audio, SAMPLE_RATE)
+    single_stage_s = time.perf_counter() - started
+    adapter = ModemToIQ(SAMPLE_RATE)
+    started = time.perf_counter()
+    # Uneven blocks exercise both FIR histories and the oscillator phase.
+    converted = np.concatenate([adapter.feed(audio[i:i + 7001]) for i in range(0, len(audio), 7001)])
+    two_stage_s = time.perf_counter() - started
+    delay = 30  # 61-tap image-reject stage at the radio rate.
+    aligned = converted[delay:] * np.exp(-2j * np.pi * 100000 * delay / SAMPLE_RATE)
+    expected = reference[:-delay]
+    assert np.linalg.norm(aligned - expected) / np.linalg.norm(expected) < 1e-3
+    # One 4001-tap 200x FIR plus a complex exp per sample was slower than
+    # real time before the modem, encoder or USB callback ran at all.
+    assert two_stage_s * 1.8 < single_stage_s, (two_stage_s, single_stage_s)
+
+
+def test_rx_search_on_slow_cpu_keeps_up_with_realtime_hackrf(monkeypatch):
+    """A slow spectral estimate must not accumulate IQ and force endless reacquisition."""
+    from aetv.config import AETV_MODES
+    from aetv import sdr
+    import aetv.hackrf as module
+    calls = []
+
+    def slow_estimate(iq, *args, **kwargs):
+        calls.append(len(iq))
+        time.sleep(.08)  # Each estimate costs most of a 0.1 s block.
+        raise ValueError("no signal yet")
+
+    monkeypatch.setattr(sdr, "estimate_signal_offset", slow_estimate)
+    monkeypatch.setattr(sdr, "estimate_weak_signal_offset", slow_estimate)
+    blocks = []
+
+    class Radio:
+        def __init__(self, *_):
+            self.iq = np.zeros(SAMPLE_RATE // 10, np.complex64)
+            self.started = time.monotonic()
+        def start_rx(self):
+            pass
+        def read(self, cancel):
+            due = self.started + (len(blocks) + 1) / 10
+            cancel.wait(max(0, due - time.monotonic()))
+            blocks.append(True)
+            return self.iq
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module, "HackRF", Radio)
+    messages, errors = [], []
+    capture = sdr.SDRCapture(settings(), AETV_MODES["AC16"], SimpleNamespace(write=lambda _: None),
+                             on_error=errors.append, on_status=messages.append)
+    capture._queue = queue.Queue(maxsize=8)  # 0.8 s instead of 8 s: same failure, sooner.
+    try:
+        capture.start()
+        time.sleep(3)
+    finally:
+        capture.stop()
+    assert not errors
+    assert capture.health["iq_overruns"] == 0, messages
+    assert capture.health["iq_queue_high_water"] <= 3
+    assert 0 < len(calls) <= 2 * len(blocks) / sdr.CALIBRATION_STRIDE + 2
 
 
 def test_settings_persist_and_reject_invalid_steps(tmp_path):
