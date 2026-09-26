@@ -20,6 +20,10 @@ import numpy as np
 
 SAMPLE_RATE = 9600000  # >=8 MHz ADC/DAC recommendation; integer 48 kHz ratio.
 FILTER_BANDWIDTH = 1750000
+# 0.1 s signed-IQ blocks. Live sources release one 1 s GOP at a time, so the
+# USB stream may start only once the following GOP is queued as well.
+TX_QUEUE_BLOCKS = 32
+TX_PREBUFFER_BLOCKS = 15
 _device_lock = threading.Lock()  # One shared TX/RX selector: half duplex.
 
 
@@ -266,7 +270,7 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     from .sdr_dsp import ModemToIQ
 
     settings = replace(settings)
-    ready = queue.Queue(maxsize=16)
+    ready = queue.Queue(maxsize=TX_QUEUE_BLOCKS)
     stopped, produced = threading.Event(), threading.Event()
     end = object()
     deadline = time.monotonic() + max_seconds + 25
@@ -313,8 +317,8 @@ def transmit_hackrf(chunks, fs, settings, cancel, on_progress, *, max_seconds):
     producer = threading.Thread(target=produce, name="hackrf-modem", daemon=True)
     producer.start()
     try:
-        # Half a second of prepared IQ absorbs callback and encoder jitter.
-        while ready.qsize() < 5 and not produced.is_set() and not cancel.is_set():
+        while (ready.qsize() < TX_PREBUFFER_BLOCKS and not produced.is_set()
+               and not cancel.is_set()):
             if time.monotonic() > deadline:
                 raise TimeoutError("HackRF TX preparation exceeded its duration watchdog")
             cancel.wait(0.02)

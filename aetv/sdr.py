@@ -25,6 +25,8 @@ from .audio_io import StreamResampler, resample_ratio
 from .hfchannel import _active_signal_power
 from .sdr_dsp import IQDecimator, IQToModem, ModemToIQ, estimate_signal_offset, estimate_weak_signal_offset, estimate_mode_signal_offset
 
+CALIBRATION_STRIDE = 3  # Converter blocks (0.1 s each) between search estimates.
+
 
 def rtl_executable() -> str:
     root = Path(__file__).parent / "bin"
@@ -352,6 +354,7 @@ class SDRCapture:
         calibration = []
         estimates = []
         auto = self.settings.sdr_auto_correct
+        since_estimate = 0
         while not self._stop.is_set():
             try:
                 iq = self._queue.get(timeout=0.1)
@@ -364,14 +367,21 @@ class SDRCapture:
                 calibration.clear()
                 estimates.clear()
                 auto = self.settings.sdr_auto_correct
+                since_estimate = 0
                 self.on_discontinuity()
                 continue
             before = time.perf_counter()
             if auto:
                 calibration.append(iq)
                 calibration = calibration[-40:]
-                if len(calibration) < 5:
+                since_estimate += 1
+                # One search estimate costs most of a 0.1 s block. Running it
+                # per block, or while IQ is queued, fell behind the radio and
+                # every resulting overrun restarted the search.
+                if (len(calibration) < 5 or since_estimate < CALIBRATION_STRIDE
+                        or not self._queue.empty()):
                     continue
+                since_estimate = 0
                 composite = self.settings.waveform_mode == "analog_av"
                 weak = False
                 try:
