@@ -304,6 +304,44 @@ class AETVAutoencoder(nn.Module):
         return self.decoder(z, weights, (video.shape[2], video.shape[3], video.shape[4]))
 
 
+LATENT_CHANNEL_KEYS = (
+    "encoder.encoder.net.12.conv.weight",
+    "encoder.encoder.net.12.conv.bias",
+    "decoder.decoder.temporal_skip.weight",
+    "decoder.decoder.input.conv.weight",
+)
+
+
+def widen_latent_channels(state_dict: dict, new_channels: int) -> dict:
+    """Warm-start state for a larger latent budget with more latent channels.
+
+    New encoder channels repeat the existing ones (channel ``c`` copies
+    ``c % old``), so every transmitted value has the source model's scale and
+    the whole-GOP RMS normalization is unchanged. The decoder's inputs for new
+    channels start at zero: before training the widened model decodes exactly
+    as the source model does from its original channels.
+    """
+    out = dict(state_dict)
+    enc_w = state_dict["encoder.encoder.net.12.conv.weight"]
+    old = enc_w.shape[0]
+    if new_channels < old:
+        raise ValueError(f"cannot narrow {old} latent channels to {new_channels}")
+    source = [c % old for c in range(new_channels)]
+    out["encoder.encoder.net.12.conv.weight"] = enc_w[source].clone()
+    out["encoder.encoder.net.12.conv.bias"] = state_dict["encoder.encoder.net.12.conv.bias"][source].clone()
+    skip = state_dict["decoder.decoder.temporal_skip.weight"]
+    widened_skip = skip.new_zeros(skip.shape[0], new_channels, *skip.shape[2:])
+    widened_skip[:, :old] = skip
+    out["decoder.decoder.temporal_skip.weight"] = widened_skip
+    # Decoder input is cat([z * w, w]): old z-columns then old w-columns.
+    inp = state_dict["decoder.decoder.input.conv.weight"]
+    widened_in = inp.new_zeros(inp.shape[0], 2 * new_channels, *inp.shape[2:])
+    widened_in[:, :old] = inp[:, :old]
+    widened_in[:, new_channels : new_channels + old] = inp[:, old:]
+    out["decoder.decoder.input.conv.weight"] = widened_in
+    return out
+
+
 def _unit_normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """Scale each spatial location's feature vector to unit length across channels."""
     return x / x.pow(2).sum(dim=1, keepdim=True).clamp_min(eps).sqrt()

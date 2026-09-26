@@ -1,0 +1,11 @@
+{
+  "path": "models/v9-wide4k.pt",
+  "mode": "V9",
+  "step": 6000,
+  "source_run": "runs/v9-wide4k",
+  "init_checkpoint": "models/v8-hf3k-face-gan.pt",
+  "bytes": 215987409,
+  "sha256": "15ada7b19f24a6e475dd7d0cab3c130903a45e41c4287e2817674b9e3bb4a51b",
+  "model_width": 128,
+  "latent_channels": 6
+}

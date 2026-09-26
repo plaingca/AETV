@@ -19,6 +19,7 @@ from .config import (
     FRAMES_PER_GOP,
     LATENTS_PER_GOP_N,
     LATENTS_PER_GOP_W,
+    LATENTS_PER_GOP_M,
     LATENTS_PER_GOP_U,
 )
 
@@ -33,9 +34,10 @@ def derive_gop_interleaver(
     return rng.permutation(latents_per_gop).astype(np.int32)
 
 
-# Precomputed GOP interleaver permutations for N, W, and U
+# Precomputed GOP interleaver permutations for N, W, M, and U
 GOP_INTERLEAVER_N = derive_gop_interleaver(LATENTS_PER_GOP_N)
 GOP_INTERLEAVER_W = derive_gop_interleaver(LATENTS_PER_GOP_W)
+GOP_INTERLEAVER_M = derive_gop_interleaver(LATENTS_PER_GOP_M)
 GOP_INTERLEAVER_U = derive_gop_interleaver(LATENTS_PER_GOP_U)
 
 GOP_DEINTERLEAVER_N = np.empty_like(GOP_INTERLEAVER_N)
@@ -43,6 +45,9 @@ GOP_DEINTERLEAVER_N[GOP_INTERLEAVER_N] = np.arange(len(GOP_INTERLEAVER_N))
 
 GOP_DEINTERLEAVER_W = np.empty_like(GOP_INTERLEAVER_W)
 GOP_DEINTERLEAVER_W[GOP_INTERLEAVER_W] = np.arange(len(GOP_INTERLEAVER_W))
+
+GOP_DEINTERLEAVER_M = np.empty_like(GOP_INTERLEAVER_M)
+GOP_DEINTERLEAVER_M[GOP_INTERLEAVER_M] = np.arange(len(GOP_INTERLEAVER_M))
 
 GOP_DEINTERLEAVER_U = np.empty_like(GOP_INTERLEAVER_U)
 GOP_DEINTERLEAVER_U[GOP_INTERLEAVER_U] = np.arange(len(GOP_INTERLEAVER_U))
@@ -76,6 +81,8 @@ def pack_gop_symbols(
             perm = GOP_INTERLEAVER_N
         elif band == "W":
             perm = GOP_INTERLEAVER_W
+        elif band == "M":
+            perm = GOP_INTERLEAVER_M
         elif band == "U":
             perm = GOP_INTERLEAVER_U
         else:
@@ -155,6 +162,8 @@ def unpack_gop_symbols(
             inv_perm = GOP_DEINTERLEAVER_N
         elif band == "W":
             inv_perm = GOP_DEINTERLEAVER_W
+        elif band == "M":
+            inv_perm = GOP_DEINTERLEAVER_M
         elif band == "U":
             inv_perm = GOP_DEINTERLEAVER_U
         else:

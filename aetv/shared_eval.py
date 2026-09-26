@@ -202,6 +202,8 @@ def build_adapter(name: str, device) -> CodecAdapter:
         return AutoencoderAdapter(name, "models/v8-hf3k-face-gan.pt", "V8", device)
     if name == "v7-rxfix":
         return AutoencoderAdapter(name, "models/v8-flex8k-ota-rxfix.pt", "V7", device)
+    if name == "v9-wide4k":
+        return AutoencoderAdapter(name, "models/v9-wide4k.pt", "V9", device)
     if name == "ac16":
         return AC16Adapter(name, "models/ac16-best-inference.pt", device)
     if name == "ac2k-psnr":
