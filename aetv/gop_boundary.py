@@ -122,9 +122,9 @@ class BoundaryRefiner(nn.Module):
     is the identity. Temporal resolution is never reduced.
     """
 
-    def __init__(self, gop: int = 6, width: int = 64, blocks: int = 3, causal: bool = False):
+    def __init__(self, gop: int = 6, width: int = 64, blocks: int = 3, causal: bool = False, per_gop: bool = False):
         super().__init__()
-        self.gop = gop
+        self.gop, self.per_gop = gop, per_gop
         cin = 3 + gop + 1
         w1, w2, w3 = width, width * 3 // 2, width * 2
         self.head = nn.Sequential(_Conv(cin, w1, causal=causal), nn.SiLU(), _Res3d(w1, causal))
@@ -141,7 +141,19 @@ class BoundaryRefiner(nn.Module):
         nn.init.zeros_(self.tail.bias)
 
     def forward(self, video: torch.Tensor, gop_confidence: torch.Tensor, offset: int = 0) -> torch.Tensor:
-        """``gop_confidence``: (B, T) mean confidence of each frame's GOP."""
+        """``gop_confidence``: (B, T) mean confidence of each frame's GOP.
+
+        ``per_gop`` refines each GOP on its own (an ablation with no cross-GOP view).
+        """
+        b, _, t, h, w = video.shape
+        if self.per_gop and t > self.gop:
+            g = t // self.gop
+            split = video.reshape(b, 3, g, self.gop, h, w).transpose(1, 2).reshape(b * g, 3, self.gop, h, w)
+            out = self._refine(split, gop_confidence.reshape(b * g, self.gop), 0)
+            return out.reshape(b, g, 3, self.gop, h, w).transpose(1, 2).reshape(b, 3, t, h, w)
+        return self._refine(video, gop_confidence, offset)
+
+    def _refine(self, video: torch.Tensor, gop_confidence: torch.Tensor, offset: int) -> torch.Tensor:
         b, _, t, h, w = video.shape
         phase = phase_channels(t, self.gop, offset).to(video)[None, :, :, None, None].expand(b, -1, -1, h, w)
         conf = gop_confidence.to(video)[:, None, :, None, None].expand(-1, 1, -1, h, w)

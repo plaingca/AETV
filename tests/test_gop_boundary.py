@@ -22,6 +22,16 @@ def test_untrained_refiner_is_identity():
     assert torch.equal(out, video)
 
 
+def test_per_gop_refiner_has_no_cross_gop_view():
+    torch.manual_seed(0)
+    model = BoundaryRefiner(width=16, blocks=1, per_gop=True)
+    torch.nn.init.normal_(model.tail.weight, std=0.01)
+    video, conf = torch.rand(2, 3, 12, 16, 24), torch.rand(2, 12)
+    changed = video.clone()
+    changed[:, :, 6:] = 0
+    assert torch.equal(model(video, conf)[:, :, :6], model(changed, conf)[:, :, :6])
+
+
 def test_causal_refiner_ignores_future_frames():
     torch.manual_seed(0)
     model = BoundaryRefiner(width=16, blocks=1, causal=True)
