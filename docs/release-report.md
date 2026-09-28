@@ -3,6 +3,65 @@ cursor:
   subagentId: "bc-537e5af2-01e8-5dcf-8260-fc6168862af6"
 ---
 
+# AETV 0.1.24 release attempt (2026-09-27): not shipped
+
+**Outcome: v0.1.24 was not tagged or published. The weak-signal beacon-verification check failed.** Everything else passed.
+
+- **Merge:** [#35 (LMMSE receiver)](https://github.com/plaingca/AETV/pull/35) is merged to main as `c52f0a2`.
+- **Version bump:** it is in [#36](https://github.com/plaingca/AETV/pull/36) (`d11fa6e`), with CI passing. #36 is left open and unmerged, so main still reports 0.1.23.
+- **Main:** it now carries the unreleased LMMSE receiver.
+- **Latest release:** v0.1.23 remains Latest.
+
+## What failed
+
+On identical captured samples, the LMMSE channel estimate verifies **fewer** weak-window beacons than the v0.1.23 receiver on two of eight captures, and there is **no net gain** overall. #35 reported V8 weak verification rising from 111 to 150 of 239, and V9 at −47.75 dB from 31 to 48 of 48; that does not reproduce here.
+
+**Paired replays** send each capture through the v0.1.23 source (tag worktree) and through this release (`scripts/replay_sdr_stress.py`), decoding with the same PyTorch checkpoints. "Verified" counts CRC-checked beacon frame counters in the 70–118 s weak window.
+
+| Capture (live receiver) | Weak verified, v0.1.23 → 0.1.24 | Weak PSNR, v0.1.23 → 0.1.24 | Per-GOP Δ | Latent SNR Δ |
+|---|---:|---:|---:|---:|
+| V8, 0.1.24 package | **42 → 36** | 18.93 → 19.06 | +0.15 ± 0.02 dB | +0.32 dB |
+| V8, 0.1.23 package | 42 → 48 | 18.81 → 18.98 | +0.17 ± 0.02 dB | +0.40 dB |
+| V9 at −50 dB, 0.1.24 | 0 → 10 | 18.73 → 18.97 | +0.27 ± 0.02 dB | +0.65 dB |
+| V9 at −50 dB, 0.1.23 | 37 → 37 | 19.34 → 19.51 | +0.17 ± 0.01 dB | +0.50 dB |
+| V9 at −47.75 dB, 0.1.24 | **48 → 42** | 20.02 → 20.12 | +0.11 ± 0.01 dB | +0.34 dB |
+| V9 at −47.75 dB, 0.1.23 | 48 → 48 | 20.18 → 20.25 | +0.09 ± 0.01 dB | +0.31 dB |
+| V7, 0.1.24 | 48 → 48 | 21.10 → 21.21 | +0.12 ± 0.01 dB | +0.38 dB |
+| V7, 0.1.23 | 48 → 48 | 21.13 → 21.23 | +0.13 ± 0.01 dB | +0.39 dB |
+| **Total** | **313 → 315** | | | |
+
+**Isolation.** Each of the two regressing captures was replayed with the flags set separately:
+
+| Arm | V8 capture | V9 −47.75 dB capture |
+|---|---:|---:|
+| `modem.CHANNEL_ESTIMATOR="pilot"`, `WINDOW_PLACEMENT=False` | 42 | 48 |
+| Pilot estimate + window placement | 42 | 48 |
+| LMMSE only | 36 | 42 |
+| LMMSE + placement (0.1.24) | 36 | 42 |
+
+**The loss comes from the LMMSE estimate, not the window placement.** With both flags off, the result reproduces v0.1.23 exactly. One way forward, untested: keep LMMSE for the latent carriers, but decode the beacon carrier from the pilot estimate, or accept a beacon when either estimate passes CRC. Then re-run this check.
+
+**Everything else passed:**
+
+- **Tests:** the full suite on #35's head gave 527 passed, 2 skipped. CI passed on Linux and Windows for #35 and #36.
+- **Build:** `scripts/build_linux.sh` built the GPU and CPU packages, and all built-in smoke tests passed.
+  - `/tmp` filled the root disk once, so my stale 0.1.23 scratch files were deleted and the CPU build re-run.
+  - The GPU AppImage and tarball are kept in `/pool0/AETV-runs/release-0.1.24-ota-20260927/local-build/`.
+- **Packaged benchmarks:** identical to 0.1.23. On an RTX 4090, V8 runs 7.2 / 10.6 ms and V9 7.0 / 10.3 ms (encode / decode). On CPU, V8 and V9 run full duplex at 3.2× real time and V7 at 0.72×.
+- **Live OTA:** these used the 0.1.23 settings (Pluto → RTL 1001 at 439 MHz, 120 GOPs, −10 dB then weak gain, v0.1.23 GPU package interleaved in the same session). Every trial finished with no receiver errors and no audio underflows, and the Pluto was verified powered down after each.
+
+  | Mode | 0.1.24 live strong / weak | 0.1.23 live strong / weak |
+  |---|---:|---:|
+  | V8 | 21.22 / 19.06 dB | 21.21 / 18.81 dB |
+  | V9 (−50 dB weak) | 21.40 / 18.97 dB | 21.39 / 19.37 dB |
+  | V9 (−47.75 dB weak) | 21.41 / 20.12 dB | 21.39 / 20.18 dB |
+  | V7 | 22.59 / 21.21 dB | 22.53 / 21.13 dB |
+
+  The live runs are not paired. At the same TX gain, the channel differed between runs: the median weak SNR for the V9 runs was −0.4 dB for 0.1.24 and 1.0 dB for 0.1.23. So the paired replays above are the comparison that counts. On identical samples, 0.1.24 PSNR is higher on all eight captures.
+- **Extra GOP:** the 0.1.24 V8 capture produced one extra GOP about 1 s after the signal ended: −8.3 dB SNR, 9.5 dB PSNR. The v0.1.23 receiver decodes the same spurious GOP from that capture, so it is not a regression from #35.
+
+**Evidence:** `/pool0/AETV-runs/release-0.1.24-ota-20260927/`. It holds trial configs, `rtl.cu8` captures, `metrics.json`, `scored-summary.json`, replays under `replay/` (including the flag-isolation `arm-*` runs), `replay/pair-scores.json`, `artifact-validation/` and the scripts.
+
 # AETV 0.1.23 release report (2026-09-26)
 
 **Outcome: shipped as [AETV v0.1.23](https://github.com/plaingca/AETV/releases/tag/v0.1.23).**
