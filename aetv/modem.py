@@ -1094,6 +1094,7 @@ class StreamingDemodulator:
         self._awaiting_search_offset = 0
         self._beacon_total_chips = 0
         self._beacon_phase_error = 0
+        self._beacon_anchor: beacon.BeaconAnchor | None = None
         self._tracking_phase_uncertain = False
         self._channel_stats: ChannelStatistics | None = None
 
@@ -1113,6 +1114,7 @@ class StreamingDemodulator:
         self._tracking_phase_uncertain = False
 
     def _clear_beacon(self) -> None:
+        self._beacon_anchor = None
         self._beacon_total_chips = 0
         self._beacon_phase_error = 0
         self.beacon_chips = np.zeros(0, dtype=np.float64)
@@ -1267,10 +1269,16 @@ class StreamingDemodulator:
             if found is not None and found.mode_index == result.mode.index:
                 self.last_beacon = found
         logical_history = self.beacon_repeated_chips if result.mode.band == "U" else self.beacon_chips
-        phase_beacon = find_beacon_superframe(logical_history, expected_mode=result.mode.index)
+        first_chip = self._beacon_total_chips - len(logical_history)
+        phase_beacon = find_beacon_superframe(
+            logical_history, expected_mode=result.mode.index,
+            anchor=self._beacon_anchor, stream_start=first_chip,
+        )
         if phase_beacon is not None:
             self._tracking_phase_uncertain = False
-            first_chip = self._beacon_total_chips - len(logical_history)
+            self._beacon_anchor = beacon.BeaconAnchor(
+                first_chip + phase_beacon.chip_offset, phase_beacon.frame_index, phase_beacon.callsign
+            )
             relative_frame = (first_chip + phase_beacon.chip_offset) // DATA_SYMS_PER_FRAME
             self._beacon_phase_error = (phase_beacon.frame_index - relative_frame) % FRAMES_PER_GOP
             current_frame = (self._beacon_total_chips - len(logical)) // DATA_SYMS_PER_FRAME

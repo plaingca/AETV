@@ -261,14 +261,34 @@ def _beacon_result(offset: int, decoded: tuple[int, str, int]) -> AETVBeaconResu
     )
 
 
+@dataclass(frozen=True)
+class BeaconAnchor:
+    """A verified superframe: its absolute chip position, counter and station."""
+
+    chip: int
+    frame_index: int
+    callsign: str
+
+
 def find_beacon_superframe(
     soft_stream: np.ndarray, threshold: float = 0.5, *,
     expected_mode: int | None = None,
+    anchor: BeaconAnchor | None = None,
+    stream_start: int = 0,
 ) -> AETVBeaconResult | None:
-    """Scan for a CRC-valid beacon, then try corroborated repeated frames.
+    """Scan for a CRC-valid beacon, then try corroborated observations.
 
-    The fallback combines only invariant whole Golay words (callsign/mode).
-    Counter and CRC words remain separate observations in each frame.
+    Corroboration never rests on one soft-list CRC check. It is either a
+    second frame whose counter differs by the superframe spacing, or, when
+    ``anchor`` holds an earlier verified superframe of this stream
+    (``stream_start`` is the absolute chip of ``soft_stream[0]``), a frame at
+    exactly the predicted position carrying exactly the predicted counter and
+    the anchor's callsign. Neither needs that frame's own 13-chip sync to
+    clear ``threshold``: its position is already known, and at weak signal
+    that short correlation is the least reliable part of a superframe.
+
+    The pair fallback combines only invariant whole Golay words
+    (callsign/mode). Counter and CRC words remain separate observations.
     """
     if len(soft_stream) < SUPERFRAME_LEN:
         return None
@@ -279,7 +299,8 @@ def find_beacon_superframe(
     sync_norm = np.linalg.norm(SYNC)
     window_norms = np.linalg.norm(windows, axis=1)
     corr = (windows @ SYNC) / np.maximum(window_norms * sync_norm, 1e-12)
-    peaks = np.where(np.abs(corr[:len(stream) - SUPERFRAME_LEN + 1]) > threshold)[0]
+    starts = len(stream) - SUPERFRAME_LEN + 1
+    peaks = np.where(np.abs(corr[:starts]) > threshold)[0]
     peaks = peaks[np.argsort(np.abs(corr[peaks]))[::-1]]
     for peak_idx in peaks:
         if peak_idx + SUPERFRAME_LEN <= len(soft_stream):
@@ -289,20 +310,35 @@ def find_beacon_superframe(
             if decoded is not None:
                 return _beacon_result(peak_idx, decoded)
 
+    if anchor is not None:
+        first = (anchor.chip - stream_start) % SUPERFRAME_LEN
+        for start in range(first, starts, SUPERFRAME_LEN):
+            chip = stream_start + start
+            predicted = (anchor.frame_index + chip // BEACON_CHIPS_PER_FRAME
+                         - anchor.chip // BEACON_CHIPS_PER_FRAME) & MAX_FRAME_COUNTER
+            payload = stream[start + SYNC_LEN : start + SUPERFRAME_LEN]
+            for candidate in _payload_candidates(payload, expected_mode):
+                if candidate[0] == predicted and candidate[1] == anchor.callsign:
+                    return _beacon_result(start, candidate)
+
     # Bound the work even when a long or noisy stream has many sync peaks.
     # At most three superframes of history are useful to the streaming RX.
+    # A strong sync peak fixes where the repeated frames must be, so each
+    # partner is ranked by the pair's combined sync evidence instead of
+    # requiring its own short correlation to clear the threshold.
     peak_set = set(int(p) for p in peaks)
-    pairs = [
-        (min(abs(corr[a]), abs(corr[a + distance])), a, a + distance)
-        for a in peak_set
+    pairs = sorted({
+        (abs(corr[a]) + abs(corr[b]), a, b)
+        for p in peak_set
         for distance in (SUPERFRAME_LEN, 2 * SUPERFRAME_LEN)
-        if a + distance in peak_set
-    ]
+        for a, b in ((p, p + distance), (p - distance, p))
+        if 0 <= a and b < starts and np.sign(corr[a]) == np.sign(corr[b])
+    }, reverse=True)
     # Whole words 1..4 contain only callsign and mode bits. Derive these bounds
     # so a future layout change cannot accidentally combine counters or CRCs.
     fixed_start = -(-BEACON_COUNTER_BITS // 12) * 24
     fixed_end = ((_PAYLOAD_BITS - BEACON_CRC_BITS) // 12) * 24
-    for _strength, first, second in sorted(pairs, reverse=True)[:8]:
+    for _strength, first, second in pairs[:8]:
         left = stream[first + SYNC_LEN:first + SUPERFRAME_LEN] * np.sign(corr[first])
         right = stream[second + SYNC_LEN:second + SUPERFRAME_LEN] * np.sign(corr[second])
         combined = left[fixed_start:fixed_end] + right[fixed_start:fixed_end]

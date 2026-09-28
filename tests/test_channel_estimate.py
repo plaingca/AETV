@@ -276,3 +276,17 @@ def test_gaussian_taps_follow_the_f1487_correlation_and_mpp12_is_unchanged():
     tone = np.sin(2 * np.pi * 1000 * np.arange(fs * 2) / fs).astype(np.float32)
     assert not np.array_equal(emulate(tone, "mpp12", seed=4), emulate(tone, RESEARCH_PROFILES["mpp12-gauss"], seed=4))
     assert np.array_equal(emulate(tone, "mpp12-gauss", seed=4), emulate(tone, RESEARCH_PROFILES["mpp12-gauss"], seed=4))
+
+
+def test_streaming_receiver_anchors_beacon_phase_until_it_is_cleared():
+    mode = AETV_MODES["V8"]
+    rng = np.random.default_rng(12)
+    gops = [rng.standard_normal(mode.latents_per_gop).astype(np.float32) for _ in range(8)]
+    tx = np.concatenate(list(modem.modulate_continuous_chunks(gops, "V8", "N0CALL")))
+    demod = modem.StreamingDemodulator("W", continuous=True, mode_name="V8", boundary_tracking=True)
+    results = demod.feed(tx) + demod.feed(np.zeros(2 * mode.geometry.fs, dtype=np.float32))
+    verified = [r for r in results if r.stream_frame_counter is not None]
+    assert verified and demod._beacon_anchor is not None
+    assert demod._beacon_anchor.callsign == "N0CALL"
+    demod._clear_beacon()
+    assert demod._beacon_anchor is None
