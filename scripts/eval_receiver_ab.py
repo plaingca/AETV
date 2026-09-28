@@ -126,7 +126,7 @@ def run(job):
             x = np.concatenate(sent)
             lat, w = np.concatenate(latents), np.concatenate(weights)
             row["snr"] = effective_snr(x, lat * w)
-            row["snr_gop_mean"] = float(np.mean([effective_snr(s, l * ww) for s, l, ww in zip(sent, latents, weights)]))
+            row["snr_gop_mean"] = float(np.mean([effective_snr(s, z * ww) for s, z, ww in zip(sent, latents, weights)]))
         out[arm] = row
     return out
 

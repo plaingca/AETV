@@ -14,7 +14,7 @@ from aetv.channel_estimate import (
     placement_shift,
     shift_limits,
 )
-from aetv.config import AETV_MODES, BANDS, DATA_SYMS_PER_FRAME, FRAMES_PER_GOP, RS, SYMS_PER_FRAME
+from aetv.config import AETV_MODES, BANDS, FRAMES_PER_GOP, RS, SYMS_PER_FRAME
 from aetv.hfchannel import RESEARCH_PROFILES, _gaussian_taps, _rayleigh_taps, awgn, emulate
 
 
