@@ -3,16 +3,104 @@ cursor:
   subagentId: "bc-537e5af2-01e8-5dcf-8260-fc6168862af6"
 ---
 
-# AETV 0.1.24 release attempt (2026-09-27): not shipped
+# AETV 0.1.24 release report (2026-09-28)
 
-**Outcome: v0.1.24 was not tagged or published. The weak-signal beacon-verification check failed.** Everything else passed.
+**Outcome: shipped as [AETV v0.1.24](https://github.com/plaingca/AETV/releases/tag/v0.1.24), Latest.** Main is at `cb76542`, which tag `v0.1.24` points to.
+
+- **First attempt, 2026-09-27:** blocked on weak-signal beacon verification (see below).
+- **The fix:** [#37](https://github.com/plaingca/AETV/pull/37). Its root cause is in `docs/lmmse-beacon-root-cause.md`.
+- **Second attempt:** every check passed.
+
+## Merge log (second attempt)
+
+| PR | Merge commit | Checks |
+|---|---|---|
+| [#37 beacon verification fix](https://github.com/plaingca/AETV/pull/37) | `0cc6309` | Full suite on head `c65f6a6`: 534 passed, 2 skipped. CI passed on Linux and Windows. |
+| [#36 version 0.1.24](https://github.com/plaingca/AETV/pull/36) | `cb76542` | Rebased onto main (bump commit `38ae064`). Release notes added. CI passed on Linux and Windows. |
+
+CI on main after the merges passed.
+
+## Build and validation
+
+- **Build:** `scripts/build_linux.sh` built the GPU and CPU packages from `38ae064`, which has the same tree as `cb76542`. All built-in smoke tests passed.
+- **Disk:** the root disk has little headroom, so each build's intermediates were deleted as it finished. Archives are in `/pool0/AETV-runs/release-0.1.24b-20260928/local-build/`.
+- **Packaged benchmarks:** unchanged. On an RTX 4090, V8 runs 7.2 / 10.6 ms (encode / decode), V9 7.0 / 10.3 ms, V7 16.4 / 37.9 ms and AC16 18.4 / 21.5 ms. On CPU, V8 and V9 run full duplex at 3.2× real time, V7 at 0.72× and AC16 at 2.36×.
+
+## Release check 1: paired replays of the eight 0.1.24 captures
+
+This is the check that blocked the first attempt. Each 2026-09-27 capture was replayed on identical samples through the v0.1.23 source (tag worktree) and through main with #37, using `scripts/replay_sdr_stress.py` and the same PyTorch checkpoints. Weak window: 70–118 s.
+
+| Capture | Weak verified, v0.1.23 → 0.1.24 | Weak PSNR, v0.1.23 → 0.1.24 | Per-GOP Δ |
+|---|---:|---:|---:|
+| V8, 0.1.24 package | 42 → **48** | 18.93 → 19.06 | +0.15 ± 0.02 dB |
+| V8, 0.1.23 package | 42 → **48** | 18.81 → 18.98 | +0.17 ± 0.02 dB |
+| V9 at −50 dB, 0.1.24 | 0 → **33** | 18.73 → 18.97 | +0.27 ± 0.02 dB |
+| V9 at −50 dB, 0.1.23 | 37 → **47** | 19.34 → 19.51 | +0.17 ± 0.01 dB |
+| V9 at −47.75 dB, 0.1.24 | 48 → 48 | 20.02 → 20.12 | +0.11 ± 0.01 dB |
+| V9 at −47.75 dB, 0.1.23 | 48 → 48 | 20.18 → 20.25 | +0.09 ± 0.01 dB |
+| V7, 0.1.24 | 48 → 48 | 21.10 → 21.21 | +0.12 ± 0.01 dB |
+| V7, 0.1.23 | 48 → 48 | 21.13 → 21.23 | +0.13 ± 0.01 dB |
+| **Total** | **313 → 368** | | |
+
+**Pass.** Verification is at or above v0.1.23 on every capture, and PSNR is better on every capture. Strong-window verification is 48 of 48 in both receivers.
+
+**Every verified counter is correct.** Across all captures and both receivers, each verified frame counter was checked against the transmitted GOP: 0 wrong, out of 901 new-receiver verifications over the whole captures.
+
+## Release check 2: noise only
+
+The Pluto was confirmed powered down (TX LO off, −89.75 dB). RTL 1001 then recorded 60 s at 439.1 MHz and 960 kS/s, at gains 37.2 and 49.6 dB. Both receivers were run over each capture in V8, V9 and V7.
+
+**Pass.** All 12 runs (2 gains × 3 modes × 2 receivers) decoded 0 GOPs and verified 0 beacons.
+
+**A carried-over quirk, not caused by 0.1.24.** The 2026-09-27 0.1.24 V8 capture contains one noise GOP decoded about 1 s after the transmission ended. Both receivers label it with the next frame counter (960), so v0.1.23 already does this. The noise-only runs show no such locks.
+
+## Release check 3: live OTA against v0.1.23
+
+**Setup:** the same as before:
+- Pluto → RTL 1001 at 439 MHz.
+- 120 GOPs per trial, TX −10 dB for the first 60 s, then −50 dB (V8, V9) or −45 dB (V7).
+- The packaged GPU builds, with the v0.1.23 release asset (checksum-verified) run in the same session.
+- Pluto power-down verified after every trial; the null audio sink was removed afterwards.
+
+| Mode | Package | Decoded | Strong PSNR | Weak PSNR, all GOPs | Weak verified / ambiguous | Median SNR strong / weak |
+|---|---|---:|---:|---:|---:|---:|
+| V8 | **0.1.24** | 120/120 | 21.22 | **19.14** | **48** / 0 | 27.8 / 0.4 dB |
+| V8 | v0.1.23 | 120/120 | 21.21 | 18.99 | 37 / 0 | 30.9 / 0.4 dB |
+| V9 | **0.1.24** | 120/120 | 21.41 | **19.28** | **42** / 0 | 36.2 / 0.3 dB |
+| V9 | v0.1.23 | 120/120 | 21.39 | 18.99 | 0 / 7 | 36.2 / 0.2 dB |
+| V7 | **0.1.24** | 120/120 | 22.59 | **21.18** | 48 / 0 | 37.6 / 6.2 dB |
+| V7 | v0.1.23 | 120/120 | 22.54 | 20.98 | 48 / 0 | 37.3 / 6.0 dB |
+
+**Pass.** Weak SNR matched between packages this time, so the live comparison is fair:
+- Every trial decoded 120 of 120 GOPs, with no errors and no audio underflows.
+- Weak PSNR improved by +0.15 dB (V8), +0.29 dB (V9) and +0.20 dB (V7).
+- Weak beacon verification improved in V8 and V9 and was equal in V7.
+- Median presentation latency was unchanged: 2.8 s for V8 and V9, 3.0 s for V7.
+
+## Publication
+
+- **Tag and build:** pushing tag `v0.1.24` (on `cb76542`) ran the [release workflow](https://github.com/plaingca/AETV/actions/runs/36395295257).
+  - **First run:** both Linux jobs failed. `appimagetool` got an HTTP 500 from GitHub while downloading the AppImage `type2-runtime`, a transient infrastructure error. Windows succeeded.
+  - **Re-run:** after the runtime URL answered 200 again, the failed jobs were re-run with the tag and code unchanged. Everything passed and the release was published as Latest.
+- **Published package check:** the published `AETV-linux-x64-gpu.tar.gz` matches `SHA256SUMS.txt`. It passes the SDR smoke test and runs V8, V9 and V7 on CUDA with the pinned bundles.
+- **Release notes:** they cover the receiver and beacon gains, these results, and the unchanged known limits:
+  - HackRF untested on hardware.
+  - GOP refiner off.
+  - AC16 and late-join on the previous estimator.
+  - Faded GOPs shown as still frames.
+  - V9 power, V7 CPU speed, and Windows validated by CI only.
+- **Evidence:** `/pool0/AETV-runs/release-0.1.24b-20260928/` holds the live OTA trials, noise captures and replays, artifact validation, local build archives and the v0.1.23 package. The replays of the 2026-09-27 captures are in `/pool0/AETV-runs/release-0.1.24-ota-20260927/replay-fix/`.
+
+## First attempt (2026-09-27): blocked
+
+**Outcome at the time: v0.1.24 was not tagged or published. The weak-signal beacon-verification check failed.** Everything else passed.
 
 - **Merge:** [#35 (LMMSE receiver)](https://github.com/plaingca/AETV/pull/35) is merged to main as `c52f0a2`.
-- **Version bump:** it is in [#36](https://github.com/plaingca/AETV/pull/36) (`d11fa6e`), with CI passing. #36 is left open and unmerged, so main still reports 0.1.23.
-- **Main:** it now carries the unreleased LMMSE receiver.
-- **Latest release:** v0.1.23 remains Latest.
+- **Version bump:** it is in [#36](https://github.com/plaingca/AETV/pull/36) (`d11fa6e`), with CI passing. #36 was left open and unmerged, so main still reported 0.1.23.
+- **Main:** it carried the unreleased LMMSE receiver.
+- **Latest release:** v0.1.23 remained Latest.
 
-## What failed
+### What failed
 
 On identical captured samples, the LMMSE channel estimate verifies **fewer** weak-window beacons than the v0.1.23 receiver on two of eight captures, and there is **no net gain** overall. #35 reported V8 weak verification rising from 111 to 150 of 239, and V9 at −47.75 dB from 31 to 48 of 48; that does not reproduce here.
 
