@@ -78,7 +78,8 @@ def demodulate(mode_name: str, rx: np.ndarray, gops: int, stream: bool):
     if not stream:
         d = modem.demodulate_gop_stream(rx, band=mode.band, drift_track="off")
         chips = d.beacon_repeated_chips if mode.band == "U" else d.beacon_chips
-        return d.gops_latents, d.gops_weights, chips, [d.beacon is not None and d.beacon.callsign == "N0CALL"], [d.window_shift], d.lmmse_gops
+        return (d.gops_latents, d.gops_weights, chips, [d.beacon is not None and d.beacon.callsign == "N0CALL"],
+                [getattr(d, "window_shift", 0)], getattr(d, "lmmse_gops", 0))
     receiver = modem.StreamingDemodulator(mode.band, continuous=True, mode_name=mode_name, boundary_tracking=True)
     results = []
     block = mode.geometry.fs // 10
@@ -91,7 +92,8 @@ def demodulate(mode_name: str, rx: np.ndarray, gops: int, stream: bool):
     chips = np.concatenate([r.beacon_repeated_chips if mode.band == "U" else r.beacon_chips
                             for r in results]) if results else np.zeros(0)
     verified = [r.stream_frame_counter is not None for r in results]
-    return latents, weights, chips, verified, [r.window_shift for r in results], sum(r.lmmse_gops for r in results)
+    return (latents, weights, chips, verified, [getattr(r, "window_shift", 0) for r in results],
+            sum(getattr(r, "lmmse_gops", 0) for r in results))
 
 
 def run(job):
@@ -101,7 +103,7 @@ def run(job):
     rx = emulate(audio, profile(prof), seed=seed, fs=mode.geometry.fs)
     chips_sent = np.asarray(generate_beacon_chips(n_frames=gops * FRAMES_PER_GOP, start_frame=0,
                                                   callsign="N0CALL", mode_index=mode.index), dtype=float)
-    out = {}
+    out = {"seed": seed}
     for arm in arms:
         modem.CHANNEL_ESTIMATOR, modem.WINDOW_PLACEMENT = ARMS[arm]
         try:

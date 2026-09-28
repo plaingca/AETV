@@ -99,3 +99,53 @@ def test_beacon_rejects_nonfinite_chips(bad):
     chips[-1] = bad
     assert beacon.find_beacon_superframe(chips, expected_mode=8) is None
     assert beacon.decode_superframe(chips[beacon.SYNC_LEN:]) is None
+
+
+def _sync_corr(stream, start):
+    window = stream[start:start + beacon.SYNC_LEN]
+    return float(window @ beacon.SYNC / (np.linalg.norm(window) * np.linalg.norm(beacon.SYNC)))
+
+
+def test_weak_beacon_pair_does_not_need_the_partner_sync_to_clear_the_threshold():
+    left, right = _weak_pair()
+    right[:beacon.SYNC_LEN] = 0.35 * beacon.SYNC + np.random.default_rng(0).normal(0, 1, beacon.SYNC_LEN)
+    stream = np.concatenate([left, right])
+    assert _sync_corr(stream, beacon.SUPERFRAME_LEN) < 0.5 < _sync_corr(stream, 0)
+    found = beacon.find_beacon_superframe(stream, expected_mode=2)
+    assert found is not None and found.frame_index == (1000 + 45) & 1023 and found.callsign == "W9XYZ/3"
+
+
+def _list_only_superframe(counter, callsign="VE3TEST", sync=None):
+    chips = beacon.encode_superframe(counter, callsign, 8)
+    _mix_word(chips, 5, (1 << 10) | (1 << 7))
+    chips[:beacon.SYNC_LEN] = 0.0 if sync is None else sync
+    return chips
+
+
+def test_anchor_verifies_the_predicted_superframe_without_its_sync():
+    # Superframe k starts at transmitted chip 181 k and carries counter 181 k // 4.
+    chip = 5 * beacon.SUPERFRAME_LEN
+    stream = _list_only_superframe(chip // 4)
+    assert beacon.decode_superframe(stream[beacon.SYNC_LEN:], expected_mode=8) is None
+    assert beacon.find_beacon_superframe(stream, expected_mode=8) is None
+    anchor = beacon.BeaconAnchor(4 * beacon.SUPERFRAME_LEN, 4 * beacon.SUPERFRAME_LEN // 4, "VE3TEST")
+    found = beacon.find_beacon_superframe(stream, expected_mode=8, anchor=anchor, stream_start=chip)
+    assert found is not None and found.frame_index == chip // 4 and found.chip_offset == 0
+
+
+@pytest.mark.parametrize("counter_error,callsign,chip_error", [(1, "VE3TEST", 0), (0, "K8OTHER", 0), (0, "VE3TEST", 4)])
+def test_anchor_rejects_a_wrong_counter_station_or_position(counter_error, callsign, chip_error):
+    chip = 5 * beacon.SUPERFRAME_LEN
+    stream = _list_only_superframe(chip // 4 + counter_error, callsign)
+    anchor = beacon.BeaconAnchor(4 * beacon.SUPERFRAME_LEN + chip_error, 4 * beacon.SUPERFRAME_LEN // 4, "VE3TEST")
+    assert beacon.find_beacon_superframe(stream, expected_mode=8, anchor=anchor, stream_start=chip) is None
+
+
+def test_anchor_and_partner_pairing_reject_noise():
+    rng = np.random.default_rng(419)
+    anchor = beacon.BeaconAnchor(0, 0, "N0CALL")
+    for trial in range(64):
+        stream = rng.standard_normal(3 * beacon.SUPERFRAME_LEN)
+        stream[:beacon.SYNC_LEN] = beacon.SYNC
+        assert beacon.find_beacon_superframe(stream, expected_mode=8, anchor=anchor,
+                                             stream_start=trial * beacon.SUPERFRAME_LEN) is None
