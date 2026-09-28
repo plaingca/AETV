@@ -20,6 +20,11 @@ class FadingPreset:
     name: str
     doppler_hz: float
     delay_ms: float
+    # "butterworth" is the historical generator behind every published mpp
+    # score. Its 2nd-order skirts make fades faster than the nominal spread.
+    # "gaussian" follows ITU-R F.1487: a Gaussian Doppler spectrum whose
+    # 2-sigma width is ``doppler_hz``.
+    taps: str = "butterworth"
 
 
 FADING_PRESETS = {
@@ -30,6 +35,7 @@ FADING_PRESETS = {
     "ota40m": FadingPreset("ota40m", 0.24, 0.6),
     "mpp": FadingPreset("mpp", 1.0, 2.0),
     "mpd": FadingPreset("mpd", 2.0, 4.0),
+    "mpp-gauss": FadingPreset("mpp-gauss", 1.0, 2.0, "gaussian"),
 }
 
 
@@ -52,6 +58,15 @@ CHANNEL_PROFILES = {
     "mpp12": ChannelProfile("mpp12", "MPP 12", 12.0, "mpp", "MPP fading at 12 dB SNR"),
     "mpp6": ChannelProfile("mpp6", "MPP 6", 6.0, "mpp", "MPP fading at 6 dB SNR"),
     "mpp0": ChannelProfile("mpp0", "MPP 0", 0.0, "mpp", "MPP fading at 0 dB SNR"),
+}
+
+# Offline-evaluation profiles, kept out of the operator's TX profile list.
+# ``mpp12`` stays the score bar; ``mpp12-gauss`` is reported separately.
+RESEARCH_PROFILES = {
+    "mpp12-gauss": ChannelProfile(
+        "mpp12-gauss", "MPP 12 Gaussian", 12.0, "mpp-gauss",
+        "MPP fading with F.1487 Gaussian Doppler taps at 12 dB SNR",
+    ),
 }
 
 
@@ -94,6 +109,26 @@ def _rayleigh_taps(
     return tap / np.sqrt(np.mean(np.abs(tap) ** 2))
 
 
+def _gaussian_taps(
+    n: int, spread_hz: float, rng: np.random.Generator, fs: int
+) -> np.ndarray:
+    """Rayleigh tap with a Gaussian Doppler spectrum of 2-sigma width ``spread_hz``.
+
+    White noise is shaped in the frequency domain at a low rate, then
+    band-limited (FFT) resampling interpolates it to ``fs`` without the
+    distortion of linear interpolation.
+    """
+    step = max(1, int(fs // max(16.0 * spread_hz, 8.0)))
+    lowrate = fs / step
+    n_low = max(int(np.ceil(n / step)), 16)
+    g = rng.normal(size=n_low) + 1j * rng.normal(size=n_low)
+    sigma = spread_hz / 2.0
+    f = np.fft.fftfreq(n_low, d=1.0 / lowrate)
+    g = np.fft.ifft(np.fft.fft(g) * np.exp(-(f**2) / (4.0 * sigma**2)))
+    tap = signal.resample(g, n_low * step)[:n]
+    return tap / np.sqrt(np.mean(np.abs(tap) ** 2))
+
+
 def fading(
     x: np.ndarray,
     preset: str | FadingPreset,
@@ -105,8 +140,9 @@ def fading(
     rng = np.random.default_rng(seed)
     z = _analytic(x)
     delay = int(round(p.delay_ms * 1e-3 * fs))
-    g1 = _rayleigh_taps(len(z), p.doppler_hz, rng, fs)
-    g2 = _rayleigh_taps(len(z), p.doppler_hz, rng, fs)
+    taps = _gaussian_taps if p.taps == "gaussian" else _rayleigh_taps
+    g1 = taps(len(z), p.doppler_hz, rng, fs)
+    g2 = taps(len(z), p.doppler_hz, rng, fs)
     z2 = np.concatenate([np.zeros(delay, dtype=complex), z[: len(z) - delay]])
     return np.real((z * g1 + z2 * g2) / np.sqrt(2))
 
@@ -143,7 +179,10 @@ def emulate(
     continuous across GOP boundaries. The fixed default seed makes visual
     comparisons and bug reproduction deterministic.
     """
-    selected = CHANNEL_PROFILES[profile] if isinstance(profile, str) else profile
+    selected = (
+        CHANNEL_PROFILES.get(profile) or RESEARCH_PROFILES[profile]
+        if isinstance(profile, str) else profile
+    )
     impaired = np.asarray(x, dtype=np.float64).reshape(-1).copy()
     # AWGN belongs to the receiver noise floor. Reference it to transmitted
     # signal power, not to the result of a fade: otherwise a deep fade also

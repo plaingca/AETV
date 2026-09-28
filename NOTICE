@@ -10,6 +10,12 @@ simulation. AETV adds the moving-video codec, Flex-8k waveform and V7 mode,
 video training and evaluation pipeline, and ham-station application. No
 SSTVAE application branding or restricted icon artwork is included here.
 
+The receiver's 2-D LMMSE pilot channel estimate and demodulation-window
+placement (aetv/channel_estimate.py) are adapted from SSTVAE's receiver
+improvements, https://github.com/arodland/SSTVAE/pull/58, which port ideas
+from Data2G. AETV accumulates the statistics across GOPs and falls back to its
+original estimator when they are too noisy.
+
 SSTVAE and AETV are licensed under the Artistic License 2.0. Copyright in
 individual contributions remains with the respective contributors.
 

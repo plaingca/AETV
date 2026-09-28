@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Iterable
 from math import gcd
+import copy
 import time
 
 import numpy as np
@@ -21,6 +22,7 @@ from scipy.ndimage import convolve1d
 from . import golay
 from . import beacon, framing, ofdm
 from .beacon import AETVBeaconResult, find_beacon_superframe, generate_beacon_chips
+from .channel_estimate import ChannelStatistics, lmmse_payload_channels, placement_shift
 from .config import (
     ACQUIRE_MAX_BINS,
     AETV_MODES,
@@ -56,6 +58,14 @@ from .config import (
 )
 from .sync import Acquisition, SyncError, acquire, freq_correct
 
+# Receiver channel estimation. "lmmse" uses aetv.channel_estimate and falls
+# back per GOP to the "pilot" estimator (shrinkage across carriers, linear
+# interpolation between two pilots) when its statistics are too noisy.
+CHANNEL_ESTIMATOR = "lmmse"
+WINDOW_PLACEMENT = True
+# AC16's guarded 48 kHz waveform has not been validated with either change.
+LMMSE_BANDS = ("W", "M", "U")
+
 
 @dataclass
 class AETVDemodResult:
@@ -86,6 +96,11 @@ class AETVDemodResult:
     # to associate delayed analog program audio, including after reacquisition.
     stream_start_sample: int | None = None
     stream_frame_counter: int | None = None
+    # Receiver channel statistics after this decode; a streaming receiver
+    # keeps them for the next GOP only if it accepts this one.
+    channel_stats: ChannelStatistics | None = None
+    window_shift: int = 0
+    lmmse_gops: int = 0
 
 
 @dataclass(frozen=True)
@@ -564,6 +579,57 @@ def _equalize_payload_symbol(
     return equalized, weights
 
 
+def _pilot_gop_channels(pilots: np.ndarray, noise_variance: float) -> np.ndarray:
+    """The pilot estimator for one GOP: ``(8, 4, carriers)`` data-symbol channels.
+
+    The last frame reuses its own pilot, because the following GOP's pilot
+    is not part of this GOP.
+    """
+    denoised = _denoise_pilot_channels(pilots, noise_variance)
+    out = np.empty((FRAMES_PER_GOP, DATA_SYMS_PER_FRAME, denoised.shape[1]), dtype=np.complex128)
+    for frame in range(FRAMES_PER_GOP):
+        for data_index in range(DATA_SYMS_PER_FRAME):
+            if frame + 1 < FRAMES_PER_GOP:
+                out[frame, data_index] = _interpolate_payload_channel(
+                    denoised[frame], denoised[frame + 1], (data_index + 1) / SYMS_PER_FRAME
+                )
+            else:
+                out[frame, data_index] = denoised[frame]
+    return out
+
+
+def _payload_channels(
+    pilots: np.ndarray,
+    noise_variances: np.ndarray,
+    band: str,
+    stats: ChannelStatistics | None,
+    window_shift: int,
+) -> tuple[np.ndarray, int]:
+    """Channel at every data symbol of whole GOPs, and how many GOPs used LMMSE."""
+    n_gops = len(pilots) // FRAMES_PER_GOP
+    lmmse = (
+        lmmse_payload_channels(pilots, stats, window_shift)
+        if stats is not None and CHANNEL_ESTIMATOR == "lmmse" and band in LMMSE_BANDS
+        else [None] * n_gops
+    )
+    for g in range(n_gops):
+        power = float(np.mean(np.abs(pilots[g * FRAMES_PER_GOP : (g + 1) * FRAMES_PER_GOP]) ** 2))
+        # Noiseless pilots are already exact; any smoothing only adds error.
+        if noise_variances[g] <= max(power, 1e-18) * 1e-8:
+            lmmse[g] = None
+    gops = [
+        estimate if estimate is not None else _pilot_gop_channels(
+            pilots[g * FRAMES_PER_GOP : (g + 1) * FRAMES_PER_GOP], noise_variances[g]
+        )
+        for g, estimate in enumerate(lmmse)
+    ]
+    return np.concatenate(gops), sum(estimate is not None for estimate in lmmse)
+
+
+def _uses_channel_stats(band: str) -> bool:
+    return band in LMMSE_BANDS and (CHANNEL_ESTIMATOR == "lmmse" or WINDOW_PLACEMENT)
+
+
 def _cp_frequency_offset(
     audio: np.ndarray, starts: np.ndarray, m: int, ncp: int, fs: int
 ) -> float:
@@ -1029,12 +1095,17 @@ class StreamingDemodulator:
         self._beacon_total_chips = 0
         self._beacon_phase_error = 0
         self._tracking_phase_uncertain = False
+        self._channel_stats: ChannelStatistics | None = None
 
     def _start_tracking(
-        self, mode: AETVModeSpec, freq_offset: float
+        self,
+        mode: AETVModeSpec,
+        freq_offset: float,
+        channel_stats: ChannelStatistics | None = None,
     ) -> None:
         self._tracking_mode = mode
         self._tracking_freq_offset = float(freq_offset)
+        self._channel_stats = channel_stats
         self._tracking_bad_gops = 0
         self._tracking_pending.clear()
         self._tracking_expected_offset = 0
@@ -1051,6 +1122,7 @@ class StreamingDemodulator:
 
     def _lose_tracking(self) -> None:
         self._tracking_mode = None
+        self._channel_stats = None
         self._header_aided_allowed = False
         self._tracking_pending.clear()
         self._tracking_expected_offset = 0
@@ -1092,6 +1164,7 @@ class StreamingDemodulator:
                     self._tracking_freq_offset,
                     interleave=self.interleave,
                     timing_tracking=self.timing_tracking,
+                    channel_stats=self._channel_stats,
                 )
             except SyncError:
                 continue
@@ -1284,6 +1357,7 @@ class StreamingDemodulator:
                         self._tracking_freq_offset,
                         interleave=self.interleave,
                         timing_tracking=self.timing_tracking,
+                        channel_stats=self._channel_stats,
                     )
                 except SyncError as error:
                     failure_reason = str(error)
@@ -1319,6 +1393,7 @@ class StreamingDemodulator:
                                 self._tracking_freq_offset,
                                 interleave=self.interleave,
                                 timing_tracking=self.timing_tracking,
+                                channel_stats=self._channel_stats,
                             )
                         except SyncError:
                             candidate = None
@@ -1457,6 +1532,7 @@ class StreamingDemodulator:
                         self._lose_tracking()
                     continue
                 self._tracking_freq_offset = result.freq_offset
+                self._channel_stats = result.channel_stats
                 self._tracking_bad_gops = 0
                 self._tracking_pending.clear()
                 if realigned and abs(payload_offset - expected_offset) > _ncp:
@@ -1824,7 +1900,7 @@ class StreamingDemodulator:
                 result, candidate_sample, minimum + 2 * int(0.1 * fs)
             )
             if self.continuous:
-                self._start_tracking(result.mode, result.freq_offset)
+                self._start_tracking(result.mode, result.freq_offset, result.channel_stats)
                 self._tracking_expected_offset = retained
                 self._awaiting_blind = False
             self._debug(
@@ -2336,18 +2412,38 @@ def demodulate_gop_stream(
                 r_pilots.append(r_pilot)
                 h_pilots.append(r_pilot / pilot_seq)
             h_pilot_arr = np.asarray(h_pilots)
+    stats = None
+    window_shift = 0
+    if _uses_channel_stats(band):
+        stats = ChannelStatistics(band)
+        # The averaged preamble is one more low-noise delay-profile snapshot
+        # in the same window convention as the payload pilots.
+        stats.update_profile(h_preamble, 0, weight=1.0)
+        stats.update_profile(h_pilot_arr, 0)
+        if WINDOW_PLACEMENT:
+            window_shift = placement_shift(stats, 0)
+        if window_shift:
+            r_pilots = [
+                ofdm.demod_window(
+                    z_cfo, frames_start + f * frame_samples + ncp, band=band,
+                    backoff=DEMOD_BACKOFF - window_shift,
+                )
+                for f in range(total_frames)
+            ]
+            h_pilot_arr = np.asarray(r_pilots) / pilot_seq
+        stats.window_shift = window_shift
+    backoff = DEMOD_BACKOFF - window_shift
     noise_variances = _payload_noise_variances(
         h_pilot_arr,
         geom.latent_carriers,
         band=band,
         remove_timing=timing_tracking,
     )
-    equalizer_pilots = np.concatenate([
-        _denoise_pilot_channels(
-            h_pilot_arr[g * FRAMES_PER_GOP : (g + 1) * FRAMES_PER_GOP], noise
-        )
-        for g, noise in enumerate(noise_variances)
-    ])
+    # A complete GOP is buffered before decode, so the estimators use the
+    # following pilots to interpolate the channel at each data symbol.
+    data_channels, lmmse_gops = _payload_channels(
+        h_pilot_arr, noise_variances, band, stats, window_shift
+    )
 
     # Demodulate all data frames.
     for f in range(total_frames):
@@ -2360,28 +2456,17 @@ def demodulate_gop_stream(
             carrier_freq += beta * phase_err
             carrier_phase += alpha * phase_err + carrier_freq
 
-        # Channel estimate H on pilot
-        h_f = equalizer_pilots[f]
         noise_variance = noise_variances[f // FRAMES_PER_GOP]
 
         # Equalize 4 data symbols in this frame
         for s in range(DATA_SYMS_PER_FRAME):
             sym_sample = frame_sample + (1 + s) * nsym + ncp
-            r_sym = ofdm.demod_window(z_cfo, sym_sample, band=band)
+            r_sym = ofdm.demod_window(z_cfo, sym_sample, band=band, backoff=backoff)
 
             if alpha > 0:
                 r_sym *= np.exp(-1j * carrier_phase)
 
-            # A complete GOP is buffered before decode, so use the following
-            # frame's pilot to interpolate the channel at each data symbol.
-            # This removes up to 100 ms of avoidable pilot age on fading paths.
-            if f + 1 < total_frames and (f + 1) % FRAMES_PER_GOP:
-                fraction = (s + 1) / SYMS_PER_FRAME
-                h_data = _interpolate_payload_channel(
-                    h_f, equalizer_pilots[f + 1], fraction
-                )
-            else:
-                h_data = h_f
+            h_data = data_channels[f, s]
 
             eq_sym, weight = _equalize_payload_symbol(
                 r_sym, h_data, noise_variance
@@ -2461,6 +2546,9 @@ def demodulate_gop_stream(
         pilot_confidence=_raw_pilot_confidence(
             h_pilot_arr, noise_variances[0], geom.latent_carriers
         ),
+        channel_stats=stats,
+        window_shift=window_shift,
+        lmmse_gops=lmmse_gops,
     )
 
 
@@ -2470,6 +2558,7 @@ def demodulate_tracked_gop(
     freq_offset: float = 0.0,
     interleave: bool = True,
     timing_tracking: bool = False,
+    channel_stats: ChannelStatistics | None = None,
 ) -> AETVDemodResult:
     """Decode one boundary-aligned payload while already tracking a stream.
 
@@ -2477,7 +2566,10 @@ def demodulate_tracked_gop(
     gain and per-carrier equalization need no synthetic preamble or repeated RF
     header. This mirrors the payload-only decoder used for the Simpsons OTA
     tests: once the segment boundary is known, decode directly from its pilots.
-    ``freq_offset`` is retained for receiver telemetry.
+    ``freq_offset`` is retained for receiver telemetry. ``channel_stats``
+    carries the delay profile, Doppler correlation and window placement of
+    earlier GOPs; it is not modified, and the updated copy is returned in the
+    result.
     """
     payload = np.asarray(audio, dtype=np.float32).reshape(-1)
     expected = mode.geometry.fs
@@ -2499,19 +2591,30 @@ def demodulate_tracked_gop(
     all_data_weights = []
     all_beacon_chips = []
     all_beacon_repeated_chips = []
-    h_pilots = []
+
+    stats = None
+    window_shift = 0
+    if _uses_channel_stats(mode.band):
+        stats = copy.deepcopy(channel_stats) if channel_stats is not None else ChannelStatistics(mode.band)
+        # Place the window from earlier GOPs only. A timing jump inside this
+        # GOP is the boundary tracker's to repair; moving the FFT window to
+        # absorb it would hide the jump and leave the GOP boundary wrong.
+        if WINDOW_PLACEMENT:
+            window_shift = placement_shift(stats, stats.window_shift)
+        stats.window_shift = window_shift
+
+    def demod_pilots(z_values: np.ndarray, shift: int) -> np.ndarray:
+        return np.asarray([
+            ofdm.demod_window(
+                z_values, frame * frame_samples + ncp, band=mode.band,
+                backoff=DEMOD_BACKOFF - shift,
+            )
+            for frame in range(FRAMES_PER_GOP)
+        ]) / pilot_seq
 
     # Estimate every pilot before decoding data so the regularizer is tied to
     # the GOP's channel gain, not to arbitrary receive amplitude.
-    r_pilots = []
-    for frame in range(FRAMES_PER_GOP):
-        frame_sample = frame * frame_samples
-        r_pilot = ofdm.demod_window(
-            z_cfo, frame_sample + ncp, band=mode.band
-        )
-        r_pilots.append(r_pilot)
-        h_pilots.append(r_pilot / pilot_seq)
-    pilot_array = np.asarray(h_pilots)
+    pilot_array = demod_pilots(z_cfo, window_shift)
     refined_freq_offset = float(freq_offset)
     if _pilot_coherence(pilot_array) >= 0.09:
         residual_cfo = _pilot_residual_cfo_hz(
@@ -2522,39 +2625,27 @@ def demodulate_tracked_gop(
         refined_freq_offset += residual_cfo
         if abs(residual_cfo) > 1e-6:
             z_cfo = freq_correct(z, refined_freq_offset, fs)
-            r_pilots = []
-            h_pilots = []
-            for frame in range(FRAMES_PER_GOP):
-                frame_sample = frame * frame_samples
-                r_pilot = ofdm.demod_window(
-                    z_cfo, frame_sample + ncp, band=mode.band
-                )
-                r_pilots.append(r_pilot)
-                h_pilots.append(r_pilot / pilot_seq)
-            pilot_array = np.asarray(h_pilots)
+            pilot_array = demod_pilots(z_cfo, window_shift)
+    if stats is not None:
+        stats.update_profile(pilot_array, window_shift)
     noise_variance = _payload_noise_variances(
         pilot_array,
         geom.latent_carriers,
         band=mode.band,
         remove_timing=timing_tracking,
     )[0]
-    equalizer_pilots = _denoise_pilot_channels(pilot_array, noise_variance)
+    data_channels, lmmse_gops = _payload_channels(
+        pilot_array, np.array([noise_variance]), mode.band, stats, window_shift
+    )
 
     for frame in range(FRAMES_PER_GOP):
         frame_sample = frame * frame_samples
-        h_f = equalizer_pilots[frame]
         for data_index in range(DATA_SYMS_PER_FRAME):
             symbol_sample = frame_sample + (1 + data_index) * nsym + ncp
             received = ofdm.demod_window(
-                z_cfo, symbol_sample, band=mode.band
+                z_cfo, symbol_sample, band=mode.band, backoff=DEMOD_BACKOFF - window_shift
             )
-            if frame + 1 < FRAMES_PER_GOP:
-                fraction = (data_index + 1) / SYMS_PER_FRAME
-                h_data = _interpolate_payload_channel(
-                    h_f, equalizer_pilots[frame + 1], fraction
-                )
-            else:
-                h_data = h_f
+            h_data = data_channels[frame, data_index]
             equalized, weight = _equalize_payload_symbol(
                 received, h_data, noise_variance
             )
@@ -2617,4 +2708,7 @@ def demodulate_tracked_gop(
         pilot_confidence=_raw_pilot_confidence(
             pilot_array, noise_variance, geom.latent_carriers
         ),
+        channel_stats=stats,
+        window_shift=window_shift,
+        lmmse_gops=lmmse_gops,
     )
