@@ -5,7 +5,8 @@ Same clips and fade seeds as ``scripts/eval_shared.py`` (64 eval clips, fade
 seed ``2026 + clip * G + gop``). Each clip is encoded once, and every receiver
 arm demodulates the identical impaired waveform, so per-clip differences are
 exact pairs. ``pilot`` is the v0.1.23 receiver; ``both`` is LMMSE plus window
-placement.
+placement. Motion preservation is the pooled reconstructed/source ratio of
+frame-difference energy and of Farneback flow magnitude.
 
     python scripts/eval_receiver_psnr.py --model V8=models/v8-hf3k-mpp12-ft.pt \\
         --model V9=models/v9-wide4k.pt --out runs/receiver-psnr/eval64.json
@@ -19,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 
@@ -41,6 +43,18 @@ from aetv.shared_eval import (  # noqa: E402
 
 ARMS = {"pilot": ("pilot", False), "lmmse": ("lmmse", False), "place": ("pilot", True), "both": ("lmmse", True)}
 EXTRA = {"mpp3": ChannelProfile("mpp3", "MPP 3", 3.0, "mpp")}
+LUMA = torch.tensor([0.299, 0.587, 0.114])
+
+
+def motion(clip: torch.Tensor) -> tuple[float, float]:
+    """Sum over transitions of frame-difference energy and mean flow magnitude, (3, T, H, W) input."""
+    diff = clip[:, 1:].float() - clip[:, :-1].float()
+    luma = (torch.einsum("c,cthw->thw", LUMA.to(clip), clip.float()).clamp(0, 1) * 255).round().byte().cpu().numpy()
+    flow = sum(
+        float(np.linalg.norm(cv2.calcOpticalFlowFarneback(luma[t - 1], luma[t], None, 0.5, 3, 15, 3, 5, 1.2, 0), axis=-1).mean())
+        for t in range(1, luma.shape[0])
+    )
+    return float(diff.square().mean(dim=(0, 2, 3)).sum()), flow
 
 
 def profile(name: str):
@@ -86,7 +100,9 @@ def main() -> None:
         mode_name, path = spec.split("=", 1)
         started = time.time()
         adapter = AutoencoderAdapter(mode_name, path, mode_name, device)
-        per_clip = {(p, a, k): [] for p in profiles for a in arms for k in ("psnr", "lpips", "face", "failures")}
+        per_clip = {(p, a, k): [] for p in profiles for a in arms
+                    for k in ("psnr", "lpips", "face", "failures", "energy", "flow")}
+        source_motion = []
         for index in range(clips.shape[0]):
             clip = clips[index].float().div(255).unsqueeze(0).to(device)
             gops = adapter.gops(clip)
@@ -96,6 +112,7 @@ def main() -> None:
                 mask = torch.nn.functional.interpolate(
                     mask[None].float(), size=(adapter.height, adapter.width), mode="nearest")[0].bool()
             source = torch.cat(gops, 2)[0]
+            source_motion.append(motion(source))
             kept = {"source": source.cpu().half()}
             for prof in profiles:
                 for arm in arms:
@@ -112,6 +129,9 @@ def main() -> None:
                     per_clip[prof, arm, "psnr"].append(clip_psnr(gops, recons))
                     per_clip[prof, arm, "face"].append(masked_psnr(source, joined, mask.to(device)))
                     per_clip[prof, arm, "failures"].append(failures)
+                    energy, flow = motion(joined)
+                    per_clip[prof, arm, "energy"].append(energy)
+                    per_clip[prof, arm, "flow"].append(flow)
                     if lpips_metric is not None:
                         per_clip[prof, arm, "lpips"].append(float(np.mean([
                             float(lpips_metric(r[0].permute(1, 0, 2, 3) * 2 - 1, g[0].permute(1, 0, 2, 3) * 2 - 1).mean())
@@ -129,17 +149,21 @@ def main() -> None:
             for arm in arms:
                 entry = {k: summarize(per_clip[prof, arm, k]) for k in ("psnr", "lpips", "face")}
                 entry["failures"] = int(sum(per_clip[prof, arm, "failures"]))
+                entry["energy_ratio"] = float(sum(per_clip[prof, arm, "energy"]) / sum(e for e, _ in source_motion))
+                entry["flow_ratio"] = float(sum(per_clip[prof, arm, "flow"]) / sum(f for _, f in source_motion))
                 if arm != arms[0]:
                     for k in ("psnr", "lpips", "face"):
                         entry[k]["paired_vs_" + arms[0]] = paired(per_clip[prof, arm, k], per_clip[prof, arms[0], k])
                 summary[f"{prof}/{arm}"] = entry
                 d = entry["psnr"].get("paired_vs_" + arms[0])
                 print(f"{mode_name} {prof} {arm}: PSNR {entry['psnr']['mean']:.3f}"
-                      + (f"  paired {d['mean']:+.3f} ± {d['se']:.3f}" if d else ""), flush=True)
+                      + (f"  paired {d['mean']:+.3f} ± {d['se']:.3f}" if d else "")
+                      + f"  motion energy {entry['energy_ratio']:.3f} flow {entry['flow_ratio']:.3f}", flush=True)
         result["models"][mode_name] = {
             "checkpoint": path,
             "summary": summary,
             "per_clip": {f"{p}/{a}/{k}": v for (p, a, k), v in per_clip.items()},
+            "source_motion": source_motion,
             "seconds": time.time() - started,
         }
         out_path.write_text(json.dumps(result, indent=1))

@@ -108,21 +108,26 @@ def run(job):
             latents, weights, chips, verified, shifts, lmmse_gops = demodulate(mode_name, rx, gops, stream)
         except Exception:  # noqa: BLE001 - an acquisition failure drops the seed for every arm
             return None
-        if len(latents) != gops:
+        complete = len(latents) == gops
+        if not stream and not complete:
             return None
-        x = np.concatenate(sent)
-        lat, w = np.concatenate(latents), np.concatenate(weights)
-        per_gop = [effective_snr(s, l * ww) for s, l, ww in zip(sent, latents, weights)]
         n = min(len(chips), len(chips_sent))
-        out[arm] = dict(
-            snr=effective_snr(x, lat * w),
-            snr_gop_mean=float(np.nanmean(per_gop)),
-            beacon_snr=effective_snr(chips_sent[:n], np.asarray(chips[:n], float)) if n > 8 else float("nan"),
-            verified=float(np.mean(verified)) if verified else 0.0,
+        row = dict(
+            delivered=len(latents) / gops,
+            verified=float(np.sum(verified)) / gops,
+            beacon_snr=effective_snr(chips_sent[:n], np.asarray(chips[:n], float)) if complete and n > 8 else float("nan"),
             shift=float(np.mean(np.abs(shifts))) if shifts else 0.0,
             moved=float(np.mean(np.asarray(shifts) != 0)) if shifts else 0.0,
             lmmse=lmmse_gops / gops,
+            snr=float("nan"),
+            snr_gop_mean=float("nan"),
         )
+        if complete:
+            x = np.concatenate(sent)
+            lat, w = np.concatenate(latents), np.concatenate(weights)
+            row["snr"] = effective_snr(x, lat * w)
+            row["snr_gop_mean"] = float(np.mean([effective_snr(s, l * ww) for s, l, ww in zip(sent, latents, weights)]))
+        out[arm] = row
     return out
 
 
@@ -134,7 +139,7 @@ def summarize(rows: list[dict], arms: list[str]) -> dict:
         cell[arm] = {k: float(np.nanmean([r[arm][k] for r in rows])) for k in rows[0][arm]}
     base = arms[0]
     for arm in arms[1:]:
-        for key in ("snr", "snr_gop_mean", "beacon_snr", "verified"):
+        for key in ("snr", "snr_gop_mean", "beacon_snr", "verified", "delivered"):
             d = np.array([r[arm][key] - r[base][key] for r in rows])
             d = d[np.isfinite(d)]
             if len(d) > 1:
@@ -177,6 +182,8 @@ def main() -> None:
                     d = c.get(f"d_snr/{arm}")
                     if d:
                         parts.append(f"{arm} {d[0]:+.2f}±{d[1]:.2f}({100 * d[2]:.0f}%)")
+                parts.append("delivered " + " ".join(f"{c[a]['delivered']:.3f}" for a in arms))
+                parts.append("verified " + " ".join(f"{c[a]['verified']:.3f}" for a in arms))
                 parts.append("moved " + " ".join(f"{c[a]['moved']:.2f}" for a in arms))
                 parts.append("lmmse " + " ".join(f"{c[a]['lmmse']:.2f}" for a in arms))
             print(" ".join(parts), flush=True)
