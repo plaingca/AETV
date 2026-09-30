@@ -1567,6 +1567,12 @@ class RxEngine:
             return
         codec = self.station.require_codec()
         settings = self.station.settings
+        if (settings.rx_source == "soundcard" and not settings.audio_only
+                and settings.cat_backend in {"hamlib", "rigctld", "flex"}
+                and settings.freq_mhz is not None):
+            # Apply the same HF dial used by TX before opening audio capture.
+            ptt = open_ptt(self.station.cat_config())
+            ptt.close()
         self._stop.clear()
         self._shown_gops = 0
         self.health = dict(ring_overruns=0, source_discontinuities=0, rx_backlog_max_s=0.,

@@ -83,6 +83,9 @@ class RigctldClient:
     def set_ptt(self, on: bool) -> None:
         self._command(f"T {1 if on else 0}")
 
+    def set_frequency_hz(self, frequency_hz: float) -> None:
+        self._command(f"F {frequency_hz:.0f}")
+
     def get_frequency_hz(self) -> float:
         return float(self._command("f").splitlines()[0])
 
@@ -225,6 +228,8 @@ class HamlibDirect:
         lib.rig_set_conf.restype = ctypes.c_int
         lib.rig_set_ptt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
         lib.rig_set_ptt.restype = ctypes.c_int
+        lib.rig_set_freq.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
+        lib.rig_set_freq.restype = ctypes.c_int
         lib.rig_get_freq.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
         lib.rig_get_freq.restype = ctypes.c_int
         lib.rig_get_mode.argtypes = [
@@ -247,6 +252,9 @@ class HamlibDirect:
 
     def set_ptt(self, on: bool) -> None:
         self._check(self.lib.rig_set_ptt(self.rig, self._VFO_CURR, 1 if on else 0), "set PTT")
+
+    def set_frequency_hz(self, frequency_hz: float) -> None:
+        self._check(self.lib.rig_set_freq(self.rig, self._VFO_CURR, frequency_hz), "set frequency")
 
     def get_frequency_hz(self) -> float:
         value = ctypes.c_double()
@@ -376,10 +384,19 @@ def open_ptt(config: CatConfig):
     name = (config.backend or "none").lower()
     if name in {"none", "vox", "off", ""}:
         return NullPtt()
-    if name == "rigctld":
-        return RigctldClient(config.rigctld_host, config.rigctld_port)
-    if name in {"hamlib", "hamlib-direct"}:
-        return HamlibDirect(config.hamlib_model, config.hamlib_device, config.hamlib_baud)
+    if name in {"rigctld", "hamlib", "hamlib-direct"}:
+        client = (
+            RigctldClient(config.rigctld_host, config.rigctld_port)
+            if name == "rigctld" else
+            HamlibDirect(config.hamlib_model, config.hamlib_device, config.hamlib_baud)
+        )
+        try:
+            if config.freq_mhz is not None:
+                client.set_frequency_hz(config.freq_mhz * 1e6)
+        except Exception:
+            client.close()
+            raise
+        return client
     if name == "flex":
         return FlexPtt(
             config.flex_host,

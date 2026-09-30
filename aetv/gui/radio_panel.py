@@ -1,4 +1,4 @@
-"""Visible direct-RF tuning and gain controls."""
+"""Visible HF and direct-RF tuning and gain controls."""
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -22,6 +22,8 @@ class RadioPanel(QWidget):
         self.setObjectName("radioControls")
         self._settings = settings
         self._rx_source = settings.rx_source
+        self._frequency_kind = None
+        self._frequencies = {}
         grid = QGridLayout(self)
         self.backend = QComboBox()
         self.backend.addItem("Audio / CAT", "audio")
@@ -58,7 +60,8 @@ class RadioPanel(QWidget):
         self.apply.clicked.connect(self._apply)
         grid.addWidget(QLabel("Transmit via"), 0, 0)
         grid.addWidget(self.backend, 0, 1)
-        grid.addWidget(QLabel("RF center"), 0, 2)
+        self.frequency_label = QLabel("Operating frequency")
+        grid.addWidget(self.frequency_label, 0, 2)
         grid.addWidget(self.frequency, 0, 3)
         grid.addWidget(QLabel("Pluto address"), 0, 4)
         grid.addWidget(self.uri, 0, 5)
@@ -103,8 +106,11 @@ class RadioPanel(QWidget):
 
     def sync(self, settings):
         self._settings = settings
+        self._frequency_kind = None
+        self._frequencies = {"sdr": settings.sdr_frequency_mhz, "hf": settings.freq_mhz or 0.0}
+        self.backend.blockSignals(True)
         self.backend.setCurrentIndex(max(0, self.backend.findData(settings.tx_backend)))
-        self.frequency.setValue(settings.sdr_frequency_mhz)
+        self.backend.blockSignals(False)
         self.uri.setText(settings.pluto_uri)
         self.serial.setText(settings.rtl_serial)
         self.tx_gain.setValue(round(settings.pluto_tx_gain * 4))
@@ -144,14 +150,34 @@ class RadioPanel(QWidget):
         self.rx_gain.setEnabled(self._rx_source in {"pluto", "rtlsdr"})
         self.serial.setEnabled(self._rx_source == "rtlsdr")
         self.uri.setEnabled(self.backend.currentData() == "pluto" or self._rx_source == "pluto")
-        self.frequency.setEnabled(direct_tx or direct_rx)
+        kind = "sdr" if direct_tx or direct_rx else "hf"
+        if kind != self._frequency_kind:
+            if self._frequency_kind is not None:
+                self._frequencies[self._frequency_kind] = self.frequency.value()
+            self._frequency_kind = kind
+            self.frequency.setRange(*((1.1, 6000) if kind == "sdr" else (0, 60)))
+            self.frequency.setSpecialValueText("" if kind == "sdr" else "Use current rig frequency")
+            self.frequency.setValue(self._frequencies[kind])
+        self.frequency_label.setText("RF center" if kind == "sdr" else "HF operating frequency")
+        tunable = self._rx_source == "flex" or (
+            not self._settings.audio_only and self._settings.cat_backend in {"flex", "hamlib", "rigctld"}
+        )
+        self.frequency.setEnabled(kind == "sdr" or tunable)
+        self.frequency.setToolTip(
+            "RF center frequency for SDR transmit and receive."
+            if kind == "sdr" else
+            "HF dial frequency used when starting transmit or receive. Apply restarts active receive; "
+            "zero keeps the current rig frequency."
+            if tunable else
+            "Select Flex, Hamlib, or rigctld in Rig settings to tune the HF radio. "
+            "VOX and RTS/DTR control PTT only; tune those radios manually."
+        )
         self.auto_correct.setEnabled(direct_rx)
         self.correction.setEnabled(direct_rx)
 
     def _apply(self):
         values = dict(
             tx_backend=self.backend.currentData(),
-            sdr_frequency_mhz=self.frequency.value(),
             pluto_uri=self.uri.text().strip(),
             rtl_serial=self.serial.text().strip(),
             pluto_tx_gain=self.tx_gain.value() / 4,
@@ -162,6 +188,10 @@ class RadioPanel(QWidget):
             sdr_auto_correct=self.auto_correct.isChecked(),
             sdr_rx_correction_hz=self.correction.value(),
         )
+        if self._frequency_kind == "sdr":
+            values["sdr_frequency_mhz"] = self.frequency.value()
+        elif self.frequency.isEnabled():
+            values["freq_mhz"] = self.frequency.value() or None
         if self._rx_source in {"pluto", "rtlsdr"}:
             values["pluto_rx_gain" if self._rx_source == "pluto" else "rtl_rx_gain"] = (
                 self.rx_gain.value() / 10

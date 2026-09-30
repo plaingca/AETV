@@ -447,7 +447,9 @@ class MainWindow(QMainWindow):
         self.settings.rx_source = candidate.rx_source
         save_settings(self.settings)
         self.radio.sync(self.settings)
-        self._log(f"RF settings applied: {self.settings.sdr_frequency_mhz:.6f} MHz")
+        frequency = values.get("sdr_frequency_mhz", self.settings.freq_mhz)
+        dial = f"{frequency:.6f} MHz" if frequency is not None else "current rig frequency"
+        self._log(f"RF settings applied: {dial}")
         if self.rx.listening():
             self._restart_rx_after_settings_stop = True
             self.rx.stop()
