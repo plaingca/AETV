@@ -33,7 +33,7 @@ from aetv.gui.settings_dialog import SettingsDialog
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.gui.waterfall import Waterfall
 from aetv.gui.radio_panel import RadioPanel
-from aetv.gui.widgets import LogPane, PttLamp
+from aetv.gui.widgets import ElidingLabel, LogPane, PttLamp
 
 
 APP_ICON = Path(__file__).resolve().parent.parent / "assets" / "aetv-logo.png"
@@ -181,16 +181,18 @@ class MainWindow(QMainWindow):
         dock.hide()
 
         self.ptt_lamp = PttLamp()
-        self.station_label = QLabel()
-        self.rig_label = QLabel("CAT off")
-        self.model_label = QLabel("Checking installed models…")
-        self.rx_status = QLabel()
+        # Long status text must not become a hard minimum window width.
+        # Full values remain available in each label's tooltip.
+        self.station_label = ElidingLabel()
+        self.rig_label = ElidingLabel("CAT off")
+        self.model_label = ElidingLabel("Checking installed models…")
+        self.rx_status = ElidingLabel()
         bar = QStatusBar()
         bar.addWidget(self.ptt_lamp)
-        bar.addWidget(self.station_label)
-        bar.addWidget(self.rig_label)
-        bar.addPermanentWidget(self.rx_status, 1)
-        bar.addPermanentWidget(self.model_label)
+        bar.addWidget(self.station_label, 1)
+        bar.addWidget(self.rig_label, 1)
+        bar.addPermanentWidget(self.rx_status, 2)
+        bar.addPermanentWidget(self.model_label, 2)
         self.setStatusBar(bar)
         self._refresh_station_label()
 

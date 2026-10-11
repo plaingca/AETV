@@ -82,3 +82,13 @@ the default window to 1290 px. Two compact control-row grids fix the width
 pressure without loosening the 1280 px assertion. Windows/Fusion large-font
 regressions and the affected suite passed **161 tests** locally. Both CI jobs
 are rerun for that follow-up; see the draft PR for their latest status.
+
+The next Windows run confirmed the default layout fix and exposed a separate
+high-DPI/large-font width constraint in the added regression. Independent action
+rows, concise labels and eliding status fields address that case without reducing
+font size or weakening the laptop bounds. The final affected suite passed
+**164 tests**, including four large-font cases repeated at 192 DPI. The final
+broad local rerun passed **590 tests, 2 skipped** in **188.78 seconds**, with the
+same six local Torch exclusions. CI now runs GUI layout checks before the full
+suite so platform layout failures surface early. Final hosted results are linked
+from the PR and included in the delivered report.

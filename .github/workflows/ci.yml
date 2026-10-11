@@ -42,6 +42,8 @@ jobs:
           sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 libhamlib-utils
       - name: Install test dependencies
         run: uv sync --locked --extra gui --extra train --extra dev
+      - name: Check laptop layout and interrupted GUI flows
+        run: uv run pytest -q tests/test_gui_usability.py
       - name: Run tests
         run: uv run pytest
       - name: Build distributions

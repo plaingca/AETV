@@ -26,6 +26,8 @@ class RadioPanel(QWidget):
         self._frequencies = {}
         grid = QGridLayout(self)
         self.backend = QComboBox()
+        self.backend.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.backend.setMinimumContentsLength(8)
         self.backend.addItem("Audio / CAT", "audio")
         self.backend.addItem("PlutoSDR", "pluto")
         self.backend.addItem("HackRF (experimental)", "hackrf")
@@ -197,7 +199,7 @@ class RadioPanel(QWidget):
             self.frequency.setRange(*((1.1, 6000) if kind == "sdr" else (0, 60)))
             self.frequency.setSpecialValueText("" if kind == "sdr" else "Use current rig frequency")
             self.frequency.setValue(self._frequencies[kind])
-        self.frequency_label.setText("RF center" if kind == "sdr" else "HF operating frequency")
+        self.frequency_label.setText("RF center" if kind == "sdr" else "HF frequency")
         tunable = self._rx_source == "flex" or (
             not self._settings.audio_only and self._settings.cat_backend in {"flex", "hamlib", "rigctld"}
         )

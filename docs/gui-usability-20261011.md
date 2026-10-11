@@ -82,3 +82,12 @@ fully visible without weakening the laptop-fit requirement. New tests exercise
 Windows and Fusion styles at 18 pt and check exact 1280 × 800 size, minimum
 button sizes, containment and non-overlap. The affected suite passed **161
 tests** locally; actual Windows CI is rerun on the follow-up commit.
+
+A second CI pass confirmed the default Windows size, while the added large-font
+checks exposed further physical-font scaling pressure. QRL now has its own row,
+receive rows size independently, the radio label can wrap, and non-safety status
+fields elide with complete hover text. PTT remains fully visible. Regression
+coverage includes both 18 pt and explicit 48 px fonts, detailed DPI/layout
+failure diagnostics, and a 192-DPI subprocess check. **164 affected tests** and
+all four large-font cases passed locally. CI runs this GUI file before the full
+suite to surface platform layout problems promptly.

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QMessageBox,
     QProgressBar,
@@ -475,11 +476,11 @@ class TransmitPanel(QWidget):
         self.channel_route.currentIndexChanged.connect(self._sync_channel_route)
         self.route_hint = QLabel()
         self.route_hint.setWordWrap(True)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.send_button)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.qrl_button)
-        buttons.addStretch(1)
+        buttons = QGridLayout()
+        buttons.addWidget(self.send_button, 0, 0)
+        buttons.addWidget(self.cancel_button, 0, 1)
+        buttons.addWidget(self.qrl_button, 1, 0, 1, 2)
+        buttons.setColumnStretch(2, 1)
         strip.addLayout(src)
         strip.addLayout(screen_row)
         strip.addLayout(file_row)

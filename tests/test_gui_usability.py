@@ -293,9 +293,10 @@ def test_manual_receive_and_tuning_preserve_unconfirmed_off_on_cancel(window, mo
 
 
 @pytest.mark.parametrize("style", ["Windows", "Fusion"])
-def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window, style):
-    from PySide6.QtGui import QFont
-    from PySide6.QtWidgets import QStyleFactory
+@pytest.mark.parametrize("font_units,font_size", [("points", 18), ("pixels", 48)])
+def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window, style, font_units, font_size):
+    from PySide6.QtGui import QFont, QFontInfo
+    from PySide6.QtWidgets import QStyleFactory, QWidget
 
     original_style = _APP.style().objectName()
     original_font = QFont(_APP.font())
@@ -305,15 +306,42 @@ def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window
         _APP.setStyle(native_style)
         # Exposes the single-row minimum-width bug on Linux too; does not
         # reduce Windows font sizes or loosen the 1280 x 800 requirement.
-        _APP.setFont(QFont("DejaVu Sans", 18))
+        font = QFont("DejaVu Sans")
+        if font_units == "points":
+            font.setPointSize(font_size)
+        else:
+            # Exercise much larger physical glyphs independently of Linux vs
+            # Windows point-size/DPI conversion and installed-font fallback.
+            font.setPixelSize(font_size)
+        _APP.setFont(font)
         _APP.processEvents()
         window.resize(1280, 800)
         _APP.processEvents()
-        assert window.minimumSizeHint().width() <= 1280
-        assert window.width() == 1280
-        assert window.height() == 800
+
+        def describe(widget):
+            info = QFontInfo(widget.font())
+            label = widget.objectName() or type(widget).__name__
+            text = getattr(widget, "text", lambda: "")()
+            return (f"{label} {text!r}: size={widget.size().toTuple()} "
+                    f"minimum={widget.minimumSize().toTuple()} "
+                    f"hint={widget.minimumSizeHint().toTuple()} "
+                    f"font={info.family()!r}/{info.pixelSize()}px")
+
+        roots = [window.centralWidget(), window.radio, window.tx,
+                 window.tx.action_strip(), window.rx, window.rx.action_strip(),
+                 window.statusBar()]
+        widest = sorted(window.findChildren(QWidget),
+                        key=lambda item: item.minimumSizeHint().width(), reverse=True)[:12]
+        screen = _APP.primaryScreen()
+        diagnostics = (f"style={_APP.style().objectName()} font={font.toString()} "
+                       f"DPI={screen.logicalDotsPerInch()} DPR={screen.devicePixelRatio()}\n"
+                       + "\n".join(describe(item) for item in roots + widest))
+        assert window.minimumSizeHint().width() <= 1280, diagnostics
+        assert window.width() == 1280, diagnostics
+        assert window.height() == 800, diagnostics
         controls = (
             window.radio.apply, window.radio.advanced_toggle,
+            window.radio.frequency_label, window.radio.frequency, window.radio.backend,
             window.tx.send_button, window.tx.cancel_button, window.tx.qrl_button,
             window.rx.start_button, window.rx.stop_button,
             window.rx.save_button, window.rx.open_saved_videos_button,
@@ -322,12 +350,26 @@ def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window
         for control in controls:
             point = control.mapTo(window, QPoint(0, 0))
             rect = control.rect().translated(point)
-            assert window.rect().contains(rect), control.text()
-            assert control.width() >= control.minimumSizeHint().width(), control.text()
-            assert control.height() >= control.minimumSizeHint().height(), control.text()
-            assert not any(rect.intersects(other) for other in rectangles), control.text()
+            assert window.rect().contains(rect), diagnostics + "\n" + describe(control)
+            assert control.width() >= control.minimumSizeHint().width(), diagnostics + "\n" + describe(control)
+            assert control.height() >= control.minimumSizeHint().height(), diagnostics + "\n" + describe(control)
+            assert not any(rect.intersects(other) for other in rectangles), diagnostics + "\n" + describe(control)
             rectangles.append(rect)
     finally:
         _APP.setFont(original_font)
         _APP.setStyle(QStyleFactory.create(original_style))
         _APP.processEvents()
+
+
+def test_status_fields_share_space_and_keep_full_text_without_expanding_window(window):
+    for label in (window.station_label, window.rig_label, window.model_label):
+        message = "Connection status with a long device name and full recovery instructions " * 4
+        label.setText(message)
+        _APP.processEvents()
+        assert label.width() > 0
+        assert label.text()
+        assert label.toolTip() == message
+    window.resize(1280, 800)
+    _APP.processEvents()
+    assert window.width() == 1280
+    assert window.height() == 800

@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
-    QGridLayout,
     QLabel,
     QLineEdit,
     QDoubleSpinBox,
@@ -510,7 +509,8 @@ class ReceivePanel(QWidget):
         self.start_button = QPushButton("Start receiving")
         self.stop_button = QPushButton("Stop")
         self.save_button = QPushButton("Save video…")
-        self.open_saved_videos_button = QPushButton("Open saved video directory")
+        self.open_saved_videos_button = QPushButton("Open videos")
+        self.open_saved_videos_button.setToolTip("Open saved video directory")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
@@ -554,12 +554,14 @@ class ReceivePanel(QWidget):
         auto_row.addStretch(1)
         # These actions are pinned outside the scroll area. Two short rows
         # keep every button accessible with native Windows/large-font metrics.
-        buttons = QGridLayout()
-        buttons.addWidget(self.start_button, 0, 0)
-        buttons.addWidget(self.stop_button, 0, 1)
-        buttons.addWidget(self.save_button, 1, 0)
-        buttons.addWidget(self.open_saved_videos_button, 1, 1)
-        buttons.setColumnStretch(2, 1)
+        buttons = QVBoxLayout()
+        for pair in ((self.start_button, self.stop_button),
+                     (self.save_button, self.open_saved_videos_button)):
+            row = QHBoxLayout()
+            for button in pair:
+                row.addWidget(button)
+            row.addStretch(1)
+            buttons.addLayout(row)
         strip.addLayout(row1)
         strip.addLayout(self.raw_meter_row)
         strip.addLayout(self.playback_row)
