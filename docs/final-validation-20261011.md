@@ -72,3 +72,13 @@ full-duplex operation. No inference defaults were changed.
 
 All changes were tested locally before opening a draft PR. Publication and CI
 status are reported separately; no merge, release or deployment was performed.
+
+## CI follow-up to the initial publication
+
+The initial draft-PR commit passed Linux CI with **703 passed, 2 skipped**,
+including all six Torch-dependent modules, plus the package build. Windows CI
+reported **685 passed, 19 skipped**, with one failure: its native style expanded
+the default window to 1290 px. Two compact control-row grids fix the width
+pressure without loosening the 1280 px assertion. Windows/Fusion large-font
+regressions and the affected suite passed **161 tests** locally. Both CI jobs
+are rerun for that follow-up; see the draft PR for their latest status.

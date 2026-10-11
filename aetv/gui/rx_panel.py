@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QLineEdit,
     QDoubleSpinBox,
@@ -551,12 +552,14 @@ class ReceivePanel(QWidget):
         auto_row = QHBoxLayout()
         auto_row.addWidget(self.auto_kiwi)
         auto_row.addStretch(1)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.stop_button)
-        buttons.addWidget(self.save_button)
-        buttons.addWidget(self.open_saved_videos_button)
-        buttons.addStretch(1)
+        # These actions are pinned outside the scroll area. Two short rows
+        # keep every button accessible with native Windows/large-font metrics.
+        buttons = QGridLayout()
+        buttons.addWidget(self.start_button, 0, 0)
+        buttons.addWidget(self.stop_button, 0, 1)
+        buttons.addWidget(self.save_button, 1, 0)
+        buttons.addWidget(self.open_saved_videos_button, 1, 1)
+        buttons.setColumnStretch(2, 1)
         strip.addLayout(row1)
         strip.addLayout(self.raw_meter_row)
         strip.addLayout(self.playback_row)

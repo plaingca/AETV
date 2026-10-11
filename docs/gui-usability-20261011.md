@@ -72,3 +72,13 @@ PTT uncertainty is latched until an explicit operator acknowledgment that the ra
 After adding the uncertainty acknowledgment regressions, the same combined command passed **144 tests**. The warning screenshot remains visually unchanged; its enabled actions now enter the confirmation gate before doing work. The rendering script explicitly simulates acknowledgment when moving from that injected failure to its next independent screenshot scenario.
 
 Ownership guarantees here cover the TX producer and in-flight watchdog OFF command. Existing nested screen/camera capture shutdown still uses bounded waits; a hung OS/device capture thread is not guaranteed to terminate and can require external process/device shutdown.
+
+## Windows CI sizing follow-up
+
+The first PR CI run exposed a native Windows minimum-width difference: the
+window expanded to 1290 px rather than the required 1280 px. The radio header
+and pinned receive-action strip now use compact two-row grids, keeping buttons
+fully visible without weakening the laptop-fit requirement. New tests exercise
+Windows and Fusion styles at 18 pt and check exact 1280 × 800 size, minimum
+button sizes, containment and non-overlap. The affected suite passed **161
+tests** locally; actual Windows CI is rerun on the follow-up commit.

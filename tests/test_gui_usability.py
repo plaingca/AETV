@@ -290,3 +290,44 @@ def test_manual_receive_and_tuning_preserve_unconfirmed_off_on_cancel(window, mo
     assert not calls
     assert panel.ptt_uncertain
     assert "UNKNOWN" in window.ptt_lamp.text()
+
+
+@pytest.mark.parametrize("style", ["Windows", "Fusion"])
+def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window, style):
+    from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QStyleFactory
+
+    original_style = _APP.style().objectName()
+    original_font = QFont(_APP.font())
+    try:
+        native_style = QStyleFactory.create(style)
+        assert native_style is not None
+        _APP.setStyle(native_style)
+        # Exposes the single-row minimum-width bug on Linux too; does not
+        # reduce Windows font sizes or loosen the 1280 x 800 requirement.
+        _APP.setFont(QFont("DejaVu Sans", 18))
+        _APP.processEvents()
+        window.resize(1280, 800)
+        _APP.processEvents()
+        assert window.minimumSizeHint().width() <= 1280
+        assert window.width() == 1280
+        assert window.height() == 800
+        controls = (
+            window.radio.apply, window.radio.advanced_toggle,
+            window.tx.send_button, window.tx.cancel_button, window.tx.qrl_button,
+            window.rx.start_button, window.rx.stop_button,
+            window.rx.save_button, window.rx.open_saved_videos_button,
+        )
+        rectangles = []
+        for control in controls:
+            point = control.mapTo(window, QPoint(0, 0))
+            rect = control.rect().translated(point)
+            assert window.rect().contains(rect), control.text()
+            assert control.width() >= control.minimumSizeHint().width(), control.text()
+            assert control.height() >= control.minimumSizeHint().height(), control.text()
+            assert not any(rect.intersects(other) for other in rectangles), control.text()
+            rectangles.append(rect)
+    finally:
+        _APP.setFont(original_font)
+        _APP.setStyle(QStyleFactory.create(original_style))
+        _APP.processEvents()
