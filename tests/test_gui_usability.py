@@ -361,6 +361,8 @@ def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window
         else:
             assert resolved.pointSizeF() == pytest.approx(font_size)
         _APP.setFont(font)
+        # Exercise the widest safety warning, not only the shorter idle lamp.
+        window.ptt_lamp.set_unknown()
         _APP.processEvents()
         window.resize(1280, 800)
         _APP.processEvents()
@@ -389,6 +391,7 @@ def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window
         controls = (
             window.radio.apply, window.radio.advanced_toggle,
             window.radio.frequency_label, window.radio.frequency, window.radio.backend,
+            window.ptt_lamp,
             window.tx.send_button, window.tx.cancel_button, window.tx.qrl_button,
             window.rx.start_button, window.rx.stop_button,
             window.rx.save_button, window.rx.open_saved_videos_button,
@@ -402,6 +405,9 @@ def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window
             assert control.height() >= control.minimumSizeHint().height(), diagnostics + "\n" + describe(control)
             assert not any(rect.intersects(other) for other in rectangles), diagnostics + "\n" + describe(control)
             rectangles.append(rect)
+        for label in (window.station_label, window.rig_label, window.model_label):
+            assert label.height() >= label.minimumSizeHint().height(), diagnostics + "\n" + describe(label)
+        assert window.statusBar().height() >= window.statusBar().minimumSizeHint().height(), diagnostics
     finally:
         _APP.setFont(original_font)
         _APP.setStyle(QStyleFactory.create(original_style))

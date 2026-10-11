@@ -8,13 +8,14 @@ import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
     QLabel,
     QMainWindow,
+    QScrollArea,
     QMessageBox,
     QSplitter,
     QStatusBar,
@@ -37,6 +38,37 @@ from aetv.gui.widgets import ElidingLabel, LogPane, PttLamp
 
 
 APP_ICON = Path(__file__).resolve().parent.parent / "assets" / "aetv-logo.png"
+
+
+class _PaneScrollArea(QScrollArea):
+    def minimumSizeHint(self):  # noqa: N802
+        size = super().minimumSizeHint()
+        # The preview/settings are scrollable. Reserve a small usable viewport
+        # instead of letting large font metrics crowd out pinned safety actions.
+        size.setHeight(32)
+        return size
+
+
+class _StationStatusBar(QStatusBar):
+    def sizeHint(self):  # noqa: N802
+        size = super().sizeHint()
+        size.setHeight(max(size.height(), self.minimumSizeHint().height()))
+        return size
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in {QEvent.Type.FontChange, QEvent.Type.StyleChange,
+                            QEvent.Type.LayoutRequest}:
+            # QMainWindow can retain the old status-bar height after an app
+            # font change. Never let that clip the PTT lamp or status text.
+            height = self.minimumSizeHint().height()
+            if height > 0 and height != self.minimumHeight():
+                self.setMinimumHeight(height)
+                parent = self.parentWidget()
+                if parent is not None and parent.layout() is not None:
+                    parent.layout().invalidate()
+                    parent.layout().activate()
+        return result
 
 
 class _CodecThread(QThread):
@@ -187,7 +219,7 @@ class MainWindow(QMainWindow):
         self.rig_label = ElidingLabel("CAT off")
         self.model_label = ElidingLabel("Checking installed models…")
         self.rx_status = ElidingLabel()
-        bar = QStatusBar()
+        bar = _StationStatusBar()
         bar.addWidget(self.ptt_lamp)
         bar.addWidget(self.station_label, 1)
         bar.addWidget(self.rig_label, 1)
@@ -219,11 +251,11 @@ class MainWindow(QMainWindow):
         )
 
     def _wrap(self, title: str, widget: QWidget) -> QWidget:
-        from PySide6.QtWidgets import QGroupBox, QScrollArea, QVBoxLayout
+        from PySide6.QtWidgets import QGroupBox, QVBoxLayout
 
         box = QGroupBox(title)
         layout = QVBoxLayout(box)
-        scroll = QScrollArea()
+        scroll = _PaneScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(widget)

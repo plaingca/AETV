@@ -100,3 +100,9 @@ now registers an existing native system font when necessary and asserts valid
 font resolution before applying the unchanged point/pixel-size layout bounds.
 This changes test setup, not application fonts. Qt's offscreen integration and
 FreeType font database source explain the platform-specific discovery behavior.
+
+With real native fonts restored, the 48 px Windows checks found a small vertical
+overflow. The final layout lets the waterfall and scrollable preview viewport
+shrink under extreme font pressure while retaining their normal allocations.
+The status bar now refreshes its minimum height and parent layout on font/style
+changes, with explicit PTT/status containment assertions to prevent clipping.
