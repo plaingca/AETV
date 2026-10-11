@@ -92,3 +92,11 @@ broad local rerun passed **590 tests, 2 skipped** in **188.78 seconds**, with th
 same six local Torch exclusions. CI now runs GUI layout checks before the full
 suite so platform layout failures surface early. Final hosted results are linked
 from the PR and included in the delivered report.
+
+The Windows offscreen run also exposed a test-environment defect: Qt's FreeType
+font database did not discover Windows system fonts, so the requested Linux
+font resolved to an empty family and invalid pixel metrics. The GUI test fixture
+now registers an existing native system font when necessary and asserts valid
+font resolution before applying the unchanged point/pixel-size layout bounds.
+This changes test setup, not application fonts. Qt's offscreen integration and
+FreeType font database source explain the platform-specific discovery behavior.

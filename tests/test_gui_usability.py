@@ -1,6 +1,8 @@
 """Operator-focused GUI checks without radio, camera, audio, or network access."""
 
 import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -22,8 +24,46 @@ from aetv.station import TxPhase, TxState
 _APP = QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(scope="session", autouse=True)
+def native_font():
+    from PySide6.QtGui import QFont, QFontDatabase, QFontInfo, QRawFont
+
+    font = QFont(_APP.font())
+    if sys.platform == "win32" and _APP.platformName() == "offscreen":
+        # Qt's Windows offscreen plugin uses QFreeTypeFontDatabase, which
+        # searches Qt's own fonts directory rather than the Windows registry.
+        # Load an existing native UI font; no downloads or system changes.
+        system_root = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+        assert system_root, "Windows font discovery needs WINDIR or SystemRoot"
+        directory = Path(system_root) / "Fonts"
+        loaded_family = None
+        for name in ("segoeui.ttf", "arial.ttf", "tahoma.ttf"):
+            path = directory / name
+            if not path.is_file():
+                continue
+            font_id = QFontDatabase.addApplicationFont(str(path))
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            if font_id >= 0 and families:
+                loaded_family = families[0]
+                break
+        assert loaded_family, f"No native UI font could be loaded from {directory}"
+        font.setFamily(loaded_family)
+        # Supply the native monospace face for the frequency field as well.
+        monospace = directory / "consola.ttf"
+        if monospace.is_file():
+            assert QFontDatabase.addApplicationFont(str(monospace)) >= 0
+        _APP.setFont(font)
+    info = QFontInfo(font)
+    assert info.family() and info.pixelSize() > 0, (
+        f"No resolved application font: {font.toString()}; "
+        f"available={QFontDatabase.families()}"
+    )
+    assert QRawFont.fromFont(font).isValid(), "Layout checks need a real font engine"
+    return font
+
+
 @pytest.fixture
-def window(monkeypatch, tmp_path):
+def window(monkeypatch, tmp_path, native_font):
     monkeypatch.setattr(app_module.MainWindow, "_begin_startup_model_check", lambda self: None)
     monkeypatch.setattr(app_module, "save_settings", lambda settings: None)
     for method in ("_start_preview", "_fill_cameras", "_fill_outputs"):
@@ -294,8 +334,8 @@ def test_manual_receive_and_tuning_preserve_unconfirmed_off_on_cancel(window, mo
 
 @pytest.mark.parametrize("style", ["Windows", "Fusion"])
 @pytest.mark.parametrize("font_units,font_size", [("points", 18), ("pixels", 48)])
-def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window, style, font_units, font_size):
-    from PySide6.QtGui import QFont, QFontInfo
+def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window, native_font, style, font_units, font_size):
+    from PySide6.QtGui import QFont, QFontInfo, QRawFont
     from PySide6.QtWidgets import QStyleFactory, QWidget
 
     original_style = _APP.style().objectName()
@@ -306,13 +346,20 @@ def test_laptop_layout_fits_large_native_metrics_with_all_actions_visible(window
         _APP.setStyle(native_style)
         # Exposes the single-row minimum-width bug on Linux too; does not
         # reduce Windows font sizes or loosen the 1280 x 800 requirement.
-        font = QFont("DejaVu Sans")
+        font = QFont(native_font)
         if font_units == "points":
             font.setPointSize(font_size)
         else:
             # Exercise much larger physical glyphs independently of Linux vs
             # Windows point-size/DPI conversion and installed-font fallback.
             font.setPixelSize(font_size)
+        resolved = QFontInfo(font)
+        assert resolved.family() and resolved.pixelSize() > 0, font.toString()
+        assert QRawFont.fromFont(font).isValid(), font.toString()
+        if font_units == "pixels":
+            assert resolved.pixelSize() == font_size
+        else:
+            assert resolved.pointSizeF() == pytest.approx(font_size)
         _APP.setFont(font)
         _APP.processEvents()
         window.resize(1280, 800)
