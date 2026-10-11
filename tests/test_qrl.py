@@ -134,7 +134,7 @@ def test_qrl_refuses_loopback_routes_without_keying(monkeypatch):
     assert engine.state.phase == TxPhase.FAILED
 
 
-def test_qrl_cancelled_during_ptt_lead_unkeys_and_reports(monkeypatch):
+def test_qrl_cancelled_before_start_never_keys(monkeypatch):
     events = []
     monkeypatch.setattr(
         "aetv.station.play_chunk_stream",
@@ -144,6 +144,28 @@ def test_qrl_cancelled_during_ptt_lead_unkeys_and_reports(monkeypatch):
     engine._cancel.set()
     monkeypatch.setattr(engine._cancel, "clear", lambda: None)
 
+    assert not engine.transmit_qrl()
+    assert events == []
+    assert engine.state.phase == TxPhase.CANCELLED
+
+
+def test_qrl_cancelled_during_ptt_lead_unkeys_and_reports(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        "aetv.station.play_chunk_stream",
+        lambda *_args, **_kwargs: pytest.fail("cancelled QRL must not play"),
+    )
+
+    class CancelOnKey(_Ptt):
+        def set_ptt(self, on):
+            super().set_ptt(on)
+            if on:
+                engine.cancel()
+
+    engine = TxEngine(
+        Station(StationSettings(ptt_lead_s=5, ptt_tail_s=0)),
+        ptt=CancelOnKey(events),
+    )
     assert not engine.transmit_qrl()
     assert events == ["ptt:True", "ptt:False", "close"]
     assert engine.state.phase == TxPhase.CANCELLED

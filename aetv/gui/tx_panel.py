@@ -9,13 +9,13 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -132,6 +132,8 @@ class TransmitPanel(QWidget):
             on_audio_levels=self._audioLevelsArrived.emit,
         )
         self._thread: threading.Thread | None = None
+        self._pending_terminal_state: TxState | None = None
+        self.ptt_uncertain = False
         self._start_gate = threading.Event()
         self._cancel_requested = threading.Event()
         self._preview_stop = threading.Event()
@@ -169,6 +171,10 @@ class TransmitPanel(QWidget):
     def control_strip(self) -> QWidget:
         return self._strip
 
+    def action_strip(self) -> QWidget:
+        """Controls kept visible when the main window scrolls optional settings."""
+        return self._actions
+
     def picture_area(self) -> QWidget:
         return self.preview
 
@@ -186,9 +192,9 @@ class TransmitPanel(QWidget):
         self.level_db.setValue(20.0 * math.log10(level))
         profile = settings.tx_channel_profile
         if profile in self.channel_keys:
-            button = self.channel_buttons.button(self.channel_keys.index(profile))
-            if button is not None:
-                button.setChecked(True)
+            previous = self.channel_route.blockSignals(True)
+            self.channel_route.setCurrentIndex(self.channel_keys.index(profile))
+            self.channel_route.blockSignals(previous)
         self._sync_channel_route()
         self.av_power.setValue(int(round(settings.av_video_power * 100)))
         self.mic_mix.setValue(int(round(settings.av_microphone_mix * 100)))
@@ -196,8 +202,30 @@ class TransmitPanel(QWidget):
         self._fill_cameras()
         self._fill_outputs()
 
+    def confirm_radio_receive(self) -> bool:
+        """Require an operator check before clearing an unconfirmed PTT OFF."""
+        if not self.ptt_uncertain:
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "Check the radio before continuing",
+            "The previous PTT OFF command failed. The radio may still be transmitting.\n\n"
+            "Check the radio and manually release PTT if necessary. "
+            "Have you confirmed that the radio is now in receive?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.status.setText("PTT OFF failed; check the radio immediately")
+            return False
+        self.ptt_uncertain = False
+        self.pttChanged.emit(False)
+        self.status.setText("Operator confirmed the radio is in receive")
+        self.logMessage.emit("Operator confirmed the radio is in receive after an unconfirmed PTT OFF.")
+        return True
+
     def send(self) -> None:
-        if self.transmitting():
+        if self.transmitting() or not self.confirm_radio_receive():
             return
         self._apply_panel_settings()
         problems = self.station.settings.validate(
@@ -244,7 +272,7 @@ class TransmitPanel(QWidget):
 
     def send_qrl(self) -> None:
         """Ask "QRL?" on every 2.5 kHz slot the selected mode would occupy."""
-        if self.transmitting():
+        if self.transmitting() or not self.confirm_radio_receive():
             return
         self._apply_panel_settings()
         if self.emulating():
@@ -257,14 +285,16 @@ class TransmitPanel(QWidget):
         self._begin_transmit(self.engine.transmit_qrl, "preparing QRL?…")
 
     def _begin_transmit(self, job, message: str) -> None:
+        if self.transmitting():
+            return
+        self._pending_terminal_state = None
         self.send_button.setEnabled(False)
         self.qrl_button.setEnabled(False)
         self.mode.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.microphone.setEnabled(False)
         self.output.setEnabled(False)
-        for button in self.channel_buttons.buttons():
-            button.setEnabled(False)
+        self.channel_route.setEnabled(False)
         self._reset_audio_levels()
         self.progress.setValue(0)
         self.status.setText(message)
@@ -275,6 +305,8 @@ class TransmitPanel(QWidget):
         self._thread.start()
 
     def cancel(self) -> None:
+        if not self.transmitting():
+            return
         self._cancel_requested.set()
         self._start_gate.set()
         self.engine.cancel()
@@ -289,6 +321,9 @@ class TransmitPanel(QWidget):
                 )
                 return
             job()
+        except Exception as error:
+            self._stateArrived.emit(TxState(TxPhase.FAILED, 0.0, str(error)))
+            self._errorArrived.emit(str(error))
         finally:
             # Terminal state signals can reach the event loop before this
             # thread returns.  Clear the worker first, then let the UI restart
@@ -297,6 +332,9 @@ class TransmitPanel(QWidget):
             self._workerFinished.emit()
 
     def _on_worker_finished(self) -> None:
+        if self._pending_terminal_state is not None:
+            state, self._pending_terminal_state = self._pending_terminal_state, None
+            self._apply_state(state)
         self._webcam_tx_active = False
         if self.cam_radio.isChecked() or self.screen_radio.isChecked():
             self._start_preview()
@@ -324,13 +362,18 @@ class TransmitPanel(QWidget):
         region_button.clicked.connect(self._choose_region)
         self.mode = QComboBox()
         for name in RELEASE_MODES:
-            self.mode.addItem(RELEASE_MODE_LABELS[name], name)
-        v8 = AETV_MODES["V8"]
+            width = {"V8": "2.25", "V9": "3.8", "V7": "8", "AC16": "16"}[name]
+            title = {"V8": "Standard channel (V8)", "V9": "Wide channel (V9)",
+                     "V7": "Wide channel (V7)", "AC16": "Experimental AC16"}[name]
+            self.mode.addItem(f"{title} · {width} kHz · video", name)
+            self.mode.setItemData(self.mode.count() - 1, RELEASE_MODE_LABELS[name], Qt.ItemDataRole.ToolTipRole)
         self.mode.addItem(
-            f"V8 A/V — {v8.width}×{v8.height} @ {v8.fps:g} fps + analog audio",
+            "V8 A/V · 5 kHz · video + audio",
             "V8_AV",
         )
-        self.mode.addItem("AC16 A/V · 20 kHz — 256×144 @ 10 fps + 3.3 kHz audio", "AC16_AV")
+        self.mode.addItem("AC16 A/V · 20 kHz · video + audio", "AC16_AV")
+        self.mode_hint = QLabel()
+        self.mode_hint.setWordWrap(True)
         self.gops = QSpinBox()
         self.gops.setRange(1, 300)
         self.gops.setSuffix(" s")
@@ -349,10 +392,10 @@ class TransmitPanel(QWidget):
         self.mic_meter = AudioLevelMeter("Microphone after fader")
         self.clip_meter = AudioLevelMeter("Clip audio after fader")
         self.output_meter = AudioLevelMeter("Final raw transmit waveform")
-        self.send_button = QPushButton("Send")
-        self.cancel_button = QPushButton("Cancel")
+        self.send_button = QPushButton("Transmit")
+        self.cancel_button = QPushButton("Stop transmit")
         self.cancel_button.setEnabled(False)
-        self.qrl_button = QPushButton("QRL?")
+        self.qrl_button = QPushButton("Transmit QRL?")
         self.qrl_button.setToolTip(
             "Ask if the frequency is in use: keys a short CW \"QRL? DE <call>\" on every "
             "2.5 kHz SSB slot the selected mode would occupy. Watch the waterfall for replies."
@@ -386,11 +429,13 @@ class TransmitPanel(QWidget):
         file_row.addWidget(self.file_label, 1)
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Mode"))
-        mode_row.addWidget(self.mode)
-        mode_row.addWidget(QLabel("Length"))
-        mode_row.addWidget(self.gops)
-        mode_row.addWidget(QLabel("Level"))
-        mode_row.addWidget(self.level_db)
+        mode_row.addWidget(self.mode, 1)
+        length_row = QHBoxLayout()
+        length_row.addWidget(QLabel("Duration"))
+        length_row.addWidget(self.gops)
+        length_row.addWidget(QLabel("Audio drive"))
+        length_row.addWidget(self.level_db)
+        self.level_db.setToolTip("Digital audio level, not RF power. Start low and check your radio's ALC meter.")
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("To radio"))
         out_row.addWidget(self.output, 1)
@@ -416,21 +461,20 @@ class TransmitPanel(QWidget):
         channel_row = QHBoxLayout()
         channel_row.addWidget(QLabel("Route"))
         self.channel_keys = ["radio", *CHANNEL_PROFILES]
-        self.channel_buttons = QButtonGroup(self)
-        self.channel_buttons.setExclusive(True)
-        for index, key in enumerate(self.channel_keys):
-            label = "Radio" if key == "radio" else CHANNEL_PROFILES[key].label
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setToolTip(
-                "Transmit to the configured radio/audio output"
-                if key == "radio"
-                else CHANNEL_PROFILES[key].description + " (local loopback; no PTT)"
+        self.channel_route = QComboBox()
+        for key in self.channel_keys:
+            label = "Radio / audio output" if key == "radio" else "Local test: " + CHANNEL_PROFILES[key].label
+            self.channel_route.addItem(label, key)
+            self.channel_route.setItemData(
+                self.channel_route.count() - 1,
+                "Sends to configured hardware; may key the transmitter."
+                if key == "radio" else CHANNEL_PROFILES[key].description + " (local loopback; no PTT)",
+                Qt.ItemDataRole.ToolTipRole,
             )
-            self.channel_buttons.addButton(button, index)
-            channel_row.addWidget(button)
-        self.channel_buttons.button(0).setChecked(True)
-        self.channel_buttons.idClicked.connect(self._sync_channel_route)
+        channel_row.addWidget(self.channel_route, 1)
+        self.channel_route.currentIndexChanged.connect(self._sync_channel_route)
+        self.route_hint = QLabel()
+        self.route_hint.setWordWrap(True)
         buttons = QHBoxLayout()
         buttons.addWidget(self.send_button)
         buttons.addWidget(self.cancel_button)
@@ -440,15 +484,21 @@ class TransmitPanel(QWidget):
         strip.addLayout(screen_row)
         strip.addLayout(file_row)
         strip.addLayout(mode_row)
+        strip.addWidget(self.mode_hint)
+        strip.addLayout(length_row)
         strip.addLayout(out_row)
         strip.addLayout(self.av_row)
         strip.addLayout(self.mix_row)
         strip.addLayout(self.audio_meter_row)
         strip.addLayout(self.output_meter_row)
         strip.addLayout(channel_row)
-        strip.addWidget(self.progress)
-        strip.addLayout(buttons)
-        strip.addWidget(self.status)
+        strip.addWidget(self.route_hint)
+        self._actions = QWidget()
+        actions = QVBoxLayout(self._actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.addWidget(self.progress)
+        actions.addLayout(buttons)
+        actions.addWidget(self.status)
 
         self.clip_grid = ClipGrid()
         self.clip_grid.fileChosen.connect(self._set_clip)
@@ -459,9 +509,15 @@ class TransmitPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.preview, 1)
-        layout.addWidget(QLabel("Prepared clips — drop files; hover to preview; click to transmit"))
+        self.clips_toggle = QPushButton("Prepared clips ▸")
+        self.clips_toggle.setCheckable(True)
+        self.clips_toggle.setToolTip("Drop files into the clip bank, then select a clip and press Transmit.")
+        self.clips_toggle.toggled.connect(self._toggle_clips)
+        layout.addWidget(self.clips_toggle)
         layout.addWidget(self.clip_grid, 0)
+        self.clip_grid.setVisible(False)
         layout.addWidget(self._strip, 0)
+        layout.addWidget(self._actions, 0)
         self._fill_screen_targets()
         self._restore_clip_bank()
         self.sync_from_config()
@@ -471,6 +527,10 @@ class TransmitPanel(QWidget):
         self.av_power.valueChanged.connect(self._on_av_power_changed)
         self.mic_mix.valueChanged.connect(self._on_mic_mix_changed)
         self._start_preview()
+
+    def _toggle_clips(self, expanded: bool) -> None:
+        self.clip_grid.setVisible(expanded)
+        self.clips_toggle.setText("Prepared clips ▾ · select, then press Transmit" if expanded else "Prepared clips ▸")
 
     def _restore_clip_bank(self) -> None:
         stored_bank = self.station.settings.clip_bank
@@ -672,7 +732,8 @@ class TransmitPanel(QWidget):
         self._file_path = prepared.path
         self.file_label.setText(f"Prepared: {prepared.path}")
         self.file_radio.setChecked(True)
-        self.send()
+        self._preview_clip(index)
+        self.status.setText(f"{cell.name.text()} selected; press {self.send_button.text()} when ready")
 
     def _preview_clip(self, index: int) -> None:
         prepared = self._prepared_clips.get(index)
@@ -923,8 +984,7 @@ class TransmitPanel(QWidget):
         settings.tx_channel_profile = self.selected_channel_profile()
 
     def selected_channel_profile(self) -> str:
-        index = self.channel_buttons.checkedId()
-        return self.channel_keys[index] if 0 <= index < len(self.channel_keys) else "radio"
+        return self.channel_route.currentData() or "radio"
 
     def emulating(self) -> bool:
         return self.selected_channel_profile() != "radio"
@@ -935,7 +995,11 @@ class TransmitPanel(QWidget):
         testing = profile != "radio"
         self.output.setEnabled(not testing)
         self.qrl_button.setEnabled(not testing)
-        self.send_button.setText("Run loopback" if testing else "Send")
+        self.send_button.setText("Run local test" if testing else "Transmit")
+        self.route_hint.setText(
+            "Local test only: no radio output or PTT."
+            if testing else "Radio output selected. Listen first; check your callsign, frequency and permitted bandwidth."
+        )
 
     def _selected_mode_name(self) -> str:
         return self.mode.currentData().removesuffix("_AV") if self.mode.currentData() in {"V8_AV", "AC16_AV"} else (
@@ -966,6 +1030,15 @@ class TransmitPanel(QWidget):
         self.modeRequested.emit(base_mode)
 
     def _sync_av_controls(self) -> None:
+        mode = AETV_MODES[self._selected_mode_name()]
+        low, high = mode.geometry.tx_bandpass
+        if self.mode.currentData() in {"V8_AV", "AC16_AV"}:
+            from aetv.analog_av import composite_profile
+            low, high = 0, composite_profile(mode.name).bandwidth_hz
+        self.mode_hint.setText(
+            f"{mode.width}×{mode.height} at {mode.fps:g} fps · audio filter {low / 1000:g}–{high / 1000:g} kHz. "
+            "Use the same mode at both stations."
+        )
         visible = self.mode.currentData() in {"V8_AV", "AC16_AV"}
         for index in range(self.av_row.count()):
             widget = self.av_row.itemAt(index).widget()
@@ -1017,10 +1090,21 @@ class TransmitPanel(QWidget):
         self.output_meter.reset_level()
 
     def _apply_state(self, state: TxState) -> None:
-        self.status.setText(state.message or state.phase.value)
+        if not state.active and self.transmitting():
+            # Engine cleanup may still be releasing PTT. Do not resume RX,
+            # enable another send, or display PTT OFF until it has returned.
+            self._pending_terminal_state = state
+            self.status.setText(f"{state.message or state.phase.value} · finishing cleanup…")
+            return
+        # Unrelated idle/cancelled/model states cannot clear an OFF failure.
+        self.ptt_uncertain = self.ptt_uncertain or state.ptt_uncertain
+        self.status.setText(
+            "PTT OFF failed; check the radio immediately"
+            if self.ptt_uncertain else state.message or state.phase.value
+        )
         self.progress.setValue(int(round(state.progress * 100)))
-        keyed = state.phase in {TxPhase.KEYING, TxPhase.SENDING, TxPhase.UNKEYING}
-        self.pttChanged.emit(keyed)
+        keyed = not self.emulating() and state.phase in {TxPhase.KEYING, TxPhase.SENDING, TxPhase.UNKEYING}
+        self.pttChanged.emit(keyed or self.ptt_uncertain)
         if state.phase in {TxPhase.DONE, TxPhase.CANCELLED, TxPhase.FAILED, TxPhase.IDLE}:
             codec = self.station.codec
             self.send_button.setEnabled(
@@ -1028,10 +1112,8 @@ class TransmitPanel(QWidget):
             )
             self.mode.setEnabled(True)
             self.cancel_button.setEnabled(False)
-            self.mode.setEnabled(True)
             self.microphone.setEnabled(True)
-            for button in self.channel_buttons.buttons():
-                button.setEnabled(True)
+            self.channel_route.setEnabled(True)
             self._sync_channel_route()
             if state.phase != TxPhase.IDLE:
                 self.transmitFinished.emit()

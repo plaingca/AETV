@@ -47,7 +47,11 @@ def test_short_transmission_plays_without_filling_prebuffer():
     frames = np.stack([np.full((2, 2, 3), n, np.uint8) for n in (20, 30)])
     view.enqueue_rgb(frames, fps=1000, prebuffer_frames=20)
     assert shown == []
-    QTest.qWait(60)
+    # Wait for the observable result, not a scheduling assumption on busy CI.
+    for _ in range(100):
+        if len(shown) == 2:
+            break
+        QTest.qWait(10)
     assert shown == [20, 30]
     view.clear()
     assert not view._prebuffer_timer.isActive()

@@ -411,6 +411,7 @@ def _qrl_panel(*, emulating=False, problems=()):
     started = []
     panel = SimpleNamespace(
         transmitting=lambda: False,
+        confirm_radio_receive=lambda: True,
         _apply_panel_settings=lambda: None,
         emulating=lambda: emulating,
         station=SimpleNamespace(

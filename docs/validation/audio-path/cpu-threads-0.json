@@ -1,0 +1,18 @@
+{
+  "mode": "V8",
+  "device": "CPU",
+  "checkpoint": "/tmp/aetv-models/v8-hf3k-mpp12-ft.runtime.json",
+  "cpu": "x86_64",
+  "logical_cpus": 9,
+  "backend": "onnxruntime",
+  "backend_version": "1.23.2",
+  "backend_threads": null,
+  "runtime_validation": null,
+  "encode_median_ms": 460.38,
+  "decode_median_ms": 809.23,
+  "cycle_median_ms": 1287.98,
+  "encode_realtime_headroom": 2.17,
+  "decode_realtime_headroom": 1.24,
+  "full_duplex_headroom": 0.78,
+  "repeats": 5
+}

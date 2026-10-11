@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         panes.setChildrenCollapsible(False)
         panes.setStretchFactor(0, 1)
         panes.setStretchFactor(1, 1)
+        panes.setSizes([640, 640])
 
         stack = QSplitter(Qt.Orientation.Vertical)
         self.radio = RadioPanel(self.settings)
@@ -167,7 +168,7 @@ class MainWindow(QMainWindow):
         stack.setStretchFactor(0, 0)
         stack.setStretchFactor(1, 0)
         stack.setStretchFactor(2, 1)
-        stack.setSizes([140, 170, 520])
+        stack.setSizes([52, 90, 650])
         self.setCentralWidget(stack)
 
         self.log = LogPane()
@@ -177,6 +178,7 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.log)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         self._log_dock = dock
+        dock.hide()
 
         self.ptt_lamp = PttLamp()
         self.station_label = QLabel()
@@ -199,7 +201,8 @@ class MainWindow(QMainWindow):
         self.rx.logMessage.connect(self._log)
         self.rx.pathPlannerRequested.connect(self.open_path_planner)
         self.tx.logMessage.connect(self._log)
-        self.tx.pttChanged.connect(self.ptt_lamp.set_keyed)
+        self.tx.pttChanged.connect(self._update_ptt_lamp)
+        self.rx.before_start = self.tx.confirm_radio_receive
         self.tx.pttChanged.connect(self.rx.on_local_ptt_changed)
         self.tx.transmitStarted.connect(self._on_tx_started)
         self.tx.transmitFinished.connect(self._on_tx_finished)
@@ -214,11 +217,20 @@ class MainWindow(QMainWindow):
         )
 
     def _wrap(self, title: str, widget: QWidget) -> QWidget:
-        from PySide6.QtWidgets import QGroupBox, QVBoxLayout
+        from PySide6.QtWidgets import QGroupBox, QScrollArea, QVBoxLayout
 
         box = QGroupBox(title)
         layout = QVBoxLayout(box)
-        layout.addWidget(widget)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(widget)
+        layout.addWidget(scroll)
+        # Keep start/stop and recovery messages accessible even with long
+        # optional controls or a smaller laptop display.
+        actions = widget.action_strip()
+        widget.layout().removeWidget(actions)
+        layout.addWidget(actions)
         return box
 
     def _build_menu(self) -> None:
@@ -252,14 +264,17 @@ class MainWindow(QMainWindow):
         receive_menu.addAction(ft8_calibration)
 
         transmit_menu = self.menuBar().addMenu("&Transmit")
-        send = QAction("&Send", self)
+        send = QAction("&Transmit / run local test", self)
         send.setShortcut(QKeySequence("Ctrl+Return"))
         send.triggered.connect(self.tx.send)
-        cancel = QAction("Cancel", self)
+        cancel = QAction("Stop transmit", self)
         cancel.setShortcut(QKeySequence("Escape"))
         cancel.triggered.connect(self.tx.cancel)
         transmit_menu.addAction(send)
         transmit_menu.addAction(cancel)
+
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self._log_dock.toggleViewAction())
 
         help_menu = self.menuBar().addMenu("&Help")
         about = QAction("About AETV", self)
@@ -433,7 +448,7 @@ class MainWindow(QMainWindow):
             self._load_codec()
 
     def _apply_rf_settings(self, values) -> None:
-        if self.tx.transmitting():
+        if self.tx.transmitting() or not self.tx.confirm_radio_receive():
             return
         from dataclasses import replace
         candidate = replace(self.settings, **values)
@@ -459,6 +474,8 @@ class MainWindow(QMainWindow):
             message = "settings cannot be changed during a transmission"
             self.tx.status.setText(message)
             self._log(message)
+            return
+        if not self.tx.confirm_radio_receive():
             return
         previous_codec_config = _codec_config(self.settings)
         previous_rx_config = _rx_runtime_config(self.settings)
@@ -622,8 +639,21 @@ class MainWindow(QMainWindow):
         if self._tx_finished_while_stopping_rx and self._resume_rx:
             self._resume_or_hold_receive()
 
+    def _update_ptt_lamp(self, keyed: bool) -> None:
+        if self.tx.ptt_uncertain:
+            self.ptt_lamp.set_unknown()
+        else:
+            self.ptt_lamp.set_keyed(keyed)
+
     def _on_tx_finished(self) -> None:
         self.radio.setEnabled(True)
+        if self.tx.ptt_uncertain:
+            self.ptt_lamp.set_unknown()
+            self._resume_rx = False
+            self._tx_finished_while_stopping_rx = False
+            self._emulation_active = False
+            self._log("PTT OFF was not confirmed. Check the radio immediately; receive will not resume automatically.")
+            return
         self.ptt_lamp.set_keyed(False)
         if getattr(self, "_resume_rx", False):
             if self._tx_waiting_for_rx:
@@ -683,6 +713,15 @@ class MainWindow(QMainWindow):
             self.tx.cancel()
             if self.tx._thread is not None:
                 self.tx._thread.join(timeout=8.0)
+            if self.tx.transmitting():
+                QMessageBox.warning(
+                    self,
+                    "AETV",
+                    "Transmit is still stopping. Keep this window open and check "
+                    "that the radio is no longer transmitting before trying to quit again.",
+                )
+                event.ignore()
+                return
         if self.rx.listening():
             self.rx.stop_blocking()
         self.tx.stop_preview()

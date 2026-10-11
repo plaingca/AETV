@@ -37,7 +37,9 @@ def test_model_source_link_uses_clean_desktop_opener(monkeypatch, started):
     dialog.close()
 
 
-def test_first_run_preselects_current_mode_and_requires_an_install():
+def test_first_run_preselects_current_mode_and_requires_an_install(monkeypatch):
+    # This case exercises online selection without starting a download.
+    monkeypatch.delenv("AETV_OFFLINE", raising=False)
     statuses = {
         mode: ReleaseModelStatus(mode, False, problem="not installed")
         for mode in ("V8", "V7")
@@ -186,6 +188,7 @@ def test_active_receive_restarts_when_source_settings_change(monkeypatch):
         tx=SimpleNamespace(
             sync_from_config=lambda: None,
             transmitting=lambda: False,
+            confirm_radio_receive=lambda: True,
         ),
         waterfall=SimpleNamespace(set_mode=lambda _mode: None),
         radio=SimpleNamespace(sync=lambda _settings: None),
