@@ -138,12 +138,22 @@ def fading(
     """Two independent equal-power Rayleigh paths (Watterson model)."""
     p = FADING_PRESETS[preset] if isinstance(preset, str) else preset
     rng = np.random.default_rng(seed)
-    z = _analytic(x)
+    values = np.asarray(x).reshape(-1)
+    if values.size == 0:
+        return values.astype(np.float64)
+    z = _analytic(values)
     delay = int(round(p.delay_ms * 1e-3 * fs))
     taps = _gaussian_taps if p.taps == "gaussian" else _rayleigh_taps
     g1 = taps(len(z), p.doppler_hz, rng, fs)
     g2 = taps(len(z), p.doppler_hz, rng, fs)
-    z2 = np.concatenate([np.zeros(delay, dtype=complex), z[: len(z) - delay]])
+    # Preserve the input length even when a short callback is entirely
+    # inside the delayed path's initial silence. Negative slice endpoints
+    # otherwise append samples and produce a mismatched array length.
+    z2 = np.zeros_like(z)
+    if delay == 0:
+        z2[:] = z
+    elif delay < len(z):
+        z2[delay:] = z[:-delay]
     return np.real((z * g1 + z2 * g2) / np.sqrt(2))
 
 

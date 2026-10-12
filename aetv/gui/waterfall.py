@@ -97,7 +97,9 @@ class Waterfall(QWidget):
         self._clip_latched = False
         self._display_floor: float | None = None
         self._display_ceiling: float | None = None
-        self.setMinimumHeight(90)
+        # Keep the normal 90 px splitter allocation, but surrender nonessential
+        # plot height when large accessibility fonts need room for safety controls.
+        self.setMinimumHeight(24)
         self.setMinimumWidth(160)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         timer = QTimer(self)

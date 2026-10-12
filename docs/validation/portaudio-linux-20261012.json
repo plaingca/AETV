@@ -1,0 +1,592 @@
+{
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.41",
+  "python": "3.12.14",
+  "sounddevice": "0.5.6",
+  "portaudio": [
+    1246720,
+    "PortAudio V19.6.0-devel, revision 396fe4b6699ae929d3a685b3ef8a7e97396139a4"
+  ],
+  "scope": "Real sounddevice -> PortAudio -> ALSA file/null PCM, production TX writes/RX callbacks, streaming resamplers and ring, HF emulator, modem. No endpoint monkeypatch.",
+  "limits": "File-backed accelerated replay, not simultaneous real-time loopback. No physical soundcard, microphone, loudspeaker, RF, Station engine, CAT/PTT, Windows WASAPI, callback deadlines or native xrun/unplug certification.",
+  "inventory": {
+    "input": [
+      {
+        "index": 0,
+        "name": "aetv_file_pcm",
+        "channels": 128,
+        "default_samplerate": 44100.0,
+        "is_default": true,
+        "identifier": ""
+      }
+    ],
+    "output": [
+      {
+        "index": 0,
+        "name": "aetv_file_pcm",
+        "channels": 128,
+        "default_samplerate": 44100.0,
+        "is_default": true,
+        "identifier": ""
+      }
+    ]
+  },
+  "hostapis": [
+    {
+      "name": "ALSA",
+      "devices": [
+        0
+      ],
+      "default_input_device": 0,
+      "default_output_device": 0
+    },
+    {
+      "name": "OSS",
+      "devices": [],
+      "default_input_device": -1,
+      "default_output_device": -1
+    }
+  ],
+  "lifecycle": {
+    "rate_probes": [
+      {
+        "rate": 8000,
+        "native_open_read_write_close_pass": true,
+        "output_underflow": false,
+        "input_overflow": false
+      },
+      {
+        "rate": 12000,
+        "native_open_read_write_close_pass": true,
+        "output_underflow": false,
+        "input_overflow": false
+      },
+      {
+        "rate": 24000,
+        "native_open_read_write_close_pass": true,
+        "output_underflow": false,
+        "input_overflow": false
+      },
+      {
+        "rate": 44100,
+        "native_open_read_write_close_pass": true,
+        "output_underflow": false,
+        "input_overflow": false
+      },
+      {
+        "rate": 48000,
+        "native_open_read_write_close_pass": true,
+        "output_underflow": false,
+        "input_overflow": false
+      }
+    ],
+    "callback_completion": true,
+    "callback_cancel_return": false,
+    "blocking_cancel_return": false,
+    "blocking_cancel_native_samples": 5292,
+    "small_ring_capture": {
+      "native_rate": 44100,
+      "callbacks": 150,
+      "total_written": 10320,
+      "ring_overrun": true,
+      "errors": [],
+      "discontinuities": 0,
+      "closed": true
+    },
+    "reopen_passes": [
+      true,
+      true,
+      true
+    ],
+    "invalid_endpoint_failures": [
+      {
+        "kind": "input",
+        "exception": "PortAudioError",
+        "message": "Error querying device 999999"
+      },
+      {
+        "kind": "output",
+        "exception": "PortAudioError",
+        "message": "Error querying device 999999"
+      }
+    ],
+    "actual_driver_xrun": "Not induced: ALSA null/file PCM has no real-time device clock.",
+    "disconnect": "Reopen only; physical unplug and backend disconnect were not tested."
+  },
+  "trials": [
+    {
+      "mode": "V8",
+      "profile": "clean",
+      "seed": 0,
+      "modem_rate": 8000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9294174419547403e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 45360,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.9703484939765168,
+          "nmse": 0.09521073925737568
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.9716822815162808,
+          "nmse": 0.09426501223038439
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.9741976216267098,
+          "nmse": 0.08896407561073648
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.9745687601248471,
+          "nmse": 0.08463189212931965
+        }
+      ],
+      "baseline_pass": true
+    },
+    {
+      "mode": "V8",
+      "profile": "awgn6",
+      "seed": 0,
+      "modem_rate": 8000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9294174419547403e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 45360,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.8836161850051514,
+          "nmse": 0.21968550401119777
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.8812220232875907,
+          "nmse": 0.2245441074085739
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.8834571723875224,
+          "nmse": 0.21994965981629955
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.8829275965555196,
+          "nmse": 0.22065174751389202
+        }
+      ],
+      "baseline_pass": null
+    },
+    {
+      "mode": "V8",
+      "profile": "mpp12",
+      "seed": 0,
+      "modem_rate": 8000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9294174419547403e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 45360,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.6455551302007765,
+          "nmse": 0.8690117243946006
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.7775534340238127,
+          "nmse": 0.43607596346563454
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.6843732065073942,
+          "nmse": 0.6882744670358381
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.8256726165847096,
+          "nmse": 0.32483054031079
+        }
+      ],
+      "baseline_pass": null
+    },
+    {
+      "mode": "V9",
+      "profile": "clean",
+      "seed": 0,
+      "modem_rate": 12000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9210973973015086e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 68200,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.9726075205907737,
+          "nmse": 0.08178357256705979
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.9731179306183186,
+          "nmse": 0.08176580871110249
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.9728095398252113,
+          "nmse": 0.08108880609701531
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.973876415522423,
+          "nmse": 0.07926630877855866
+        }
+      ],
+      "baseline_pass": true
+    },
+    {
+      "mode": "V9",
+      "profile": "awgn6",
+      "seed": 0,
+      "modem_rate": 12000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9210973973015086e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 68200,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.8332706474238708,
+          "nmse": 0.31223077546958666
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.8400874465917089,
+          "nmse": 0.30894143167666
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.8346982037656615,
+          "nmse": 0.3155722331396286
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.8353744985799078,
+          "nmse": 0.31349940616736177
+        }
+      ],
+      "baseline_pass": null
+    },
+    {
+      "mode": "V9",
+      "profile": "mpp12",
+      "seed": 0,
+      "modem_rate": 12000,
+      "sent_gops": 4,
+      "received_gops": 0,
+      "matched_unique_gops": 0,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9210973973015086e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 68200,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [],
+      "baseline_pass": null
+    },
+    {
+      "mode": "V7",
+      "profile": "clean",
+      "seed": 0,
+      "modem_rate": 24000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9753436936452715e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 136400,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.9709820029576373,
+          "nmse": 0.0764705115226274
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.9724963797533369,
+          "nmse": 0.07296220267648697
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.9715473153658748,
+          "nmse": 0.07427480877035215
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.9717959866379635,
+          "nmse": 0.07341470764915349
+        }
+      ],
+      "baseline_pass": true
+    },
+    {
+      "mode": "V7",
+      "profile": "awgn6",
+      "seed": 0,
+      "modem_rate": 24000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9753436936452715e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 136400,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.7377860057109511,
+          "nmse": 0.6187008382660525
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.7405872582849494,
+          "nmse": 0.5832983410018463
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.7295568950029206,
+          "nmse": 0.6000934446629834
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.7369094229032125,
+          "nmse": 0.6027584461149799
+        }
+      ],
+      "baseline_pass": null
+    },
+    {
+      "mode": "V7",
+      "profile": "mpp12",
+      "seed": 0,
+      "modem_rate": 24000,
+      "sent_gops": 4,
+      "received_gops": 0,
+      "matched_unique_gops": 0,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.9753436936452715e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 136400,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [],
+      "baseline_pass": null
+    },
+    {
+      "mode": "AC16",
+      "profile": "clean",
+      "seed": 0,
+      "modem_rate": 48000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.919884090069047e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 272800,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.9572772358887912,
+          "nmse": 0.09225204911253196
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.9571568460840627,
+          "nmse": 0.09313722006229325
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.957216377790575,
+          "nmse": 0.09312655367160433
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.9568788055691474,
+          "nmse": 0.09309461709382023
+        }
+      ],
+      "baseline_pass": true
+    },
+    {
+      "mode": "AC16",
+      "profile": "awgn6",
+      "seed": 0,
+      "modem_rate": 48000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.919884090069047e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 272800,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.49558851738799237,
+          "nmse": 2.144206068704258
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.488695263750619,
+          "nmse": 2.211748916345847
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.5497196743232179,
+          "nmse": 1.6523798450999663
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.5263793905995985,
+          "nmse": 1.8875846045847182
+        }
+      ],
+      "baseline_pass": null
+    },
+    {
+      "mode": "AC16",
+      "profile": "mpp12",
+      "seed": 0,
+      "modem_rate": 48000,
+      "sent_gops": 4,
+      "received_gops": 4,
+      "matched_unique_gops": 4,
+      "tx_native_samples": 205065,
+      "tx_max_error": 2.919884090069047e-08,
+      "capture": {
+        "native_rate": 44100,
+        "callbacks": 655,
+        "total_written": 272800,
+        "ring_overrun": false,
+        "errors": [],
+        "discontinuities": 0,
+        "closed": true
+      },
+      "measurements": [
+        {
+          "source_gop": 0,
+          "correlation": 0.6264612287608081,
+          "nmse": 1.1710315168342404
+        },
+        {
+          "source_gop": 1,
+          "correlation": 0.516719694565262,
+          "nmse": 2.1846540741073577
+        },
+        {
+          "source_gop": 2,
+          "correlation": 0.43782263950217853,
+          "nmse": 3.225131950969774
+        },
+        {
+          "source_gop": 3,
+          "correlation": 0.44332528891093376,
+          "nmse": 3.152426628732344
+        }
+      ],
+      "baseline_pass": null
+    }
+  ],
+  "all_clean_pass": true
+}

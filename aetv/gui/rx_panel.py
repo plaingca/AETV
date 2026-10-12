@@ -258,6 +258,7 @@ class ReceivePanel(QWidget):
     def __init__(self, station, parent=None):
         super().__init__(parent)
         self.station = station
+        self.before_start = lambda: True
         self.engine = RxEngine(
             station,
             on_state=self._stateArrived.emit,
@@ -297,6 +298,10 @@ class ReceivePanel(QWidget):
 
     def control_strip(self) -> QWidget:
         return self._strip
+
+    def action_strip(self) -> QWidget:
+        """Controls kept visible when the main window scrolls optional settings."""
+        return self._actions
 
     def picture_area(self) -> QWidget:
         return self.preview
@@ -339,6 +344,8 @@ class ReceivePanel(QWidget):
         self._sync_source_visibility()
 
     def start(self) -> bool:
+        if not self.before_start():
+            return False
         if self._rf_pair_thread is not None and self._rf_pair_thread.isRunning():
             self._start_after_kiwi_pick = True
             self.status.setText("waiting for the best RF path…")
@@ -502,7 +509,8 @@ class ReceivePanel(QWidget):
         self.start_button = QPushButton("Start receiving")
         self.stop_button = QPushButton("Stop")
         self.save_button = QPushButton("Save video…")
-        self.open_saved_videos_button = QPushButton("Open saved video directory")
+        self.open_saved_videos_button = QPushButton("Open videos")
+        self.open_saved_videos_button.setToolTip("Open saved video directory")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
@@ -544,12 +552,16 @@ class ReceivePanel(QWidget):
         auto_row = QHBoxLayout()
         auto_row.addWidget(self.auto_kiwi)
         auto_row.addStretch(1)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.stop_button)
-        buttons.addWidget(self.save_button)
-        buttons.addWidget(self.open_saved_videos_button)
-        buttons.addStretch(1)
+        # These actions are pinned outside the scroll area. Two short rows
+        # keep every button accessible with native Windows/large-font metrics.
+        buttons = QVBoxLayout()
+        for pair in ((self.start_button, self.stop_button),
+                     (self.save_button, self.open_saved_videos_button)):
+            row = QHBoxLayout()
+            for button in pair:
+                row.addWidget(button)
+            row.addStretch(1)
+            buttons.addLayout(row)
         strip.addLayout(row1)
         strip.addLayout(self.raw_meter_row)
         strip.addLayout(self.playback_row)
@@ -558,13 +570,17 @@ class ReceivePanel(QWidget):
         strip.addLayout(row3)
         strip.addLayout(path_row)
         strip.addLayout(auto_row)
-        strip.addWidget(self.status)
-        strip.addWidget(self.progress)
-        strip.addLayout(buttons)
+        self._actions = QWidget()
+        actions = QVBoxLayout(self._actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.addWidget(self.status)
+        actions.addWidget(self.progress)
+        actions.addLayout(buttons)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.preview, 1)
         layout.addWidget(self._strip, 0)
+        layout.addWidget(self._actions, 0)
         self.sync_from_config()
         if self.source.currentData() == "kiwi" and self.auto_kiwi.isChecked():
             QTimer.singleShot(400, self._refresh_kiwis)

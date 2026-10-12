@@ -26,6 +26,8 @@ class RadioPanel(QWidget):
         self._frequencies = {}
         grid = QGridLayout(self)
         self.backend = QComboBox()
+        self.backend.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.backend.setMinimumContentsLength(8)
         self.backend.addItem("Audio / CAT", "audio")
         self.backend.addItem("PlutoSDR", "pluto")
         self.backend.addItem("HackRF (experimental)", "hackrf")
@@ -55,27 +57,41 @@ class RadioPanel(QWidget):
         self.correction.setToolTip(
             "Manual correction to the received signal offset; used when auto correction is disabled"
         )
-        self.apply = QPushButton("Apply RF settings")
+        self.apply = QPushButton("Apply tuning")
         self.apply.setObjectName("applyRadioSettings")
         self.apply.clicked.connect(self._apply)
         grid.addWidget(QLabel("Transmit via"), 0, 0)
         grid.addWidget(self.backend, 0, 1)
         self.frequency_label = QLabel("Operating frequency")
-        grid.addWidget(self.frequency_label, 0, 2)
-        grid.addWidget(self.frequency, 0, 3)
-        grid.addWidget(QLabel("Pluto address"), 0, 4)
-        grid.addWidget(self.uri, 0, 5)
-        grid.addWidget(QLabel("Pluto TX gain"), 1, 0)
+        # Keep routing and tuning on separate rows. Native Windows styles
+        # and larger fonts can otherwise force the window wider than 1280 px.
+        grid.addWidget(self.frequency_label, 1, 0)
+        grid.addWidget(self.frequency, 1, 1, 1, 2)
+        self.advanced_toggle = QPushButton("Radio details ▸")
+        self.advanced_toggle.setCheckable(True)
+        grid.addWidget(self.apply, 1, 3)
+        grid.addWidget(self.advanced_toggle, 0, 3)
+        grid.setColumnStretch(2, 1)
+        self.advanced = QWidget()
+        details = QGridLayout(self.advanced)
+        details.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(self.advanced, 2, 0, 1, 4)
+        grid = details
+        self.pluto_address_label = QLabel("Pluto address")
+        grid.addWidget(self.pluto_address_label, 0, 0)
+        grid.addWidget(self.uri, 0, 1, 1, 3)
+        self.tx_label = QLabel("Pluto TX gain")
+        grid.addWidget(self.tx_label, 1, 0)
         grid.addWidget(self.tx_gain, 1, 1)
         grid.addWidget(self.tx_value, 1, 2)
         grid.addWidget(self.rx_label, 1, 3)
         grid.addWidget(self.rx_gain, 1, 4)
         grid.addWidget(self.rx_value, 1, 5)
-        grid.addWidget(QLabel("RTL serial"), 2, 0)
+        self.serial_label = QLabel("RTL serial")
+        grid.addWidget(self.serial_label, 2, 0)
         grid.addWidget(self.serial, 2, 1)
         grid.addWidget(self.auto_correct, 2, 2, 1, 2)
         grid.addWidget(self.correction, 2, 4)
-        grid.addWidget(self.apply, 2, 5)
         self.hackrf_serial = QLineEdit()
         self.hackrf_serial.setPlaceholderText("Empty = first HackRF; optional hex serial")
         self.hackrf_tx_gain, hackrf_tx_value = self._slider(0, 47, 1)
@@ -92,8 +108,21 @@ class RadioPanel(QWidget):
                 [3]*5 + [4]*6 + [5], [0,1,2,3,5,0,1,2,3,4,5,0],
                 [1,1,1,2,1] + [1]*6 + [6]):
             grid.addWidget(widget, row, col, 1, span)
+        self.audio_help = QLabel(
+            "Audio/CAT setup: open File → Settings → Rig to choose the connection. "
+            "Select the radio's audio input and output in the panes below."
+        )
+        self.audio_help.setWordWrap(True)
+        grid.addWidget(self.audio_help, 6, 0, 1, 6)
+        self.advanced.setVisible(False)
+        self.advanced_toggle.toggled.connect(self._toggle_details)
+        self.auto_correct.toggled.connect(self._visibility)
         self.backend.currentIndexChanged.connect(self._visibility)
         self.sync(settings)
+
+    def _toggle_details(self, expanded):
+        self.advanced.setVisible(expanded)
+        self.advanced_toggle.setText("Radio details ▾" if expanded else "Radio details ▸")
 
     def _slider(self, low, high, scale):
         slider = QSlider(Qt.Orientation.Horizontal)
@@ -139,6 +168,7 @@ class RadioPanel(QWidget):
     def _visibility(self):
         direct_rx = self._rx_source in {"pluto", "rtlsdr", "hackrf"}
         direct_tx = self.backend.currentData() in {"pluto", "hackrf"}
+        self.audio_help.setVisible(not direct_rx and not direct_tx)
         hackrf_tx = self.backend.currentData() == "hackrf"
         hackrf_rx = self._rx_source == "hackrf"
         for widget in self.hackrf_widgets:
@@ -146,7 +176,18 @@ class RadioPanel(QWidget):
         self.hackrf_tx_gain.setEnabled(hackrf_tx)
         self.hackrf_lna.setEnabled(hackrf_rx)
         self.hackrf_vga.setEnabled(hackrf_rx)
-        self.tx_gain.setEnabled(self.backend.currentData() == "pluto")
+        pluto_tx = self.backend.currentData() == "pluto"
+        for widget in (self.tx_label, self.tx_gain, self.tx_value):
+            widget.setVisible(pluto_tx)
+        for widget in (self.pluto_address_label, self.uri):
+            widget.setVisible(pluto_tx or self._rx_source == "pluto")
+        for widget in (self.serial_label, self.serial):
+            widget.setVisible(self._rx_source == "rtlsdr")
+        for widget in (self.rx_label, self.rx_gain, self.rx_value):
+            widget.setVisible(self._rx_source in {"pluto", "rtlsdr"})
+        self.auto_correct.setVisible(direct_rx)
+        self.correction.setVisible(direct_rx)
+        self.tx_gain.setEnabled(pluto_tx)
         self.rx_gain.setEnabled(self._rx_source in {"pluto", "rtlsdr"})
         self.serial.setEnabled(self._rx_source == "rtlsdr")
         self.uri.setEnabled(self.backend.currentData() == "pluto" or self._rx_source == "pluto")
@@ -158,7 +199,7 @@ class RadioPanel(QWidget):
             self.frequency.setRange(*((1.1, 6000) if kind == "sdr" else (0, 60)))
             self.frequency.setSpecialValueText("" if kind == "sdr" else "Use current rig frequency")
             self.frequency.setValue(self._frequencies[kind])
-        self.frequency_label.setText("RF center" if kind == "sdr" else "HF operating frequency")
+        self.frequency_label.setText("RF center" if kind == "sdr" else "HF frequency")
         tunable = self._rx_source == "flex" or (
             not self._settings.audio_only and self._settings.cat_backend in {"flex", "hamlib", "rigctld"}
         )
@@ -173,7 +214,7 @@ class RadioPanel(QWidget):
             "VOX and RTS/DTR control PTT only; tune those radios manually."
         )
         self.auto_correct.setEnabled(direct_rx)
-        self.correction.setEnabled(direct_rx)
+        self.correction.setEnabled(direct_rx and not self.auto_correct.isChecked())
 
     def _apply(self):
         values = dict(

@@ -1,0 +1,153 @@
+{
+  "trial": {
+    "mode": "V9",
+    "sample_rate_hz": 12000,
+    "scenario": {
+      "name": "tone_sir6",
+      "snr_db": 12,
+      "fading": "none",
+      "frequency_offset_hz": 0.0,
+      "clock_ppm": 0.0,
+      "clip_rms": null,
+      "tone_sir_db": 6
+    },
+    "seed": 1,
+    "sent_gops": 4,
+    "received_gops": 0,
+    "matched_unique_gops": 0,
+    "unmatched_outputs": 0,
+    "mean_nmse": null,
+    "mean_correlation": null,
+    "receive_seconds": 1.7969731980001598,
+    "measurements": []
+  },
+  "debug": [
+    {
+      "event": "preamble_candidate",
+      "time": 1791705246.911894,
+      "offset": 1400,
+      "stream_sample": 1400,
+      "metric": 0.8435869460023078,
+      "freq_offset_hz": -2.0706998948817965
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705246.9190686,
+      "offset": 1400,
+      "stream_sample": 1400,
+      "metric": 0.8435869460023078,
+      "header_score": 0.6164442442794864,
+      "pilot_coherence": 0.7443570029029036,
+      "pilot_occupancy": 0.3599585308794466,
+      "reason": "pilot bandwidth occupancy below 0.40 presence floor"
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705247.0107825,
+      "offset": 1400,
+      "stream_sample": 1400,
+      "metric": 0.8435869460023078,
+      "header_score": 0.6164442442794864,
+      "pilot_coherence": 0.7443570029029036,
+      "pilot_occupancy": 0.3599585308794466,
+      "reason": "pilot bandwidth occupancy below 0.40 presence floor"
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705247.1049302,
+      "offset": 80,
+      "stream_sample": 3080,
+      "metric": 0.407599593175052,
+      "header_score": 0.09475323213275619,
+      "pilot_coherence": 0.08619635274970353,
+      "pilot_occupancy": 0.2970903518485028,
+      "reason": "payload pilot structure below 0.09 presence floor"
+    },
+    {
+      "event": "preamble_pending",
+      "time": 1791705247.226233,
+      "offset": 3500,
+      "available_samples": 20400,
+      "needed_samples": 20900
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705247.3656454,
+      "offset": 500,
+      "stream_sample": 9500,
+      "metric": 0.20478144589666306,
+      "header_score": 0.13263533294800495,
+      "pilot_coherence": 0.030068729730594757,
+      "pilot_occupancy": 0.29968089080092514,
+      "reason": "preamble and mode-header evidence are jointly ambiguous"
+    },
+    {
+      "event": "preamble_pending",
+      "time": 1791705247.496355,
+      "offset": 14840,
+      "available_samples": 20400,
+      "needed_samples": 32240
+    },
+    {
+      "event": "preamble_pending",
+      "time": 1791705247.6331203,
+      "offset": 11840,
+      "available_samples": 20400,
+      "needed_samples": 29240
+    },
+    {
+      "event": "preamble_pending",
+      "time": 1791705247.770952,
+      "offset": 8840,
+      "available_samples": 20400,
+      "needed_samples": 26240
+    },
+    {
+      "event": "preamble_pending",
+      "time": 1791705247.9243746,
+      "offset": 5840,
+      "available_samples": 20400,
+      "needed_samples": 23240
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705248.0644813,
+      "offset": 2840,
+      "stream_sample": 26840,
+      "metric": 0.2098647034200836,
+      "header_score": 0.12919552692615838,
+      "pilot_coherence": 0.6486665643433599,
+      "pilot_occupancy": 0.2213959031080134,
+      "reason": "preamble and mode-header evidence are jointly ambiguous"
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705248.2107224,
+      "offset": 320,
+      "stream_sample": 27320,
+      "metric": 0.20726319125378645,
+      "header_score": 0.13588634413839404,
+      "pilot_coherence": 0.04803432848877579,
+      "pilot_occupancy": 0.3126866871460897,
+      "reason": "preamble and mode-header evidence are jointly ambiguous"
+    },
+    {
+      "event": "candidate_rejected",
+      "time": 1791705248.356827,
+      "offset": 560,
+      "stream_sample": 30560,
+      "metric": 0.19875807773747642,
+      "header_score": 0.09598563212540678,
+      "pilot_coherence": 0.03227715439332385,
+      "pilot_occupancy": 0.3565395172592353,
+      "reason": "preamble and mode-header evidence are jointly ambiguous"
+    },
+    {
+      "event": "preamble_pending",
+      "time": 1791705248.4959521,
+      "offset": 16820,
+      "available_samples": 20400,
+      "needed_samples": 34220
+    }
+  ]
+}

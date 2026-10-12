@@ -1,6 +1,7 @@
 """Main-panel HF tuning and CAT frequency routing."""
 
 import os
+import threading
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -91,6 +92,7 @@ def test_cat_frequency_commands():
     assert commands == ["F 14230123"]
     hamlib = cat.HamlibDirect.__new__(cat.HamlibDirect)
     hamlib.rig = object()
+    hamlib._lock = threading.RLock()
     calls = []
     hamlib.lib = SimpleNamespace(rig_set_freq=lambda *args: calls.append(args) or 0)
     hamlib.set_frequency_hz(14230123)

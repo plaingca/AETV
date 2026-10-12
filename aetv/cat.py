@@ -17,6 +17,9 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import math
+import re
+import threading
 import shutil
 import socket
 import subprocess
@@ -29,6 +32,10 @@ from .flex import FlexVitaSession
 
 class CatError(RuntimeError):
     pass
+
+
+class _CommandRejected(CatError):
+    """A complete, valid error reply; the transport remains synchronized."""
 
 
 class NullPtt:
@@ -44,67 +51,165 @@ class NullPtt:
         return None
 
 
-class RigctldClient:
-    """Hamlib `rigctld` over TCP.
+def _frequency_hz(value: float) -> float:
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise CatError("frequency must be finite and positive") from error
+    if not math.isfinite(value) or value <= 0:
+        raise CatError("frequency must be finite and positive")
+    return value
 
-    Speaks the classic net protocol (`T 1` / `T 0` / `f` / `m`), which
-    every Hamlib 4.x daemon accepts. Host and port are stored as names
-    because a USB serial adapter's COM number is not stable; the daemon
-    is what stays put.
+
+class RigctldClient:
+    """Serialized classic rigctld protocol with bounded, complete reply framing.
+
+    Failed transactions invalidate the socket. Never replay a key-on or tuning
+    command: its effect may already have occurred. Only an explicit PTT-off may
+    reconnect, so a watchdog can still attempt to release a disconnected rig.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 4532, timeout: float = 2.0):
         self.host = host
         self.port = int(port)
-        self.timeout = timeout
-        self.sock = socket.create_connection((host, int(port)), timeout=timeout)
-        self.sock.settimeout(timeout)
+        self.timeout = float(timeout)
+        if not host or not 1 <= self.port <= 65535:
+            raise CatError("rigctld requires a host and a port between 1 and 65535")
+        if not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise CatError("rigctld timeout must be finite and positive")
+        self._lock = threading.RLock()
+        self.sock = None
+        self._buffer = b""
+        self._closed = False
+        self._connect()
+
+    def _connect(self) -> None:
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            self.sock.settimeout(self.timeout)
+        except OSError as error:
+            self._disconnect()
+            raise CatError(f"cannot connect to rigctld {self.host}:{self.port}: {error}") from error
+
+    def _disconnect(self) -> None:
+        sock, self.sock = self.sock, None
+        self._buffer = b""
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _readline(self, deadline: float) -> str:
+        while b"\n" not in self._buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("reply deadline exceeded")
+            self.sock.settimeout(remaining)
+            part = self.sock.recv(4096)
+            if not part:
+                raise CatError("rigctld disconnected before completing its reply")
+            self._buffer += part
+            if len(self._buffer) > 8192:
+                raise CatError("rigctld reply exceeds size limit")
+        line, self._buffer = self._buffer.split(b"\n", 1)
+        return line.decode("ascii").strip()
 
     def _command(self, line: str) -> str:
-        self.sock.sendall((line.rstrip() + "\n").encode("ascii"))
-        chunks: list[bytes] = []
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
+        with self._lock:
+            if self._closed or self.sock is None:
+                raise CatError("rigctld connection is closed; reopen the radio connection")
             try:
-                part = self.sock.recv(4096)
-            except TimeoutError as error:
-                raise CatError(f"rigctld timed out on {line!r}") from error
-            if not part:
-                break
-            chunks.append(part)
-            text = b"".join(chunks)
-            if b"\n" in text:
-                break
-        reply = b"".join(chunks).decode("ascii", "replace").strip()
-        if reply.startswith("RPRT") and not reply.endswith("0"):
-            raise CatError(f"rigctld rejected {line!r}: {reply}")
-        return reply
+                deadline = time.monotonic() + self.timeout
+                self.sock.settimeout(self.timeout)
+                self.sock.sendall((line + "\n").encode("ascii"))
+                reply = self._readline(deadline)
+                if reply.startswith("RPRT"):
+                    match = re.fullmatch(r"RPRT (-?\d+)", reply)
+                    if match is None:
+                        raise CatError(f"malformed rigctld status: {reply!r}")
+                    code = int(match[1])
+                    if code != 0:
+                        raise _CommandRejected(f"rigctld rejected {line!r}: {reply}")
+                    if line in {"f", "m", "t"}:
+                        raise CatError(f"rigctld returned no value for {line!r}")
+                elif line == "f":
+                    _frequency_hz(reply)
+                elif line == "t":
+                    if reply not in {"0", "1", "2", "3"}:
+                        raise CatError(f"malformed rigctld PTT state: {reply!r}")
+                elif line == "m":
+                    # Classic get_mode returns BOTH mode and passband, possibly
+                    # in different TCP packets. Leaving width unread corrupts
+                    # the acknowledgement of the next PTT command.
+                    if not re.fullmatch(r"[A-Za-z0-9_-]+", reply):
+                        raise CatError(f"malformed rigctld mode: {reply!r}")
+                    width = self._readline(deadline)
+                    if not re.fullmatch(r"-?\d+", width):
+                        raise CatError(f"malformed rigctld passband: {width!r}")
+                else:
+                    raise CatError(f"expected rigctld status, received {reply!r}")
+                return reply
+            except _CommandRejected:
+                raise
+            except (OSError, UnicodeError, CatError) as error:
+                self._disconnect()
+                if isinstance(error, CatError):
+                    raise
+                raise CatError(f"rigctld command {line!r} failed: {error}") from error
 
     def set_ptt(self, on: bool) -> None:
-        self._command(f"T {1 if on else 0}")
+        with self._lock:
+            if self._closed:
+                if not on:
+                    return
+                raise CatError("rigctld connection is closed")
+            if not on and self.sock is None:
+                self._connect()
+            try:
+                self._command(f"T {1 if on else 0}")
+            except _CommandRejected:
+                raise
+            except CatError:
+                if on:
+                    raise
+                # OFF is idempotent. One fresh attempt also handles an idle
+                # connection that the daemon dropped without notifying us.
+                self._connect()
+                self._command("T 0")
 
     def set_frequency_hz(self, frequency_hz: float) -> None:
-        self._command(f"F {frequency_hz:.0f}")
+        self._command(f"F {_frequency_hz(frequency_hz):.0f}")
 
     def get_frequency_hz(self) -> float:
-        return float(self._command("f").splitlines()[0])
+        return _frequency_hz(self._command("f"))
 
     def get_mode(self) -> str:
-        return self._command("m").splitlines()[0].strip()
+        return self._command("m")
+
+    def get_ptt(self) -> bool:
+        """Read the backend's PTT state, not a measurement of physical RF."""
+        return self._command("t") != "0"
 
     def describe(self) -> str:
         try:
             hz = self.get_frequency_hz()
             mode = self.get_mode()
             return f"rigctld {self.host}:{self.port}  {hz / 1e6:.6f} MHz {mode}"
-        except Exception:
+        except CatError:
             return f"rigctld {self.host}:{self.port}"
 
     def close(self) -> None:
-        try:
-            self.sock.close()
-        except OSError:
-            pass
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                self.set_ptt(False)
+            except CatError:
+                pass
+            finally:
+                self._closed = True
+                self._disconnect()
 
 
 @dataclass(frozen=True)
@@ -132,14 +237,23 @@ def list_hamlib_models() -> list[HamlibModel]:
         proc = subprocess.run(
             [executable, "-l"], capture_output=True, text=True, timeout=8, check=False
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
         return []
     models: list[HamlibModel] = []
+    header = next((line for line in proc.stdout.splitlines() if "Mfg" in line and "Model" in line and "Version" in line), "")
+    columns = [header.find(name) for name in ("Mfg", "Model", "Version")]
     for line in proc.stdout.splitlines():
         fields = line.split(None, 4)
         if not fields or not fields[0].isdigit() or len(fields) < 3:
             continue
-        models.append(HamlibModel(int(fields[0]), fields[1], fields[2]))
+        if columns[0] >= 0 and columns == sorted(columns):
+            manufacturer = line[columns[0]:columns[1]].strip()
+            model = line[columns[1]:columns[2]].strip()
+        else:
+            manufacturer, model = fields[1:3]
+        models.append(HamlibModel(int(fields[0]), manufacturer, model))
     return models
 
 
@@ -159,12 +273,20 @@ def _find_hamlib_library() -> str:
             str(path) for path in program_files.glob("FreeDV*/bin/libhamlib-4.dll")
         )
     candidates.extend(filter(None, (ctypes.util.find_library(name) for name in names)))
+    # Let the platform loader honor LD_LIBRARY_PATH / its normal search path,
+    # including portable runtimes that are deliberately absent from ldconfig.
+    candidates.extend(
+        ("libhamlib-4.dll", "hamlib.dll") if os.name == "nt" else
+        ("libhamlib.so.4", "libhamlib.dylib")
+    )
     for candidate in candidates:
         if Path(candidate).is_file() or not Path(candidate).is_absolute():
             try:
                 if os.name == "nt" and Path(candidate).is_absolute():
-                    os.add_dll_directory(str(Path(candidate).parent))
-                ctypes.CDLL(candidate)
+                    with os.add_dll_directory(str(Path(candidate).parent)):
+                        ctypes.CDLL(candidate)
+                else:
+                    ctypes.CDLL(candidate)
                 return candidate
             except OSError:
                 continue
@@ -184,28 +306,44 @@ class HamlibDirect:
             raise CatError("choose a Hamlib radio model")
         if not device and int(model) != 1:
             raise CatError("choose the radio's serial or network device")
+        self._lock = threading.RLock()
         self.model = int(model)
         self.device = device
         self.baud = int(baud)
+        if self.baud < 0:
+            raise CatError("Hamlib baud rate cannot be negative")
+        if "\x00" in device:
+            raise CatError("Hamlib device contains a null character")
         library = _find_hamlib_library()
         self._dll_dir = (
             os.add_dll_directory(str(Path(library).parent))
             if os.name == "nt" and Path(library).is_absolute() else None
         )
-        self.lib = ctypes.CDLL(library)
-        self._configure_api()
-        self.rig = self.lib.rig_init(self.model)
-        if not self.rig:
-            raise CatError(f"Hamlib could not initialize model {self.model}")
+        self.rig = None
         try:
+            self.lib = ctypes.CDLL(library)
+            self._configure_api()
+            self.rig = self.lib.rig_init(self.model)
+            if not self.rig:
+                raise CatError(f"Hamlib could not initialize model {self.model}")
             if device:
                 self._set_conf("rig_pathname", device)
             if self.baud:
                 self._set_conf("serial_speed", str(self.baud))
+            if self.model == 1:
+                # Dummy defaults to no PTT. Enable its simulated CAT PTT so
+                # operator rehearsals exercise the same ON/OFF path as a rig.
+                self._set_conf("ptt_type", "RIG")
             self._check(self.lib.rig_open(self.rig), "open radio")
         except Exception:
-            self.lib.rig_cleanup(self.rig)
-            self.rig = None
+            try:
+                if self.rig:
+                    self.lib.rig_cleanup(self.rig)
+            finally:
+                self.rig = None
+                if self._dll_dir is not None:
+                    self._dll_dir.close()
+                    self._dll_dir = None
             raise
 
     def _configure_api(self) -> None:
@@ -223,25 +361,32 @@ class HamlibDirect:
         lib.rig_close.argtypes = [ctypes.c_void_p]
         lib.rig_close.restype = ctypes.c_int
         lib.rig_token_lookup.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-        lib.rig_token_lookup.restype = ctypes.c_int
-        lib.rig_set_conf.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]
+        lib.rig_token_lookup.restype = ctypes.c_long
+        lib.rig_set_conf.argtypes = [ctypes.c_void_p, ctypes.c_long, ctypes.c_char_p]
         lib.rig_set_conf.restype = ctypes.c_int
-        lib.rig_set_ptt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        lib.rig_set_ptt.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int]
         lib.rig_set_ptt.restype = ctypes.c_int
-        lib.rig_set_freq.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
+        if hasattr(lib, "rig_get_ptt"):
+            lib.rig_get_ptt.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_int)]
+            lib.rig_get_ptt.restype = ctypes.c_int
+        lib.rig_set_freq.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_double]
         lib.rig_set_freq.restype = ctypes.c_int
-        lib.rig_get_freq.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_double)]
+        lib.rig_get_freq.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_double)]
         lib.rig_get_freq.restype = ctypes.c_int
         lib.rig_get_mode.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)
+            ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint64), ctypes.POINTER(ctypes.c_long)
         ]
         lib.rig_get_mode.restype = ctypes.c_int
+        if hasattr(lib, "rig_strrmode"):
+            lib.rig_strrmode.argtypes = [ctypes.c_uint64]
+            lib.rig_strrmode.restype = ctypes.c_char_p
         lib.rigerror.argtypes = [ctypes.c_int]
         lib.rigerror.restype = ctypes.c_char_p
 
     def _check(self, code: int, action: str) -> None:
         if code < 0:
-            message = self.lib.rigerror(code).decode("utf-8", "replace")
+            raw = self.lib.rigerror(code)
+            message = raw.decode("utf-8", "replace") if raw else f"error {code}"
             raise CatError(f"Hamlib could not {action}: {message}")
 
     def _set_conf(self, name: str, value: str) -> None:
@@ -250,42 +395,82 @@ class HamlibDirect:
             raise CatError(f"Hamlib model does not expose {name}")
         self._check(self.lib.rig_set_conf(self.rig, token, value.encode("utf-8")), f"set {name}")
 
+    def _require_open(self) -> None:
+        if not self.rig:
+            raise CatError("Hamlib radio connection is closed")
+
     def set_ptt(self, on: bool) -> None:
-        self._check(self.lib.rig_set_ptt(self.rig, self._VFO_CURR, 1 if on else 0), "set PTT")
+        with self._lock:
+            if not self.rig and not on:
+                return
+            self._require_open()
+            self._check(self.lib.rig_set_ptt(self.rig, self._VFO_CURR, 1 if on else 0), "set PTT")
 
     def set_frequency_hz(self, frequency_hz: float) -> None:
-        self._check(self.lib.rig_set_freq(self.rig, self._VFO_CURR, frequency_hz), "set frequency")
+        frequency_hz = _frequency_hz(frequency_hz)
+        with self._lock:
+            self._require_open()
+            self._check(self.lib.rig_set_freq(self.rig, self._VFO_CURR, frequency_hz), "set frequency")
+
+    def get_ptt(self) -> bool:
+        """Read the backend's PTT state, not a measurement of physical RF."""
+        with self._lock:
+            self._require_open()
+            if not hasattr(self.lib, "rig_get_ptt"):
+                raise CatError("Hamlib library cannot read PTT state")
+            value = ctypes.c_int()
+            self._check(self.lib.rig_get_ptt(self.rig, self._VFO_CURR, ctypes.byref(value)), "read PTT")
+            if value.value not in {0, 1, 2, 3}:
+                raise CatError(f"Hamlib returned invalid PTT state: {value.value}")
+            return value.value != 0
 
     def get_frequency_hz(self) -> float:
-        value = ctypes.c_double()
-        self._check(self.lib.rig_get_freq(self.rig, self._VFO_CURR, ctypes.byref(value)), "read frequency")
-        return float(value.value)
+        with self._lock:
+            self._require_open()
+            value = ctypes.c_double()
+            self._check(self.lib.rig_get_freq(self.rig, self._VFO_CURR, ctypes.byref(value)), "read frequency")
+            return _frequency_hz(value.value)
 
     def get_mode(self) -> str:
-        mode = ctypes.c_int()
-        width = ctypes.c_int()
-        self._check(
-            self.lib.rig_get_mode(self.rig, self._VFO_CURR, ctypes.byref(mode), ctypes.byref(width)),
-            "read mode",
-        )
-        return str(mode.value)
+        with self._lock:
+            self._require_open()
+            # Hamlib 4 ABI: rmode_t is uint64_t; pbwidth_t is signed long.
+            mode = ctypes.c_uint64()
+            width = ctypes.c_long()
+            self._check(
+                self.lib.rig_get_mode(self.rig, self._VFO_CURR, ctypes.byref(mode), ctypes.byref(width)),
+                "read mode",
+            )
+            if hasattr(self.lib, "rig_strrmode"):
+                label = self.lib.rig_strrmode(mode.value)
+                if label:
+                    return label.decode("ascii", "replace")
+            return str(mode.value)
 
     def describe(self) -> str:
         try:
             return f"Hamlib {self.get_frequency_hz() / 1e6:.6f} MHz — {self.device}"
-        except Exception:
+        except CatError:
             return f"Hamlib model {self.model} — {self.device}"
 
     def close(self) -> None:
-        if not self.rig:
-            return
-        try:
-            self.set_ptt(False)
-        except Exception:
-            pass
-        self.lib.rig_close(self.rig)
-        self.lib.rig_cleanup(self.rig)
-        self.rig = None
+        with self._lock:
+            if not self.rig:
+                return
+            try:
+                try:
+                    self.set_ptt(False)
+                except Exception:
+                    pass
+                self.lib.rig_close(self.rig)
+            finally:
+                rig, self.rig = self.rig, None
+                try:
+                    self.lib.rig_cleanup(rig)
+                finally:
+                    if self._dll_dir is not None:
+                        self._dll_dir.close()
+                        self._dll_dir = None
 
 
 class FlexPtt:

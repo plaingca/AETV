@@ -1,0 +1,215 @@
+{
+  "head": "a2fc8dde7f59f79c7e7941400d8991cf9ef00ddd",
+  "python": "3.12.8 (main, Jan 14 2025, 22:49:36) [MSC v.1942 64 bit (AMD64)]",
+  "sounddevice": "0.5.6",
+  "soundcard": "0.4.6",
+  "portaudio": [
+    1246976,
+    "PortAudio V19.7.0-devel, revision unknown"
+  ],
+  "hostapis": [
+    "MME",
+    "Windows DirectSound",
+    "Windows WASAPI",
+    "Windows WDM-KS"
+  ],
+  "trials": [
+    {
+      "name": "real_portaudio_resampled_playback_to_digital_loopback",
+      "passed": true,
+      "seconds": 2.157,
+      "requested_rate": 8000,
+      "native_rate": 48000.0,
+      "loopback_samples": 96000,
+      "rms": 0.0003478424914646894
+    },
+    {
+      "name": "production_wasapi_loopback_8000_repeat1",
+      "passed": true,
+      "seconds": 3.047,
+      "requested_rate": 8000,
+      "worker_rate": 8000,
+      "samples": 18560,
+      "dominant_hz": 996.9827586206898,
+      "peak": 0.001010361360386014,
+      "progress": [
+        1,
+        2,
+        3
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_wasapi_loopback_8000_repeat2",
+      "passed": true,
+      "seconds": 3.063,
+      "requested_rate": 8000,
+      "worker_rate": 8000,
+      "samples": 18560,
+      "dominant_hz": 996.9827586206898,
+      "peak": 0.001010361360386014,
+      "progress": [
+        1,
+        2,
+        3
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_wasapi_loopback_24000_repeat1",
+      "passed": true,
+      "seconds": 3.047,
+      "requested_rate": 24000,
+      "worker_rate": 24000,
+      "samples": 56160,
+      "dominant_hz": 997.0085470085471,
+      "peak": 0.0010025487281382084,
+      "progress": [
+        1,
+        2,
+        3
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_wasapi_loopback_24000_repeat2",
+      "passed": true,
+      "seconds": 3.062,
+      "requested_rate": 24000,
+      "worker_rate": 24000,
+      "samples": 56160,
+      "dominant_hz": 997.0085470085471,
+      "peak": 0.0010025487281382084,
+      "progress": [
+        1,
+        2,
+        3
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_wasapi_loopback_48000_repeat1",
+      "passed": true,
+      "seconds": 3.031,
+      "requested_rate": 48000,
+      "worker_rate": 48000,
+      "samples": 112320,
+      "dominant_hz": 997.0085470085471,
+      "peak": 0.0010000012116506696,
+      "progress": [
+        1,
+        2,
+        3
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_wasapi_loopback_48000_repeat2",
+      "passed": true,
+      "seconds": 3.047,
+      "requested_rate": 48000,
+      "worker_rate": 48000,
+      "samples": 112320,
+      "dominant_hz": 997.0085470085471,
+      "peak": 0.0010000012116506696,
+      "progress": [
+        1,
+        2,
+        3
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_cancel_during_single_long_gop_and_restart",
+      "passed": true,
+      "seconds": 1.141,
+      "cancel_response_seconds": 0.0,
+      "fresh_playback_succeeded": true
+    },
+    {
+      "name": "production_invalid_play_endpoint",
+      "passed": true,
+      "seconds": 0.328,
+      "error": "soundcard output helper stopped (exit 1): IndexError: no device with id AETV-NONEXISTENT-ENDPOINT",
+      "bounded_seconds": 0.3279999999795109
+    },
+    {
+      "name": "production_invalid_capture_endpoint",
+      "passed": true,
+      "seconds": 0.328,
+      "error": "soundcard input helper stopped (exit 1): IndexError: no device with id AETV-NONEXISTENT-ENDPOINT",
+      "bounded_seconds": 0.3279999999795109
+    },
+    {
+      "name": "production_modem_digital_loopback_V8",
+      "passed": true,
+      "seconds": 7.234,
+      "mode": "V8",
+      "rate": 8000,
+      "recovered_gops": 2,
+      "latent_correlations": [
+        0.9742693271664131,
+        0.971861565329967
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_modem_digital_loopback_V9",
+      "passed": true,
+      "seconds": 5.719,
+      "mode": "V9",
+      "rate": 12000,
+      "recovered_gops": 2,
+      "latent_correlations": [
+        0.9713631014518438,
+        0.9712353115734782
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_modem_digital_loopback_V7",
+      "passed": true,
+      "seconds": 6.5,
+      "mode": "V7",
+      "rate": 24000,
+      "recovered_gops": 2,
+      "latent_correlations": [
+        0.9733087063760445,
+        0.9710531004182873
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_modem_digital_loopback_AC16",
+      "passed": true,
+      "seconds": 9.672,
+      "mode": "AC16",
+      "rate": 48000,
+      "recovered_gops": 2,
+      "latent_correlations": [
+        0.9574840395651126,
+        0.9575299381249774
+      ],
+      "errors": [],
+      "capture_selector_adapted": true
+    },
+    {
+      "name": "production_capture_child_failure_and_restart",
+      "passed": true,
+      "seconds": 3.828,
+      "reported_error": "soundcard input helper stopped (exit 1)",
+      "fresh_capture_playback_succeeded": true
+    }
+  ],
+  "endpoint": "Explicit digital-output software loopback, stereo; no microphone/RF/default devices",
+  "redaction_note": "Local installation path and unrelated endpoint inventory omitted; test measurements unchanged."
+}

@@ -302,6 +302,7 @@ class TxState:
     phase: TxPhase = TxPhase.IDLE
     progress: float = 0.0
     message: str = ""
+    ptt_uncertain: bool = False
 
     @property
     def active(self) -> bool:
@@ -423,11 +424,12 @@ class TxEngine:
     def cancel(self) -> None:
         self._cancel.set()
 
-    def _set(self, phase: TxPhase, progress: float | None = None, message: str = "") -> None:
+    def _set(self, phase: TxPhase, progress: float | None = None, message: str = "", *, ptt_uncertain: bool = False) -> None:
         self.state = TxState(
             phase=phase,
             progress=self.state.progress if progress is None else progress,
             message=message,
+            ptt_uncertain=ptt_uncertain,
         )
         self._on_state(self.state)
 
@@ -1054,6 +1056,9 @@ class TxEngine:
         return latents
 
     def _keyed_send(self, wave: np.ndarray, fs: int) -> bool:
+        if self._cancel.is_set():
+            self._set(TxPhase.CANCELLED, 0.0, "cancelled")
+            return False
         settings = self.station.settings
         duration_s = len(wave) / fs
         if self._ptt_override is not None:
@@ -1066,11 +1071,13 @@ class TxEngine:
         watchdog = _PttWatchdog(
             ptt,
             timeout_s=settings.ptt_lead_s + duration_s + settings.ptt_tail_s + WATCHDOG_MARGIN_S,
-            on_fire=lambda: self._on_error(
-                "PTT watchdog fired: transmission overran its expected duration; forcing receive"
-            ),
+            on_fire=self._watchdog_fired,
+            on_error=self._on_error,
         )
         try:
+            if self._cancel.is_set():
+                self._set(TxPhase.CANCELLED, 0.0, "cancelled")
+                return False
             self._set(TxPhase.KEYING, 0.0, ptt.describe())
             if not self._key(ptt, True):
                 self._set(TxPhase.FAILED, 0.0, "PTT on failed")
@@ -1098,12 +1105,19 @@ class TxEngine:
             return False
         finally:
             watchdog.cancel()
-            self._key(ptt, False)
+            unkeyed = self._key(ptt, False)
+            if not unkeyed:
+                self._set(TxPhase.FAILED, self.state.progress, "PTT OFF failed; check the radio immediately", ptt_uncertain=True)
             if hasattr(ptt, "close"):
                 try:
                     ptt.close()
                 except Exception:
                     pass
+        if not unkeyed:
+            return False
+        if self._cancel.is_set():
+            self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+            return False
         self._set(TxPhase.DONE, 1.0, "sent")
         return True
 
@@ -1137,165 +1151,207 @@ class TxEngine:
         producer_stop = threading.Event()
         sentinel = object()
 
+        source_chunks = chunks
+
         def produce() -> None:
-            iterator = iter(chunks)
-            while not producer_stop.is_set():
-                if not free_slots.acquire(timeout=0.2):
-                    continue
-                if producer_stop.is_set():
-                    free_slots.release()
-                    return
+            iterator = iter(source_chunks)
+            try:
+                while not producer_stop.is_set() and not self._cancel.is_set():
+                    if not free_slots.acquire(timeout=0.05):
+                        continue
+                    if producer_stop.is_set() or self._cancel.is_set():
+                        free_slots.release()
+                        return
+                    try:
+                        item = next(iterator)
+                    except StopIteration:
+                        item = sentinel
+                    except Exception as error:
+                        item = error
+                    ready.put(item)
+                    if item is sentinel or isinstance(item, Exception):
+                        return
+            finally:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    close()
+
+        def next_ready():
+            # Both initial preparation and mid-send stalls must respond to
+            # Stop/watchdog cancellation without waiting for the encoder.
+            while not self._cancel.is_set():
                 try:
-                    item = next(iterator)
-                except StopIteration:
-                    item = sentinel
-                except Exception as error:
-                    item = error
-                ready.put(item)
-                if item is sentinel or isinstance(item, Exception):
-                    return
+                    item = ready.get(timeout=0.05)
+                except queue.Empty:
+                    if not producer.is_alive():
+                        return sentinel
+                    continue
+                free_slots.release()
+                return item
+            return sentinel
 
         self._set(TxPhase.ENCODING, 0.0, preparing)
         producer = threading.Thread(target=produce, name="aetv-tx-producer", daemon=True)
-        producer.start()
-        first = ready.get()
-        free_slots.release()
-        if isinstance(first, Exception):
-            self._on_error(str(first))
-            self._set(TxPhase.FAILED, 0.0, str(first))
-            producer_stop.set()
-            producer.join(timeout=5.0)
-            return False
-        if first is sentinel:
-            self._set(TxPhase.FAILED, 0.0, "encoder produced no GOP audio")
-            producer_stop.set()
-            producer.join(timeout=5.0)
-            return False
-
-        def prepared_chunks():
-            yield first
-            index = 1
-            while True:
-                wait_started = time.perf_counter()
-                item = ready.get()
-                free_slots.release()
-                wait_s = time.perf_counter() - wait_started
-                if item is sentinel:
-                    return
-                if isinstance(item, Exception):
-                    raise item
-                if index < len(self.gop_timings):
-                    self.gop_timings[index]["tx_buffer_wait_s"] = wait_s
-                if wait_s >= 0.02:
-                    self.station.log(
-                        f"TX buffer warning: waited {wait_s * 1000:.0f} ms for GOP {index + 1}"
-                    )
-                index += 1
-                yield item
-
-        chunks = prepared_chunks()
-        flex_session = None
-        if (
-            self._ptt_override is None
-            and not settings.audio_only
-            and settings.cat_backend == "flex"
-            and settings.flex_native_audio
-        ):
-            tx_geometry = AETV_MODES[settings.mode].geometry
-            filter_low = 0 if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[0])
-            filter_high = int(composite_profile(settings.mode).bandwidth_hz) if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[1])
-            self.station.log(
-                f"Flex {settings.mode} TX mask: "
-                f"{filter_low}-{filter_high} Hz"
-            )
-            flex_session = FlexVitaSession(
-                settings.flex_host,
-                frequency_mhz=settings.freq_mhz,
-                mode=settings.require_mode or "DIGU",
-                power=settings.flex_power,
-                filter_low=filter_low,
-                filter_high=filter_high,
-            )
-            # Stream creation and DAX ownership must complete while receiving;
-            # otherwise the first VITA packets can arrive before the radio has
-            # associated this client with its transmit-audio stream.
-            flex_session.prepare_tx()
-            ptt = flex_session
-        elif self._ptt_override is not None:
-            ptt = self._ptt_override
-        elif settings.audio_only:
-            ptt = NullPtt()
-        else:
-            ptt = open_ptt(self.station.cat_config())
-        # Each synchronized chunk is about 1.34 seconds. Encoding time does not
-        # count against this generous watchdog allowance.
-        watchdog = _PttWatchdog(
-            ptt,
-            timeout_s=settings.ptt_lead_s + n_gops * 3.0 + settings.ptt_tail_s + WATCHDOG_MARGIN_S,
-            on_fire=lambda: self._on_error("PTT watchdog fired; forcing receive"),
-        )
         try:
-            self._set(TxPhase.KEYING, 0.0, ptt.describe())
-            if not self._key(ptt, True):
-                self._set(TxPhase.FAILED, 0.0, "PTT on failed")
-                return False
-            watchdog.start()
-            if self._cancel.wait(settings.ptt_lead_s):
+            producer.start()
+            first = next_ready()
+            if self._cancel.is_set():
                 self._set(TxPhase.CANCELLED, 0.0, "cancelled")
                 return False
-            self._set(TxPhase.SENDING, 0.0, sending)
-            if flex_session is not None:
-                flex_chunks = chunks
-                flex_rate = fs
-                if fs != 24000:
-                    flex_resampler = StreamResampler(*resample_ratio(fs, 24000))
-                    flex_chunks = (flex_resampler(chunk) for chunk in chunks)
-                    flex_rate = 24000
-                completed = flex_session.send_audio_stream(
-                    flex_chunks,
-                    flex_rate,
-                    should_stop=self._cancel.is_set,
-                    on_chunk=lambda count: self._report_progress(
-                        count / max(1, n_gops)
-                    ),
+            if isinstance(first, Exception):
+                self._on_error(str(first))
+                self._set(TxPhase.FAILED, 0.0, str(first))
+                producer_stop.set()
+                return False
+            if first is sentinel:
+                self._set(TxPhase.FAILED, 0.0, "encoder produced no GOP audio")
+                producer_stop.set()
+                return False
+
+            def prepared_chunks():
+                yield first
+                index = 1
+                while True:
+                    wait_started = time.perf_counter()
+                    item = next_ready()
+                    wait_s = time.perf_counter() - wait_started
+                    if item is sentinel:
+                        return
+                    if isinstance(item, Exception):
+                        raise item
+                    if index < len(self.gop_timings):
+                        self.gop_timings[index]["tx_buffer_wait_s"] = wait_s
+                    if wait_s >= 0.02:
+                        self.station.log(
+                            f"TX buffer warning: waited {wait_s * 1000:.0f} ms for GOP {index + 1}"
+                        )
+                    index += 1
+                    yield item
+
+            chunks = prepared_chunks()
+            flex_session = None
+            if (
+                self._ptt_override is None
+                and not settings.audio_only
+                and settings.cat_backend == "flex"
+                and settings.flex_native_audio
+            ):
+                tx_geometry = AETV_MODES[settings.mode].geometry
+                filter_low = 0 if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[0])
+                filter_high = int(composite_profile(settings.mode).bandwidth_hz) if settings.waveform_mode == "analog_av" else int(tx_geometry.tx_bandpass[1])
+                self.station.log(
+                    f"Flex {settings.mode} TX mask: "
+                    f"{filter_low}-{filter_high} Hz"
                 )
+                flex_session = FlexVitaSession(
+                    settings.flex_host,
+                    frequency_mhz=settings.freq_mhz,
+                    mode=settings.require_mode or "DIGU",
+                    power=settings.flex_power,
+                    filter_low=filter_low,
+                    filter_high=filter_high,
+                )
+                # Stream creation and DAX ownership must complete while receiving;
+                # otherwise the first VITA packets can arrive before the radio has
+                # associated this client with its transmit-audio stream.
+                try:
+                    flex_session.prepare_tx()
+                except Exception:
+                    flex_session.close()
+                    raise
+                ptt = flex_session
+            elif self._ptt_override is not None:
+                ptt = self._ptt_override
+            elif settings.audio_only:
+                ptt = NullPtt()
             else:
-                output_channels = 1
-                if settings.tx_audio_mode == "iq":
-                    chunks = iq_chunk_stream(
-                        chunks, settings.tx_iq_mapping, peak=settings.tx_level
+                ptt = open_ptt(self.station.cat_config())
+            # Each synchronized chunk is about 1.34 seconds. Encoding time does not
+            # count against this generous watchdog allowance.
+            watchdog = _PttWatchdog(
+                ptt,
+                timeout_s=settings.ptt_lead_s + n_gops * 3.0 + settings.ptt_tail_s + WATCHDOG_MARGIN_S,
+                on_fire=self._watchdog_fired,
+                on_error=self._on_error,
+            )
+            try:
+                if self._cancel.is_set():
+                    self._set(TxPhase.CANCELLED, 0.0, "cancelled")
+                    return False
+                self._set(TxPhase.KEYING, 0.0, ptt.describe())
+                if not self._key(ptt, True):
+                    self._set(TxPhase.FAILED, 0.0, "PTT on failed")
+                    return False
+                watchdog.start()
+                if self._cancel.wait(settings.ptt_lead_s):
+                    self._set(TxPhase.CANCELLED, 0.0, "cancelled")
+                    return False
+                self._set(TxPhase.SENDING, 0.0, sending)
+                if flex_session is not None:
+                    flex_chunks = chunks
+                    flex_rate = fs
+                    if fs != 24000:
+                        flex_resampler = StreamResampler(*resample_ratio(fs, 24000))
+                        flex_chunks = (flex_resampler(chunk) for chunk in chunks)
+                        flex_rate = 24000
+                    completed = flex_session.send_audio_stream(
+                        flex_chunks,
+                        flex_rate,
+                        should_stop=self._cancel.is_set,
+                        on_chunk=lambda count: self._report_progress(
+                            count / max(1, n_gops)
+                        ),
                     )
-                    output_channels = 2
-                completed = play_chunk_stream(
-                    chunks,
-                    fs,
-                    device=settings.audio_output or None,
-                    should_stop=self._cancel.is_set,
-                    on_chunk=lambda count: self._report_progress(
-                        min(count, n_gops) / max(1, n_gops)
-                    ),
-                    channels=output_channels,
-                )
-            if not completed:
+                else:
+                    output_channels = 1
+                    if settings.tx_audio_mode == "iq":
+                        chunks = iq_chunk_stream(
+                            chunks, settings.tx_iq_mapping, peak=settings.tx_level
+                        )
+                        output_channels = 2
+                    completed = play_chunk_stream(
+                        chunks,
+                        fs,
+                        device=settings.audio_output or None,
+                        should_stop=self._cancel.is_set,
+                        on_chunk=lambda count: self._report_progress(
+                            min(count, n_gops) / max(1, n_gops)
+                        ),
+                        channels=output_channels,
+                    )
+                if not completed:
+                    self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
+                    return False
+                self._set(TxPhase.UNKEYING, 1.0, "unkeying")
+                self._cancel.wait(settings.ptt_tail_s)
+            except Exception as error:
+                self._on_error(str(error))
+                self._set(TxPhase.FAILED, self.state.progress, str(error))
+                return False
+            finally:
+                producer_stop.set()
+                watchdog.cancel()
+                unkeyed = self._key(ptt, False)
+                if not unkeyed:
+                    self._set(TxPhase.FAILED, self.state.progress, "PTT OFF failed; check the radio immediately", ptt_uncertain=True)
+                try:
+                    ptt.close()
+                except Exception:
+                    pass
+            if not unkeyed:
+                return False
+            if self._cancel.is_set():
                 self._set(TxPhase.CANCELLED, self.state.progress, "cancelled")
                 return False
-            self._set(TxPhase.UNKEYING, 1.0, "unkeying")
-            self._cancel.wait(settings.ptt_tail_s)
-        except Exception as error:
-            self._on_error(str(error))
-            self._set(TxPhase.FAILED, self.state.progress, str(error))
-            return False
+            self._set(TxPhase.DONE, 1.0, done)
+            return True
         finally:
             producer_stop.set()
-            watchdog.cancel()
-            self._key(ptt, False)
-            try:
-                ptt.close()
-            except Exception:
-                pass
-            producer.join(timeout=30.0)
-        self._set(TxPhase.DONE, 1.0, done)
-        return True
+            # Keep ownership until the source exits. Detached encoders could
+            # otherwise publish stale state or touch devices during a new TX.
+            # PTT cleanup above completes before this wait; the GUI keeps its
+            # Stop/quit guard active if a camera or native encoder is wedged.
+            producer.join()
 
     def _live_webcam_gops(self, codec, n_gops: int):
         """Capture, encode, and yield camera GOPs while the prior GOP transmits."""
@@ -1471,6 +1527,11 @@ class TxEngine:
             )
             yield latent
 
+    def _watchdog_fired(self) -> None:
+        # Stop audio as well: VOX or a queued stream must not keep transmitting.
+        self._cancel.set()
+        self._on_error("PTT watchdog fired; stopping audio and requesting receive")
+
     def _key(self, ptt, on: bool) -> bool:
         try:
             ptt.set_ptt(on)
@@ -1488,30 +1549,45 @@ class TxEngine:
 
 
 class _PttWatchdog:
-    def __init__(self, ptt, timeout_s: float, on_fire=None):
+    def __init__(self, ptt, timeout_s: float, on_fire=None, on_error=None):
         self._ptt = ptt
         self._timeout_s = timeout_s
         self._on_fire = on_fire or (lambda: None)
+        self._on_error = on_error or (lambda _message: None)
         self._done = threading.Event()
+        self._fire_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        if isinstance(self._ptt, NullPtt):
-            return
         self._thread = threading.Thread(target=self._run, daemon=True, name="ptt-watchdog")
         self._thread.start()
 
     def _run(self) -> None:
         if self._done.wait(self._timeout_s):
             return
+        with self._fire_lock:
+            if self._done.is_set():
+                return
+            try:
+                self._on_fire()
+            except Exception:
+                # A UI callback must never prevent the release attempt.
+                pass
         try:
             self._ptt.set_ptt(False)
-        except Exception:
-            pass
-        self._on_fire()
+        except Exception as error:
+            self._on_error(f"PTT OFF FAILED in watchdog: {error}; check the radio immediately")
 
     def cancel(self) -> None:
-        self._done.set()
+        # Do not release ownership while a previously fired OFF command can
+        # still reach the radio. A delayed command must never unkey a later TX.
+        # The potentially blocked driver runs outside the callback lock; the
+        # worker/GUI retain their stopping state until that command returns.
+        with self._fire_lock:
+            self._done.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
 
 
 class RxEngine:
@@ -1849,13 +1925,14 @@ class RxEngine:
                     capture_rate = waveform_sample_rate(self.station.settings)
                     self._composite_video_resampler = StreamResampler(*resample_ratio(capture_rate, codec.mode.geometry.fs))
                     self._composite_voice_resampler = StreamResampler(*resample_ratio(capture_rate, NATIVE_AETV_FS))
-                # Drop every sample written before the reset. The interrupted
-                # GOP cannot be repaired live; the next independently framed
-                # GOP will provide a fresh preamble and mode header.
+                # Drop every sample written before the reset. Continuous TX
+                # only has its preamble at the start: blind acquisition can
+                # recover later, but it may need several seconds of payload.
+                # Restarting the sender provides a faster fresh preamble.
                 _discarded, self._read_cursor, _overrun = ring.read_since(2**63 - 1)
                 self.state.message = (
                     f"{self.state.source.capitalize()} stream gap; "
-                    "reacquiring next GOP"
+                    "searching for sync. Restart transmission for faster recovery"
                 )
                 self._on_state(self.state)
                 continue
@@ -1873,7 +1950,8 @@ class RxEngine:
                     capture_rate = waveform_sample_rate(self.station.settings)
                     self._composite_video_resampler = StreamResampler(*resample_ratio(capture_rate, codec.mode.geometry.fs))
                     self._composite_voice_resampler = StreamResampler(*resample_ratio(capture_rate, NATIVE_AETV_FS))
-                self.state.message = "receive buffer overrun; reacquiring"
+                self.state.message = "Receive buffer overrun; searching for sync. Restart transmission for faster recovery"
+                self._on_state(self.state)
             if audio.size == 0:
                 try:
                     self._drain_av_playout()

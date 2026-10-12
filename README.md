@@ -191,6 +191,44 @@ then a clean ONNX Runtime environment freezes the GUI. PyTorch remains in the
 
 ## Build, test, and contribute
 
+### Hardware-free audio and radio checks
+
+Run these from a source checkout before connecting a station. Neither script
+opens an audio device or controls a physical radio.
+
+```sh
+python scripts/validate_audio_path.py --output-dir docs/validation/audio-path
+python scripts/validate_hamlib_dummy.py --json docs/validation/hamlib-dummy.json
+```
+
+The audio check sends production playback writes through an HF channel emulator
+and the production capture callbacks, resamplers, ring buffer and modem. It
+checks clean paths, 48/44.1 kHz devices, noise, multipath, clock skew, clipping,
+dropouts, capture loss, slow consumers and mid-GOP cancellation. Results include
+JSON and a delivery chart. This is an accelerated virtual soundcard check;
+physical-driver timing and station wiring still need a separate bench test.
+Use `--modes V8 --scenarios native_clean soundcard_clean mixed_native_rates cancel`
+for a quick check. Add `--onnx-manifest /path/to/v8-hf3k-mpp12-ft.runtime.json`
+to exercise an already installed V8 learned encoder/decoder and save a picture
+comparison; the script never downloads models.
+
+The radio check requires an official Hamlib 4.x runtime and `rigctld` on `PATH`.
+It fixes the rig model to Hamlib's dummy, starts its own loopback-only daemon,
+checks frequency and PTT readback using native and TCP control, then stops it.
+There is no option to select a real rig or an existing server. Missing
+dependencies or failed checks exit with a useful error. The dummy cannot prove
+that RF stops on a real radio: use a radio-side transmit timeout and an
+independent stop control when moving to hardware.
+
+For real PortAudio/ALSA stream coverage on Linux without hardware, install
+`libportaudio2` and run `python scripts/validate_portaudio_path.py`. It opens only
+an isolated file/null PCM, checks actual native stream bytes and callbacks, and
+replays the HF channel into the production receiver. This accelerated fixture
+cannot establish real-time driver latency, xruns, or physical unplug behavior.
+See [native PortAudio validation](docs/portaudio-validation-20261012.md).
+
+### Development and packaging
+
 ```powershell
 uv sync --extra gui --extra train --extra dev
 uv run pytest -q

@@ -108,6 +108,7 @@ class ElidingLabel(QLabel):
 
     def setText(self, text: str) -> None:  # noqa: N802
         self._full = text
+        self.setToolTip(text)
         self._apply()
 
     def resizeEvent(self, event) -> None:
@@ -303,6 +304,7 @@ class PttLamp(QLabel):
         self.set_keyed(False)
 
     def set_keyed(self, on: bool) -> None:
+        self.setToolTip("")
         if on:
             self.setText("  PTT  ")
             self.setStyleSheet(
@@ -314,6 +316,11 @@ class PttLamp(QLabel):
             self.setStyleSheet(
                 "QLabel { background: transparent; color: palette(mid); padding: 2px 10px; }"
             )
+
+    def set_unknown(self) -> None:
+        self.set_keyed(True)
+        self.setText("PTT UNKNOWN")
+        self.setToolTip("PTT OFF failed. Check and unkey the radio immediately.")
 
 
 class LogPane(QPlainTextEdit):

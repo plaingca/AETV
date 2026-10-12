@@ -234,6 +234,11 @@ class StreamResampler:
     def __init__(self, up: int, down: int):
         self.up = int(up)
         self.down = int(down)
+        if self.up <= 0 or self.down <= 0:
+            raise ValueError("resampler ratio must be positive")
+        self._input_samples = 0
+        self._output_samples = 0
+        self._finished = False
         span = -(-(20 * max(self.up, self.down) + 1) // self.up)
         self.pad = -(-span // self.down) * self.down
         self._buf = np.zeros(self.pad, dtype=np.float64)
@@ -241,7 +246,11 @@ class StreamResampler:
     def __call__(self, chunk: np.ndarray) -> np.ndarray:
         from scipy.signal import resample_poly
 
-        self._buf = np.concatenate([self._buf, np.asarray(chunk, dtype=np.float64).reshape(-1)])
+        if self._finished:
+            raise RuntimeError("cannot append to a flushed resampler")
+        chunk = np.asarray(chunk, dtype=np.float64).reshape(-1)
+        self._input_samples += len(chunk)
+        self._buf = np.concatenate([self._buf, chunk])
         usable = len(self._buf) - 2 * self.pad
         n = (usable // self.down) * self.down if usable > 0 else 0
         if n <= 0:
@@ -251,7 +260,22 @@ class StreamResampler:
         skip = self.pad * self.up // self.down
         take = n * self.up // self.down
         self._buf = self._buf[n:]
+        self._output_samples += take
         return y[skip : skip + take]
+
+    def flush(self) -> np.ndarray:
+        """Drain exactly the final samples of this finite stream once.
+
+        The zero extension is filter context, not extra playback time. The
+        result length matches scipy.resample_poly for the complete input.
+        """
+        if self._finished:
+            return np.empty(0, dtype=np.float64)
+        expected = (self._input_samples * self.up + self.down - 1) // self.down
+        remaining = expected - self._output_samples
+        tail = self(np.zeros(2 * self.pad + self.down))[:remaining]
+        self._finished = True
+        return tail
 
 
 HILBERT_NUM_TAPS = 513
@@ -493,12 +517,14 @@ def _play_chunk_stream_direct(
     if target_rate != rate:
         ratio = resample_ratio(rate, target_rate)
         resamplers = [StreamResampler(*ratio) for _ in range(channels)]
+    emitted = False
     with sd.OutputStream(
         samplerate=target_rate, channels=channels, dtype="float32", device=device,
         blocksize=wasapi_blocksize(target_rate), latency=.1,
     ) as stream:
         for index, chunk in enumerate(chunks):
             if should_stop is not None and should_stop():
+                stream.abort()
                 return False
             samples = np.asarray(chunk, dtype=np.float32).reshape(-1, channels)
             if resamplers is not None:
@@ -508,10 +534,36 @@ def _play_chunk_stream_direct(
                         for channel, resampler in enumerate(resamplers)
                     ]
                 ).astype(np.float32)
-            if samples.size:
-                stream.write(samples)
+            # A GOP can last a second or more. Bound each blocking write so
+            # Stop is checked between endpoint periods, not only between GOPs.
+            block = wasapi_blocksize(target_rate)
+            for start in range(0, len(samples), block):
+                if should_stop is not None and should_stop():
+                    stream.abort()
+                    return False
+                underflowed = stream.write(samples[start : start + block])
+                # The first write can report startup silence before there was
+                # any waveform to lose. Later gaps corrupt the on-air stream.
+                if underflowed and emitted:
+                    stream.abort()
+                    raise AudioUnavailable("soundcard output underrun; transmission stopped")
+                emitted = True
             if on_chunk is not None:
                 on_chunk(index + 1)
+        if resamplers is not None:
+            tail = np.column_stack([item.flush() for item in resamplers]).astype(np.float32)
+            for start in range(0, len(tail), wasapi_blocksize(target_rate)):
+                if should_stop is not None and should_stop():
+                    stream.abort()
+                    return False
+                underflowed = stream.write(tail[start : start + wasapi_blocksize(target_rate)])
+                if underflowed and emitted:
+                    stream.abort()
+                    raise AudioUnavailable("soundcard output underrun; transmission stopped")
+                emitted = True
+        if should_stop is not None and should_stop():
+            stream.abort()
+            return False
     return not (should_stop is not None and should_stop())
 
 

@@ -354,7 +354,7 @@ class _FakeRigctld(threading.Thread):
                     elif cmd == "f":
                         conn.sendall(b"7088000\n")
                     elif cmd == "m":
-                        conn.sendall(b"DIGU\n")
+                        conn.sendall(b"DIGU\n2400\n")
                     else:
                         conn.sendall(b"RPRT 0\n")
 
@@ -1139,3 +1139,195 @@ def test_prepared_clip_transmit_bypasses_neural_encoder(monkeypatch):
 
     assert engine.transmit(prepared)
     assert [item.tolist() for item in received] == [[0.7], [0.7]]
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_tx_failed_unkey_never_reports_sent(monkeypatch, streaming):
+    class BrokenOff(_FakePtt):
+        def set_ptt(self, on):
+            super().set_ptt(on)
+            if not on:
+                raise RuntimeError("CAT disconnected")
+
+    station = Station(StationSettings(ptt_lead_s=0, ptt_tail_s=0))
+    errors = []
+    engine = TxEngine(station, ptt=BrokenOff(), player=lambda *a, **k: True, on_error=errors.append)
+    wave = np.zeros(32, dtype=np.float32)
+    monkeypatch.setattr("aetv.station.play_chunk_stream", lambda *a, **k: True)
+    result = engine._keyed_send_stream([wave], 24000, 1) if streaming else engine._keyed_send(wave, 24000)
+    assert result is False
+    assert engine.state.phase == TxPhase.FAILED
+    assert "PTT OFF failed" in engine.state.message
+    assert any("may still be transmitting" in error for error in errors)
+
+
+def test_watchdog_stops_audio_before_attempting_unkey_and_reports_failure():
+    events = []
+
+    class BrokenOff:
+        def set_ptt(self, on):
+            events.append("off")
+            raise RuntimeError("unreachable")
+
+    errors = []
+    dog = _PttWatchdog(BrokenOff(), timeout_s=0, on_fire=lambda: events.append("stop audio"), on_error=errors.append)
+    dog._run()
+    assert events == ["stop audio", "off"]
+    assert "PTT OFF FAILED" in errors[0]
+
+
+def test_engine_watchdog_cancels_audio():
+    engine = TxEngine(Station(StationSettings()))
+    engine._watchdog_fired()
+    assert engine._cancel.is_set()
+
+
+def test_watchdog_also_stops_vox_audio():
+    fired = threading.Event()
+    dog = _PttWatchdog(NullPtt(), timeout_s=0.01, on_fire=fired.set)
+    dog.start()
+    assert fired.wait(1.0)
+    dog.cancel()
+
+
+def test_cancelled_watchdog_cannot_deliver_stale_callback():
+    ptt = _FakePtt()
+    fired = []
+    dog = _PttWatchdog(ptt, timeout_s=0, on_fire=lambda: fired.append(True))
+    # Emulate expiry observed before cancel wins the callback lock.
+    class Expired:
+        def wait(self, timeout):
+            return False
+        def is_set(self):
+            return True
+    dog._done = Expired()
+    dog._run()
+    assert not fired
+    assert not ptt.events
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_cancel_before_key_never_keys_radio(monkeypatch, streaming):
+    ptt = _FakePtt()
+    engine = TxEngine(Station(StationSettings(ptt_lead_s=0, ptt_tail_s=0)), ptt=ptt)
+    engine.cancel()
+    wave = np.zeros(32, dtype=np.float32)
+    result = engine._keyed_send_stream([wave], 24000, 1) if streaming else engine._keyed_send(wave, 24000)
+    assert result is False
+    assert True not in ptt.events
+    assert engine.state.phase == TxPhase.CANCELLED
+
+
+def test_stream_cancel_during_first_preparation_never_keys():
+    started, release = threading.Event(), threading.Event()
+    ptt = _FakePtt()
+    engine = TxEngine(Station(StationSettings(ptt_lead_s=0, ptt_tail_s=0)), ptt=ptt)
+    results = []
+
+    def chunks():
+        started.set()
+        release.wait(2)
+        yield np.zeros(32, dtype=np.float32)
+
+    worker = threading.Thread(target=lambda: results.append(engine._keyed_send_stream(chunks(), 24000, 1)))
+    worker.start()
+    try:
+        assert started.wait(1)
+        engine.cancel()
+    finally:
+        release.set()
+        worker.join(2)
+    assert results == [False]
+    assert True not in ptt.events
+    assert engine.state.phase == TxPhase.CANCELLED
+
+
+def test_stream_cancel_unkeys_while_next_encoder_is_stalled(monkeypatch):
+    started, release, unkeyed = threading.Event(), threading.Event(), threading.Event()
+
+    class Ptt(_FakePtt):
+        def set_ptt(self, on):
+            super().set_ptt(on)
+            if not on:
+                unkeyed.set()
+
+    def chunks():
+        yield np.zeros(32, dtype=np.float32)
+        started.set()
+        release.wait(3)
+        yield np.zeros(32, dtype=np.float32)
+
+    def player(chunks, *_args, **_kwargs):
+        list(chunks)
+        return True
+
+    monkeypatch.setattr("aetv.station.play_chunk_stream", player)
+    ptt = Ptt()
+    engine = TxEngine(Station(StationSettings(ptt_lead_s=0, ptt_tail_s=0)), ptt=ptt)
+    results = []
+    worker = threading.Thread(target=lambda: results.append(engine._keyed_send_stream(chunks(), 24000, 2)))
+    worker.start()
+    try:
+        assert started.wait(1)
+        # Wait until ON; producer can reach its second chunk first.
+        deadline = time.monotonic() + 1
+        while True not in ptt.events and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert True in ptt.events
+        engine.cancel()
+        assert unkeyed.wait(1), "PTT OFF must not wait for the blocked encoder"
+    finally:
+        release.set()
+        worker.join(2)
+    assert results == [False]
+    assert engine.state.phase == TxPhase.CANCELLED
+
+
+def test_stream_cat_setup_failure_closes_producer(monkeypatch):
+    closed = threading.Event()
+
+    def chunks():
+        try:
+            while True:
+                yield np.zeros(32, dtype=np.float32)
+        finally:
+            closed.set()
+
+    def unavailable(_config):
+        raise RuntimeError("CAT unavailable")
+
+    monkeypatch.setattr("aetv.station.open_ptt", unavailable)
+    engine = TxEngine(Station(StationSettings(audio_only=False)))
+    with pytest.raises(RuntimeError, match="CAT unavailable"):
+        engine._keyed_send_stream(chunks(), 24000, 1)
+    assert closed.wait(1)
+
+
+def test_watchdog_cancel_waits_for_inflight_off_before_releasing_ownership():
+    entered, release, cancelled = threading.Event(), threading.Event(), threading.Event()
+    events = []
+
+    class SlowOff:
+        def set_ptt(self, on):
+            entered.set()
+            release.wait(2)
+            events.append("off completed")
+
+    dog = _PttWatchdog(SlowOff(), timeout_s=0)
+    dog.start()
+    assert entered.wait(1)
+
+    def cancel():
+        dog.cancel()
+        events.append("ownership released")
+        cancelled.set()
+
+    worker = threading.Thread(target=cancel)
+    worker.start()
+    try:
+        assert not cancelled.wait(.05)
+    finally:
+        release.set()
+        worker.join(1)
+    assert cancelled.is_set()
+    assert events == ["off completed", "ownership released"]
