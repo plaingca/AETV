@@ -501,6 +501,18 @@ class TransmitPanel(QWidget):
         actions.addLayout(buttons)
         actions.addWidget(self.status)
 
+        # Device names and desktop window titles can be arbitrarily long.
+        # Let the selectors share the pane width instead of making every row
+        # as wide as its longest item; the popup retains the complete choices.
+        for selector in (
+            self.camera, self.screen_target, self.mode, self.output,
+            self.microphone, self.channel_route,
+        ):
+            selector.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            selector.setMinimumContentsLength(12)
+
         self.clip_grid = ClipGrid()
         self.clip_grid.fileChosen.connect(self._set_clip)
         self.clip_grid.activated.connect(self._activate_clip)

@@ -220,6 +220,13 @@ dependencies or failed checks exit with a useful error. The dummy cannot prove
 that RF stops on a real radio: use a radio-side transmit timeout and an
 independent stop control when moving to hardware.
 
+For real PortAudio/ALSA stream coverage on Linux without hardware, install
+`libportaudio2` and run `python scripts/validate_portaudio_path.py`. It opens only
+an isolated file/null PCM, checks actual native stream bytes and callbacks, and
+replays the HF channel into the production receiver. This accelerated fixture
+cannot establish real-time driver latency, xruns, or physical unplug behavior.
+See [native PortAudio validation](docs/portaudio-validation-20261012.md).
+
 ### Development and packaging
 
 ```powershell

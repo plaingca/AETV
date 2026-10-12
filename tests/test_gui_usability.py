@@ -92,6 +92,58 @@ def test_default_window_fits_laptop_and_transmit_is_visible(window):
     assert point.y() + tx.send_button.height() < window.height()
 
 
+@pytest.mark.parametrize("style", ["Windows", "Fusion"])
+@pytest.mark.parametrize("mode", ["V8", "V8_AV", "AC16_AV"])
+def test_transmit_form_fits_viewport_with_long_source_names(window, native_font, style, mode):
+    from PySide6.QtGui import QFont, QRawFont
+    from PySide6.QtWidgets import QComboBox, QPushButton, QStyleFactory
+
+    original_style = _APP.style().objectName()
+    original_font = QFont(_APP.font())
+    try:
+        _APP.setStyle(QStyleFactory.create(style))
+        _APP.setFont(QFont(native_font))
+        assert QRawFont.fromFont(_APP.font()).isValid()
+        tx = window.tx
+        long_name = "A device or application with a long descriptive name " * 12
+        for selector in (tx.camera, tx.screen_target, tx.output, tx.microphone):
+            selector.addItem(long_name)
+        # This is a layout test: switching the actual station mode can open
+        # a model-install dialog on clean CI machines without local weights.
+        tx.mode.blockSignals(True)
+        tx.mode.setCurrentIndex(tx.mode.findData(mode))
+        tx.mode.blockSignals(False)
+        tx._sync_av_controls()
+        _APP.processEvents()
+        window.resize(1280, 800)
+        _APP.processEvents()
+        scroll = next(area for area in window.findChildren(QScrollArea) if area.widget() is tx)
+        viewport = scroll.viewport()
+        assert window.size().toTuple() == (1280, 800)
+        assert tx.width() <= viewport.width()
+        assert scroll.horizontalScrollBar().maximum() == 0
+        controls = [tx.gops, tx.level_db, *tx._strip.findChildren(QComboBox),
+                    *tx._strip.findChildren(QPushButton)]
+        for control in controls:
+            if control.isHidden():
+                continue
+            # Vertical scrolling remains available; each row must fit across
+            # the viewport without hiding a setting behind horizontal scroll.
+            point = control.mapTo(viewport, QPoint(0, 0))
+            assert 0 <= point.x() <= viewport.width() - control.width()
+            assert control.width() >= control.minimumSizeHint().width()
+        window.ptt_lamp.set_unknown()
+        _APP.processEvents()
+        for control in (tx.cancel_button, window.rx.stop_button, window.ptt_lamp):
+            rect = control.rect().translated(control.mapTo(window, QPoint(0, 0)))
+            assert window.rect().contains(rect)
+            assert control.height() >= control.minimumSizeHint().height()
+    finally:
+        _APP.setFont(original_font)
+        _APP.setStyle(QStyleFactory.create(original_style))
+        _APP.processEvents()
+
+
 def test_optional_controls_expand_without_forcing_window_offscreen(window):
     window.tx.clips_toggle.click()
     window.radio.advanced_toggle.click()

@@ -1,0 +1,152 @@
+{
+  "baseline": {
+    "platform": "windows",
+    "style": "windows11",
+    "font_px": 12,
+    "window": [
+      1280,
+      800
+    ],
+    "viewport": [
+      603,
+      405
+    ],
+    "panel": [
+      603,
+      453
+    ],
+    "horizontal_scroll_max": 0,
+    "controls": [
+      {
+        "type": "QComboBox",
+        "text": "",
+        "rect": [
+          83,
+          214,
+          337,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QSpinBox",
+        "text": "10 s",
+        "rect": [
+          157,
+          332,
+          142,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QDoubleSpinBox",
+        "text": "-3.10 dB FS",
+        "rect": [
+          452,
+          332,
+          142,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QPushButton",
+        "text": "Refresh",
+        "rect": [
+          513,
+          182,
+          81,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QPushButton",
+        "text": "Refresh",
+        "rect": [
+          513,
+          214,
+          81,
+          26
+        ],
+        "contained": true
+      }
+    ]
+  },
+  "long_title": {
+    "platform": "windows",
+    "style": "windows11",
+    "font_px": 12,
+    "window": [
+      1280,
+      800
+    ],
+    "viewport": [
+      603,
+      405
+    ],
+    "panel": [
+      603,
+      453
+    ],
+    "horizontal_scroll_max": 0,
+    "controls": [
+      {
+        "type": "QComboBox",
+        "text": "",
+        "rect": [
+          83,
+          214,
+          337,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QSpinBox",
+        "text": "10 s",
+        "rect": [
+          157,
+          332,
+          142,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QDoubleSpinBox",
+        "text": "-3.10 dB FS",
+        "rect": [
+          452,
+          332,
+          142,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QPushButton",
+        "text": "Refresh",
+        "rect": [
+          513,
+          182,
+          81,
+          26
+        ],
+        "contained": true
+      },
+      {
+        "type": "QPushButton",
+        "text": "Refresh",
+        "rect": [
+          513,
+          214,
+          81,
+          26
+        ],
+        "contained": true
+      }
+    ]
+  }
+}
