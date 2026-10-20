@@ -63,34 +63,34 @@
       "rect": [
         13,
         684,
-        103,
+        166,
         22
       ]
     },
     "stop_receive": {
       "visible": true,
       "rect": [
-        122,
+        185,
         684,
-        80,
+        166,
         22
       ]
     },
     "save_video": {
       "visible": true,
       "rect": [
-        208,
+        357,
         684,
-        92,
+        165,
         22
       ]
     },
     "open_folder": {
       "visible": true,
       "rect": [
-        306,
+        528,
         684,
-        85,
+        166,
         22
       ]
     },
@@ -131,6 +131,6 @@
       ]
     }
   },
-  "sha256": "b1c28ec7318bfe10faeb04cba88369afaaa48a7a56060482210a29be6d7943d0",
+  "sha256": "67a6ba2e80e8ab0ed9919a826bd129967e07677c29c4ce11084ccba44d70ee60",
   "scope": "Actual Qt/X11 window capture with generated test cards; no model/device/RF execution; not native Windows validation."
 }

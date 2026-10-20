@@ -68,3 +68,7 @@ widget/layout rerun passed all 20 checks.
 
 Hosted GUI checks run before the remaining suite, use installed Segoe UI
 metrics on Windows, and explicitly dispose test windows between cases.
+
+After adding wrapping rows, the focused GUI/widget/HF checks passed all
+36 cases locally; the layout-only run also passed all 16 cases with
+`QT_FONT_DPI=144`. All nine captures were refreshed and rechecked.

@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QRubberBand,
     QSlider,
     QSpinBox,
@@ -399,6 +400,10 @@ class TransmitPanel(QWidget):
         mode_fields = []
         for label, control in (("Mode", self.mode), ("Length", self.gops), ("Level", self.level_db)):
             field = QWidget()
+            field.setSizePolicy(
+                QSizePolicy.Policy.Expanding if label == "Mode" else QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
             field_layout = QHBoxLayout(field)
             field_layout.setContentsMargins(0, 0, 0, 0)
             field_layout.addWidget(QLabel(label))
