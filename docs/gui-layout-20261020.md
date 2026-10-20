@@ -60,3 +60,8 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
 All **nine** native X11 captures separately passed their visible-control checks;
 every Clips capture showed all eight slots at once. PNG dimensions and SHA-256
 values match the adjacent geometry reports. Whitespace checks passed.
+
+The short-transmission GUI regression waits for playback completion with a
+one-second bound instead of assuming the hosted runner dispatches both Qt
+timers within 60 ms. Production playout timing is unchanged. The focused
+widget/layout rerun passed all 20 checks.
