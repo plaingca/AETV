@@ -131,6 +131,6 @@
       ]
     }
   },
-  "sha256": "54af76ed464d772bc5a3bc3593ef06942bec384294ef20d0da15c955b8f1a2e9",
+  "sha256": "e42aefae7c244f4c6d21efb7f8512f12435ba19c8d18386b28e08309fb4664be",
   "scope": "Actual Qt/X11 window capture with generated test cards; no model/device/RF execution; not native Windows validation."
 }
