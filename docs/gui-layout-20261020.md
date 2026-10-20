@@ -47,8 +47,10 @@ Use `--page Source`, `--page Audio --av`, or `--rf-details` for the other states
 
 Layout tests cover repeated laptop/1080p/1440p/4K resizing, 9/12/18-point fonts, Fusion/Windows Qt styles, video/A/V modes, RF-detail expansion, source-row visibility, and clicking a thumbnail after the bank reflows. The Windows Qt style on Linux is not a native Windows test.
 
-Full local regression: **550 passed, 2 skipped** in 148.29 seconds. The suite ran
-with bounded CPU threads and the offscreen Qt platform:
+Initial approved layout regression: **550 passed, 2 skipped** in 148.29 seconds.
+After integrating v0.1.25 HF tuning for the v0.1.26 release, the complete suite
+passed **569 tests, with 2 skipped**, in 146.84 seconds. Both runs used bounded
+CPU threads and the offscreen Qt platform:
 
 ```sh
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
