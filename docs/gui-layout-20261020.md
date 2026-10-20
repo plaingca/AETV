@@ -4,7 +4,7 @@ Layout fix for [issue #39](https://github.com/plaingca/AETV/issues/39), approved
 
 ## Behavior
 
-- Send, Cancel, QRL, mode selection, and receive actions stay outside the scrollable setup pages.
+- Send, Cancel, QRL, mode selection, and receive actions stay outside the scrollable setup pages. Mode fields and receive buttons wrap to additional rows when wider font metrics require it.
 - Transmit setup uses Source, Clips, Audio, and Route tabs. Only the selected live-source controls are shown.
 - The receive setup area sizes itself to the selected source, leaving more room for received video.
 - RF details expand on demand; the short station log can be hidden through View → Log.
@@ -65,3 +65,6 @@ The short-transmission GUI regression waits for playback completion with a
 one-second bound instead of assuming the hosted runner dispatches both Qt
 timers within 60 ms. Production playout timing is unchanged. The focused
 widget/layout rerun passed all 20 checks.
+
+Hosted GUI checks run before the remaining suite, use installed Segoe UI
+metrics on Windows, and explicitly dispose test windows between cases.

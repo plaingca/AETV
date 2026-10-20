@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QScrollArea
 
@@ -33,6 +33,10 @@ def window_factory(monkeypatch):
     def make(*, font_size=9, style="Fusion", waveform_mode="video"):
         app.setStyle(style)
         font = QFont(original_font)
+        # The offscreen plugin's generic Windows font can resolve to the
+        # last-resort box font. Exercise installed native glyph metrics.
+        if "Segoe UI" in QFontDatabase.families():
+            font.setFamily("Segoe UI")
         font.setPointSize(font_size)
         app.setFont(font)
         window = MainWindow(StationSettings(
@@ -45,6 +49,7 @@ def window_factory(monkeypatch):
     for window in windows:
         window.close()
         window.deleteLater()
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
     app.setStyle(original_style)
     app.setFont(original_font)
@@ -98,7 +103,12 @@ def test_controls_and_clip_cells_survive_resize(window_factory, style, font_size
     for width, height in sizes:
         window.resize(width, height)
         _settle(app)
-        assert window.size().toTuple() == (width, height)
+        assert window.size().toTuple() == (width, height), {
+            "font": app.font().toString(), "line_spacing": window.fontMetrics().lineSpacing(),
+            "window_min": window.minimumSizeHint().toTuple(),
+            "receive_min": window.rx.minimumSizeHint().toTuple(),
+            "transmit_min": window.tx.minimumSizeHint().toTuple(),
+        }
         for index in range(window.tx.controls.count()):
             window.tx.controls.setCurrentIndex(index)
             _settle(app)

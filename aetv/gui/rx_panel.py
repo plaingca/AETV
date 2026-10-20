@@ -39,7 +39,7 @@ from aetv.propagation import (
 from aetv.settings import normalize_callsign
 from aetv.station import RxEngine, RxState
 from aetv.gui.desktop import open_directory
-from aetv.gui.widgets import AudioLevelMeter, ControlTabs, ElidingLabel, VideoView
+from aetv.gui.widgets import AdaptiveRow, AudioLevelMeter, ControlTabs, ElidingLabel, VideoView
 
 
 class _KiwiListThread(QThread):
@@ -487,8 +487,9 @@ class ReceivePanel(QWidget):
             "this selects settings but never starts a transmission."
         )
         self.find_button.clicked.connect(self._find_best_rf_pair)
-        self.auto_kiwi = QCheckBox(
-            "Automatically replace the receiver with the predictor's best path"
+        self.auto_kiwi = QCheckBox("Automatically select the best receiver")
+        self.auto_kiwi.setToolTip(
+            "Automatically replace the receiver with the predictor's best RF path"
         )
         self.auto_kiwi.setChecked(self.station.settings.kiwi_auto_select)
         self.auto_kiwi.toggled.connect(self._on_auto_kiwi_toggled)
@@ -545,12 +546,8 @@ class ReceivePanel(QWidget):
         auto_row = QHBoxLayout()
         auto_row.addWidget(self.auto_kiwi)
         auto_row.addStretch(1)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.stop_button)
-        buttons.addWidget(self.save_button)
-        buttons.addWidget(self.open_saved_videos_button)
-        buttons.addStretch(1)
+        buttons = AdaptiveRow([self.start_button, self.stop_button,
+                               self.save_button, self.open_saved_videos_button])
         strip.addLayout(row1)
         strip.addLayout(self.playback_row)
         strip.addLayout(self.audio_meter_row)
@@ -575,7 +572,7 @@ class ReceivePanel(QWidget):
         layout.addWidget(self.controls)
         layout.addLayout(self.raw_meter_row)
         layout.addLayout(state)
-        layout.addLayout(buttons)
+        layout.addWidget(buttons)
         self.sync_from_config()
         if self.source.currentData() == "kiwi" and self.auto_kiwi.isChecked():
             QTimer.singleShot(400, self._refresh_kiwis)

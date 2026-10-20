@@ -43,7 +43,7 @@ from aetv.source import (
 from aetv.station import TxEngine, TxPhase, TxState
 from aetv.gui.clip_editor import ClipEditorDialog
 from aetv.gui.clip_grid import ClipGrid
-from aetv.gui.widgets import AudioLevelMeter, ControlTabs, ElidingLabel, VideoView
+from aetv.gui.widgets import AdaptiveRow, AudioLevelMeter, ControlTabs, ElidingLabel, VideoView
 
 
 class _RegionSelector(QDialog):
@@ -396,13 +396,15 @@ class TransmitPanel(QWidget):
         file_row.addWidget(self.file_button)
         file_row.addWidget(self.file_label, 1)
         self._source_rows = (src, screen_row, file_row)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode"))
-        mode_row.addWidget(self.mode, 1)
-        mode_row.addWidget(QLabel("Length"))
-        mode_row.addWidget(self.gops)
-        mode_row.addWidget(QLabel("Level"))
-        mode_row.addWidget(self.level_db)
+        mode_fields = []
+        for label, control in (("Mode", self.mode), ("Length", self.gops), ("Level", self.level_db)):
+            field = QWidget()
+            field_layout = QHBoxLayout(field)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.addWidget(QLabel(label))
+            field_layout.addWidget(control, 1)
+            mode_fields.append(field)
+        mode_row = AdaptiveRow(mode_fields)
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("To radio"))
         out_row.addWidget(self.output, 1)
@@ -485,7 +487,7 @@ class TransmitPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.preview, 1)
-        layout.addLayout(mode_row)
+        layout.addWidget(mode_row)
         layout.addWidget(self.controls)
         layout.addLayout(buttons)
         layout.addWidget(self.status)
