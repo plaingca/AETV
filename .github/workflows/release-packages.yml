@@ -71,6 +71,15 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
+      - name: Constrain packaged runtime to the source lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv export --locked --extra gui --no-dev --no-emit-project --no-hashes \
+            --format requirements-txt \
+            --output-file "$RUNNER_TEMP/aetv-runtime-constraints.txt" > /dev/null
+          echo "UV_CONSTRAINT=$RUNNER_TEMP/aetv-runtime-constraints.txt" >> "$GITHUB_ENV"
+
       - name: Install Linux GUI runtime libraries
         if: runner.os == 'Linux'
         run: |
