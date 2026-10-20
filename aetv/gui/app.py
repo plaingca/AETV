@@ -13,9 +13,12 @@ from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
+    QFrame,
     QLabel,
+    QLayout,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QSplitter,
     QStatusBar,
     QWidget,
@@ -33,7 +36,7 @@ from aetv.gui.settings_dialog import SettingsDialog
 from aetv.gui.tx_panel import TransmitPanel
 from aetv.gui.waterfall import Waterfall
 from aetv.gui.radio_panel import RadioPanel
-from aetv.gui.widgets import LogPane, PttLamp
+from aetv.gui.widgets import ElidingLabel, LogPane, PttLamp
 
 
 APP_ICON = Path(__file__).resolve().parent.parent / "assets" / "aetv-logo.png"
@@ -155,19 +158,31 @@ class MainWindow(QMainWindow):
         panes.setChildrenCollapsible(False)
         panes.setStretchFactor(0, 1)
         panes.setStretchFactor(1, 1)
+        panes.setSizes([600, 700])
 
         stack = QSplitter(Qt.Orientation.Vertical)
         self.radio = RadioPanel(self.settings)
         self.radio.applyRequested.connect(self._apply_rf_settings)
         self.rx.source.currentIndexChanged.connect(
             lambda: self.radio.set_receive_source(self.rx.source.currentData()))
-        stack.addWidget(self.radio)
+        radio_scroll = self._scroll(self.radio)
+        # Keep all tuning rows visible, with horizontal scrolling available
+        # when larger system fonts make the controls wider than the desktop.
+        def fit_radio(_visible=False):
+            radio_scroll.setFixedHeight(
+                self.radio.minimumSizeHint().height()
+                + radio_scroll.horizontalScrollBar().sizeHint().height()
+            )
+        self.radio.detailsToggled.connect(fit_radio)
+        fit_radio()
+        stack.addWidget(radio_scroll)
         stack.addWidget(self.waterfall)
         stack.addWidget(panes)
+        stack.setChildrenCollapsible(False)
         stack.setStretchFactor(0, 0)
         stack.setStretchFactor(1, 0)
         stack.setStretchFactor(2, 1)
-        stack.setSizes([140, 170, 520])
+        stack.setSizes([radio_scroll.minimumHeight(), 90, 520])
         self.setCentralWidget(stack)
 
         self.log = LogPane()
@@ -177,18 +192,20 @@ class MainWindow(QMainWindow):
         dock.setWidget(self.log)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
         self._log_dock = dock
+        self.resizeDocks([dock], [dock.minimumSizeHint().height()], Qt.Orientation.Vertical)
 
         self.ptt_lamp = PttLamp()
         self.station_label = QLabel()
         self.rig_label = QLabel("CAT off")
-        self.model_label = QLabel("Checking installed models…")
-        self.rx_status = QLabel()
+        self.model_label = ElidingLabel("Checking installed models…")
+        self.model_label.setMinimumWidth(150)
+        self.rx_status = ElidingLabel()
         bar = QStatusBar()
         bar.addWidget(self.ptt_lamp)
         bar.addWidget(self.station_label)
         bar.addWidget(self.rig_label)
         bar.addPermanentWidget(self.rx_status, 1)
-        bar.addPermanentWidget(self.model_label)
+        bar.addPermanentWidget(self.model_label, 1)
         self.setStatusBar(bar)
         self._refresh_station_label()
 
@@ -207,7 +224,11 @@ class MainWindow(QMainWindow):
         self.tx.loopbackVideo.connect(self.rx.show_emulated)
 
         self._build_menu()
-        self.resize(1280, 800)
+        # Qt uses logical pixels: a 1080p desktop can be much shorter at
+        # Windows display scaling. Leave room for the native window frame.
+        available = self.screen().availableGeometry()
+        self.resize(min(1280, available.width() - 32),
+                    min(800, available.height() - 64))
         self._log(
             "Identify with your own callsign. Confirm you are authorized "
             "for the frequency, bandwidth, and power before keying."
@@ -218,8 +239,20 @@ class MainWindow(QMainWindow):
 
         box = QGroupBox(title)
         layout = QVBoxLayout(box)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(widget)
         return box
+
+    def _scroll(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        # Preserve control/thumbnail minimum sizes even when the native window
+        # manager forces a maximized window below its preferred size. Update
+        # the minimum when source-specific or A/V controls become visible.
+        widget.layout().setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        scroll.setWidget(widget)
+        return scroll
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -260,6 +293,9 @@ class MainWindow(QMainWindow):
         cancel.triggered.connect(self.tx.cancel)
         transmit_menu.addAction(send)
         transmit_menu.addAction(cancel)
+
+        view_menu = self.menuBar().addMenu("&View")
+        view_menu.addAction(self._log_dock.toggleViewAction())
 
         help_menu = self.menuBar().addMenu("&Help")
         about = QAction("About AETV", self)

@@ -1,0 +1,136 @@
+{
+  "physical_screen": [
+    3840,
+    2160
+  ],
+  "device_pixel_ratio": 1.0,
+  "logical_window": [
+    3840,
+    2096
+  ],
+  "screenshot_pixels": [
+    3840,
+    2096
+  ],
+  "reserved_desktop_logical_pixels": 64,
+  "platform": "xcb",
+  "style": "fusion",
+  "font_point_size": 9,
+  "page": "Clips",
+  "waveform_mode": "video",
+  "rf_details": false,
+  "clip_columns": 8,
+  "visible_clip_cells": 8,
+  "controls": {
+    "send": {
+      "visible": true,
+      "rect": [
+        1787,
+        1960,
+        80,
+        22
+      ]
+    },
+    "cancel": {
+      "visible": true,
+      "rect": [
+        1873,
+        1960,
+        80,
+        22
+      ]
+    },
+    "qrl": {
+      "visible": true,
+      "rect": [
+        1959,
+        1960,
+        80,
+        22
+      ]
+    },
+    "mode": {
+      "visible": true,
+      "rect": [
+        1826,
+        1696,
+        1738,
+        24
+      ]
+    },
+    "start_receive": {
+      "visible": true,
+      "rect": [
+        13,
+        1980,
+        432,
+        22
+      ]
+    },
+    "stop_receive": {
+      "visible": true,
+      "rect": [
+        451,
+        1980,
+        431,
+        22
+      ]
+    },
+    "save_video": {
+      "visible": true,
+      "rect": [
+        888,
+        1980,
+        432,
+        22
+      ]
+    },
+    "open_folder": {
+      "visible": true,
+      "rect": [
+        1326,
+        1980,
+        431,
+        22
+      ]
+    },
+    "receive_preview": {
+      "visible": true,
+      "rect": [
+        13,
+        199,
+        1744,
+        1615
+      ]
+    },
+    "transmit_preview": {
+      "visible": true,
+      "rect": [
+        1787,
+        199,
+        2040,
+        1491
+      ]
+    },
+    "ptt": {
+      "visible": true,
+      "rect": [
+        2,
+        2076,
+        75,
+        18
+      ]
+    },
+    "rf_details": {
+      "visible": true,
+      "rect": [
+        3614,
+        33,
+        95,
+        23
+      ]
+    }
+  },
+  "sha256": "f0908b0667b1dabe9397aa12bbd4b8a64e0e061f699908afbc992953cd579864",
+  "scope": "Actual Qt/X11 window capture with generated test cards; no model/device/RF execution; not native Windows validation."
+}

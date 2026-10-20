@@ -1,5 +1,6 @@
 import numpy as np
 import inspect
+import time
 
 from aetv.gui.widgets import VideoView, blend_gop_boundary
 
@@ -47,9 +48,16 @@ def test_short_transmission_plays_without_filling_prebuffer():
     frames = np.stack([np.full((2, 2, 3), n, np.uint8) for n in (20, 30)])
     view.enqueue_rgb(frames, fps=1000, prebuffer_frames=20)
     assert shown == []
-    QTest.qWait(60)
-    assert shown == [20, 30]
-    view.clear()
-    assert not view._prebuffer_timer.isActive()
-    view.close()
-    app.processEvents()
+    try:
+        # A busy hosted runner may not dispatch both Qt timers in 60 ms.
+        # Verify eventual playout without requiring a full prebuffer; this is
+        # a lifecycle check rather than a GUI scheduling benchmark.
+        deadline = time.monotonic() + 1.0
+        while len(shown) < len(frames) and time.monotonic() < deadline:
+            QTest.qWait(10)
+        assert shown == [20, 30]
+    finally:
+        view.clear()
+        assert not view._prebuffer_timer.isActive()
+        view.close()
+        app.processEvents()

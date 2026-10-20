@@ -143,6 +143,12 @@ Detailed methodology and current machine results live in
 AETV identifies transmissions, but it cannot decide whether a frequency or
 bandwidth is legal at your station.
 
+The window adapts from 1366×768 laptops through 4K desktops. **Send**, **Cancel**,
+and receive controls stay below the previews; transmit setup is grouped into
+**Source**, **Clips**, **Audio**, and **Route** tabs. **RF details** opens tuning
+and gain controls, and **View → Log** shows or hides the station log. Larger
+windows give more space to video and arrange the eight clips in a single row.
+
 ### V8 audio/video transport
 
 The station application's **V8 A/V** transport keeps the V8 video codec while

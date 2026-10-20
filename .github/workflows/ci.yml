@@ -42,7 +42,9 @@ jobs:
           sudo apt-get install --yes libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Install test dependencies
         run: uv sync --locked --extra gui --extra train --extra dev
-      - name: Run tests
-        run: uv run pytest
+      - name: Check GUI layout and native fonts
+        run: uv run pytest -q tests/test_gui_layout.py tests/test_widgets.py tests/test_radio_frequency.py
+      - name: Run remaining tests
+        run: uv run pytest --ignore=tests/test_gui_layout.py --ignore=tests/test_widgets.py --ignore=tests/test_radio_frequency.py
       - name: Build distributions
         run: uv build

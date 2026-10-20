@@ -14,11 +14,13 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QDialog,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QRubberBand,
     QSlider,
     QSpinBox,
@@ -42,7 +44,7 @@ from aetv.source import (
 from aetv.station import TxEngine, TxPhase, TxState
 from aetv.gui.clip_editor import ClipEditorDialog
 from aetv.gui.clip_grid import ClipGrid
-from aetv.gui.widgets import AudioLevelMeter, ElidingLabel, VideoView
+from aetv.gui.widgets import AdaptiveRow, AudioLevelMeter, ControlTabs, ElidingLabel, VideoView
 
 
 class _RegionSelector(QDialog):
@@ -331,6 +333,9 @@ class TransmitPanel(QWidget):
             "V8_AV",
         )
         self.mode.addItem("AC16 A/V · 20 kHz — 256×144 @ 10 fps + 3.3 kHz audio", "AC16_AV")
+        for combo in (self.camera, self.screen_target, self.mode):
+            combo.setMinimumContentsLength(12)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.gops = QSpinBox()
         self.gops.setRange(1, 300)
         self.gops.setSuffix(" s")
@@ -340,6 +345,9 @@ class TransmitPanel(QWidget):
         self.level_db.setSuffix(" dB FS")
         self.output = QComboBox()
         self.microphone = QComboBox()
+        for combo in (self.output, self.microphone):
+            combo.setMinimumContentsLength(12)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.av_power = QSlider(Qt.Orientation.Horizontal)
         self.av_power.setRange(0, 100)
         self.av_power_label = QLabel()
@@ -367,30 +375,41 @@ class TransmitPanel(QWidget):
         self.cam_radio.toggled.connect(self._on_source_toggled)
         self.screen_radio.toggled.connect(self._on_source_toggled)
         self.file_radio.toggled.connect(self._on_source_toggled)
+        for button in (self.cam_radio, self.screen_radio, self.file_radio):
+            button.toggled.connect(self._sync_source_controls)
 
         self._strip = QWidget()
         strip = QVBoxLayout(self._strip)
-        strip.setContentsMargins(0, 0, 0, 0)
+        strip.setContentsMargins(6, 6, 6, 6)
+        sources = QHBoxLayout()
+        sources.addWidget(self.cam_radio)
+        sources.addWidget(self.screen_radio)
+        sources.addWidget(self.file_radio)
+        sources.addStretch(1)
         src = QHBoxLayout()
-        src.addWidget(self.cam_radio)
         src.addWidget(self.camera, 1)
         src.addWidget(refresh_cam)
         screen_row = QHBoxLayout()
-        screen_row.addWidget(self.screen_radio)
         screen_row.addWidget(self.screen_target, 1)
         screen_row.addWidget(region_button)
         screen_row.addWidget(refresh_screen)
         file_row = QHBoxLayout()
-        file_row.addWidget(self.file_radio)
         file_row.addWidget(self.file_button)
         file_row.addWidget(self.file_label, 1)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Mode"))
-        mode_row.addWidget(self.mode)
-        mode_row.addWidget(QLabel("Length"))
-        mode_row.addWidget(self.gops)
-        mode_row.addWidget(QLabel("Level"))
-        mode_row.addWidget(self.level_db)
+        self._source_rows = (src, screen_row, file_row)
+        mode_fields = []
+        for label, control in (("Mode", self.mode), ("Length", self.gops), ("Level", self.level_db)):
+            field = QWidget()
+            field.setSizePolicy(
+                QSizePolicy.Policy.Expanding if label == "Mode" else QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Preferred,
+            )
+            field_layout = QHBoxLayout(field)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.addWidget(QLabel(label))
+            field_layout.addWidget(control, 1)
+            mode_fields.append(field)
+        mode_row = AdaptiveRow(mode_fields)
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("To radio"))
         out_row.addWidget(self.output, 1)
@@ -413,8 +432,7 @@ class TransmitPanel(QWidget):
         self.output_meter_row = QHBoxLayout()
         self.output_meter_row.addWidget(QLabel("Raw output waveform"))
         self.output_meter_row.addWidget(self.output_meter, 1)
-        channel_row = QHBoxLayout()
-        channel_row.addWidget(QLabel("Route"))
+        channel_row = QGridLayout()
         self.channel_keys = ["radio", *CHANNEL_PROFILES]
         self.channel_buttons = QButtonGroup(self)
         self.channel_buttons.setExclusive(True)
@@ -428,27 +446,18 @@ class TransmitPanel(QWidget):
                 else CHANNEL_PROFILES[key].description + " (local loopback; no PTT)"
             )
             self.channel_buttons.addButton(button, index)
-            channel_row.addWidget(button)
+            channel_row.addWidget(button, index // 4, index % 4)
         self.channel_buttons.button(0).setChecked(True)
         self.channel_buttons.idClicked.connect(self._sync_channel_route)
         buttons = QHBoxLayout()
         buttons.addWidget(self.send_button)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.qrl_button)
-        buttons.addStretch(1)
+        buttons.addWidget(self.progress, 1)
+        strip.addLayout(sources)
         strip.addLayout(src)
         strip.addLayout(screen_row)
         strip.addLayout(file_row)
-        strip.addLayout(mode_row)
-        strip.addLayout(out_row)
-        strip.addLayout(self.av_row)
-        strip.addLayout(self.mix_row)
-        strip.addLayout(self.audio_meter_row)
-        strip.addLayout(self.output_meter_row)
-        strip.addLayout(channel_row)
-        strip.addWidget(self.progress)
-        strip.addLayout(buttons)
-        strip.addWidget(self.status)
 
         self.clip_grid = ClipGrid()
         self.clip_grid.fileChosen.connect(self._set_clip)
@@ -456,12 +465,38 @@ class TransmitPanel(QWidget):
         self.clip_grid.hovered.connect(self._preview_clip)
         self.clip_grid.editRequested.connect(self._edit_clip)
         self.clip_grid.removeRequested.connect(self._remove_clip)
+        strip.addStretch(1)
+        clips = QWidget()
+        clips_layout = QVBoxLayout(clips)
+        clips_layout.setContentsMargins(6, 6, 6, 6)
+        clips_layout.addWidget(self.clip_grid)
+
+        audio = QWidget()
+        audio_layout = QVBoxLayout(audio)
+        for row in (out_row, self.av_row, self.mix_row, self.audio_meter_row, self.output_meter_row):
+            audio_layout.addLayout(row)
+        audio_layout.addStretch(1)
+        route = QWidget()
+        route_layout = QVBoxLayout(route)
+        route_help = QLabel("Radio transmits over the configured output. Loopback routes test locally without PTT.")
+        route_help.setWordWrap(True)
+        route_layout.addWidget(route_help)
+        route_layout.addLayout(channel_row)
+        route_layout.addStretch(1)
+        self.controls = ControlTabs()
+        self.controls.add_controls("Source", self._strip)
+        self.controls.add_controls("Clips", clips)
+        self.controls.add_controls("Audio", audio)
+        self.controls.add_controls("Route", route)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.preview, 1)
-        layout.addWidget(QLabel("Prepared clips — drop files; hover to preview; click to transmit"))
-        layout.addWidget(self.clip_grid, 0)
-        layout.addWidget(self._strip, 0)
+        layout.addWidget(mode_row)
+        layout.addWidget(self.controls)
+        layout.addLayout(buttons)
+        layout.addWidget(self.status)
+        self._sync_source_controls()
         self._fill_screen_targets()
         self._restore_clip_bank()
         self.sync_from_config()
@@ -471,6 +506,15 @@ class TransmitPanel(QWidget):
         self.av_power.valueChanged.connect(self._on_av_power_changed)
         self.mic_mix.valueChanged.connect(self._on_mic_mix_changed)
         self._start_preview()
+
+    def _sync_source_controls(self, _checked: bool = False) -> None:
+        for button, row in zip(
+            (self.cam_radio, self.screen_radio, self.file_radio), self._source_rows
+        ):
+            for index in range(row.count()):
+                widget = row.itemAt(index).widget()
+                if widget is not None:
+                    widget.setVisible(button.isChecked())
 
     def _restore_clip_bank(self) -> None:
         stored_bank = self.station.settings.clip_bank

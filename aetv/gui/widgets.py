@@ -7,19 +7,94 @@ import math
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QLabel,
+    QLayout,
     QPlainTextEdit,
     QProgressBar,
     QSizePolicy,
+    QScrollArea,
+    QTabWidget,
     QWidget,
 )
 
 CANVAS = QColor("#202024")
 CANVAS_TEXT = QColor("#888888")
+
+
+class AdaptiveRow(QWidget):
+    """Keep related controls together, wrapping rows at their natural widths."""
+
+    def __init__(self, widgets: list[QWidget], parent=None):
+        super().__init__(parent)
+        self._widgets = widgets
+        self._positions = None
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._arrange()
+
+    def minimumSizeHint(self):  # noqa: N802
+        size = self._grid.minimumSize()
+        # The whole row must not force the containing window wider than the
+        # desktop before resizeEvent has a chance to wrap its controls.
+        return QSize(max(w.minimumSizeHint().width() for w in self._widgets), size.height())
+
+    def sizeHint(self):  # noqa: N802
+        return self._grid.sizeHint()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._arrange()
+
+    def _arrange(self) -> None:
+        spacing = max(0, self._grid.horizontalSpacing())
+        row, column, used = 0, 0, 0
+        positions = []
+        for widget in self._widgets:
+            width = widget.sizeHint().expandedTo(widget.minimumSizeHint()).width()
+            if column and used + spacing + width > self.width():
+                row, column, used = row + 1, 0, 0
+            positions.append((row, column))
+            used += width + (spacing if column else 0)
+            column += 1
+        if positions == self._positions:
+            return
+        self._positions = positions
+        for widget in self._widgets:
+            self._grid.removeWidget(widget)
+        for widget, (row, column) in zip(self._widgets, positions):
+            self._grid.addWidget(widget, row, column)
+        self.updateGeometry()
+
+
+class ControlTabs(QTabWidget):
+    """Scrollable setup pages; transport actions stay outside these tabs."""
+
+    def __init__(self, parent=None, *, compact: bool = False):
+        super().__init__(parent)
+        self._compact = compact
+        self.setMinimumHeight(self.fontMetrics().lineSpacing() * 2 + 36)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    def add_controls(self, title: str, widget: QWidget) -> None:
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        widget.layout().setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        scroll.setWidget(widget)
+        self.addTab(scroll, title)
+
+    def sizeHint(self):  # noqa: N802
+        if self._compact and self.currentWidget() is not None:
+            height = self.currentWidget().widget().minimumSizeHint().height()
+            return QSize(520, max(self.minimumHeight(), min(320,
+                         height + self.tabBar().sizeHint().height() + 4)))
+        # Extra desktop space is reserved for video rather than stretched forms.
+        return QSize(520, self.fontMetrics().lineSpacing() * 12 + 60)
 
 
 class AudioLevelMeter(QProgressBar):
@@ -326,7 +401,7 @@ class LogPane(QPlainTextEdit):
         self.setMaximumBlockCount(2000)
         self.setPlaceholderText("Station log")
         metrics = self.fontMetrics()
-        self.setMinimumHeight(metrics.lineSpacing() * 6 + 8)
+        self.setMinimumHeight(metrics.lineSpacing() * 2 + 8)
 
     def append_line(self, text: str) -> None:
         """Accept logs from any thread; only the GUI thread may lay out text."""
