@@ -39,7 +39,7 @@ from aetv.propagation import (
 from aetv.settings import normalize_callsign
 from aetv.station import RxEngine, RxState
 from aetv.gui.desktop import open_directory
-from aetv.gui.widgets import AudioLevelMeter, ElidingLabel, VideoView
+from aetv.gui.widgets import AudioLevelMeter, ControlTabs, ElidingLabel, VideoView
 
 
 class _KiwiListThread(QThread):
@@ -502,7 +502,8 @@ class ReceivePanel(QWidget):
         self.start_button = QPushButton("Start receiving")
         self.stop_button = QPushButton("Stop")
         self.save_button = QPushButton("Save video…")
-        self.open_saved_videos_button = QPushButton("Open saved video directory")
+        self.open_saved_videos_button = QPushButton("Open folder")
+        self.open_saved_videos_button.setToolTip("Open saved video directory")
         self.stop_button.setEnabled(False)
         self.start_button.clicked.connect(self.start)
         self.stop_button.clicked.connect(self.stop)
@@ -513,7 +514,7 @@ class ReceivePanel(QWidget):
 
         self._strip = QWidget()
         strip = QVBoxLayout(self._strip)
-        strip.setContentsMargins(0, 0, 0, 0)
+        strip.setContentsMargins(6, 6, 6, 6)
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Source"))
         row1.addWidget(self.source)
@@ -551,20 +552,30 @@ class ReceivePanel(QWidget):
         buttons.addWidget(self.open_saved_videos_button)
         buttons.addStretch(1)
         strip.addLayout(row1)
-        strip.addLayout(self.raw_meter_row)
         strip.addLayout(self.playback_row)
         strip.addLayout(self.audio_meter_row)
         strip.addLayout(row2)
         strip.addLayout(row3)
         strip.addLayout(path_row)
         strip.addLayout(auto_row)
-        strip.addWidget(self.status)
-        strip.addWidget(self.progress)
-        strip.addLayout(buttons)
+        strip.addStretch(1)
+
+        self.controls = ControlTabs(compact=True)
+        self.controls.add_controls("Receiver", self._strip)
+        for combo in (self.source, self.input_device, self.playback_device, self.kiwi_list):
+            combo.setMinimumContentsLength(12)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        state = QHBoxLayout()
+        state.addWidget(self.status, 1)
+        state.addWidget(self.progress, 1)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.addWidget(self.preview, 1)
-        layout.addWidget(self._strip, 0)
+        layout.addWidget(self.controls)
+        layout.addLayout(self.raw_meter_row)
+        layout.addLayout(state)
+        layout.addLayout(buttons)
         self.sync_from_config()
         if self.source.currentData() == "kiwi" and self.auto_kiwi.isChecked():
             QTimer.singleShot(400, self._refresh_kiwis)
@@ -593,6 +604,7 @@ class ReceivePanel(QWidget):
                 widget.setVisible(av)
         if kiwi and self.auto_kiwi.isChecked() and not self._receivers:
             QTimer.singleShot(0, self._refresh_kiwis)
+        self.controls.updateGeometry()
 
     def _fill_inputs(self) -> None:
         current = self.station.settings.audio_input

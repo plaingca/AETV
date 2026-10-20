@@ -6,8 +6,9 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QLayout, QMenu, QVBoxLayout, QWidget
+
+from aetv.gui.widgets import ElidingLabel, VideoView
 
 
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mpeg", ".mpg"}
@@ -30,12 +31,13 @@ class ClipCell(QFrame):
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setMinimumSize(105, 72)
         self.setToolTip("Drop a video here, or click to choose one")
-        self.picture = QLabel("+")
-        self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.picture.setMinimumHeight(42)
-        self.name = QLabel(f"Clip {index + 1}")
+        self.picture = VideoView("+")
+        self.picture.setMinimumSize(95, 46)
+        self.name = ElidingLabel(f"Clip {index + 1}")
         self.name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout = QVBoxLayout(self)
+        # Thumbnail plus caption must also fit larger desktop fonts.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
         layout.addWidget(self.picture, 1)
@@ -45,36 +47,25 @@ class ClipCell(QFrame):
     def set_path(self, path: str) -> None:
         self.path = path
         self.ready = False
-        self.picture.setPixmap(QPixmap())
-        self.picture.setText("Preparing…" if path else "+")
+        self.picture.clear()
+        self.picture.set_placeholder("Preparing…" if path else "+")
         self.name.setText(Path(path).stem if path else f"Clip {self.index + 1}")
         self.setToolTip(path or "Drop a video here, or click to choose one")
         self._restyle()
 
     def set_progress(self, progress: float) -> None:
-        self.picture.setText(f"Encoding {round(progress * 100)}%")
+        self.picture.set_placeholder(f"Encoding {round(progress * 100)}%")
 
     def set_ready(self, preview: np.ndarray) -> None:
         self.ready = True
         frame = np.ascontiguousarray(preview[0] if preview.ndim == 4 else preview)
-        height, width = frame.shape[:2]
-        image = QImage(
-            frame.data, width, height, width * 3, QImage.Format.Format_RGB888
-        ).copy()
-        self.picture.setText("")
-        self.picture.setPixmap(
-            QPixmap.fromImage(image).scaled(
-                150,
-                58,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        )
+        self.picture.set_rgb(frame)
         self._restyle()
 
     def set_error(self, message: str) -> None:
         self.ready = False
-        self.picture.setText("Failed")
+        self.picture.clear()
+        self.picture.set_placeholder("Failed")
         self.setToolTip(f"{self.path}\n{message}")
         self._restyle(error=True)
 
@@ -138,6 +129,7 @@ class ClipGrid(QWidget):
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(5)
+        self._columns = 4
         self.cells: list[ClipCell] = []
         for index in range(count):
             cell = ClipCell(index)
@@ -148,3 +140,15 @@ class ClipGrid(QWidget):
             cell.removeRequested.connect(self.removeRequested)
             layout.addWidget(cell, index // 4, index % 4)
             self.cells.append(cell)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        columns = 8 if self.width() >= 1280 else (4 if self.width() >= 460 else 2)
+        if columns == self._columns:
+            return
+        self._columns = columns
+        layout = self.layout()
+        for cell in self.cells:
+            layout.removeWidget(cell)
+        for index, cell in enumerate(self.cells):
+            layout.addWidget(cell, index // columns, index % columns)

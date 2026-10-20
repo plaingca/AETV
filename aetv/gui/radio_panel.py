@@ -6,16 +6,20 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QSlider,
+    QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
 
 class RadioPanel(QWidget):
     applyRequested = Signal(object)
+    detailsToggled = Signal(bool)
 
     def __init__(self, settings, parent=None):
         super().__init__(parent)
@@ -24,7 +28,12 @@ class RadioPanel(QWidget):
         self._rx_source = settings.rx_source
         self._frequency_kind = None
         self._frequencies = {}
-        grid = QGridLayout(self)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 4, 6, 4)
+        header = QHBoxLayout()
+        self.details = QWidget()
+        grid = QGridLayout(self.details)
+        grid.setContentsMargins(0, 4, 0, 0)
         self.backend = QComboBox()
         self.backend.addItem("Audio / CAT", "audio")
         self.backend.addItem("PlutoSDR", "pluto")
@@ -58,24 +67,35 @@ class RadioPanel(QWidget):
         self.apply = QPushButton("Apply RF settings")
         self.apply.setObjectName("applyRadioSettings")
         self.apply.clicked.connect(self._apply)
-        grid.addWidget(QLabel("Transmit via"), 0, 0)
-        grid.addWidget(self.backend, 0, 1)
+        self.details_button = QToolButton()
+        self.details_button.setText("RF details")
+        self.details_button.setCheckable(True)
+        self.details_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_button.setArrowType(Qt.ArrowType.RightArrow)
+        self.details_button.toggled.connect(self._toggle_details)
+        header.addWidget(QLabel("Transmit via"))
+        header.addWidget(self.backend)
         self.frequency_label = QLabel("Operating frequency")
-        grid.addWidget(self.frequency_label, 0, 2)
-        grid.addWidget(self.frequency, 0, 3)
-        grid.addWidget(QLabel("Pluto address"), 0, 4)
-        grid.addWidget(self.uri, 0, 5)
+        header.addWidget(self.frequency_label)
+        header.addWidget(self.frequency)
+        header.addStretch(1)
+        header.addWidget(self.details_button)
+        header.addWidget(self.apply)
+        layout.addLayout(header)
+        layout.addWidget(self.details)
+        self.details.hide()
+        grid.addWidget(QLabel("Pluto address"), 0, 0)
+        grid.addWidget(self.uri, 0, 1, 1, 2)
+        grid.addWidget(QLabel("RTL serial"), 0, 3)
+        grid.addWidget(self.serial, 0, 4, 1, 2)
         grid.addWidget(QLabel("Pluto TX gain"), 1, 0)
         grid.addWidget(self.tx_gain, 1, 1)
         grid.addWidget(self.tx_value, 1, 2)
         grid.addWidget(self.rx_label, 1, 3)
         grid.addWidget(self.rx_gain, 1, 4)
         grid.addWidget(self.rx_value, 1, 5)
-        grid.addWidget(QLabel("RTL serial"), 2, 0)
-        grid.addWidget(self.serial, 2, 1)
-        grid.addWidget(self.auto_correct, 2, 2, 1, 2)
-        grid.addWidget(self.correction, 2, 4)
-        grid.addWidget(self.apply, 2, 5)
+        grid.addWidget(self.auto_correct, 2, 0, 1, 3)
+        grid.addWidget(self.correction, 2, 3, 1, 3)
         self.hackrf_serial = QLineEdit()
         self.hackrf_serial.setPlaceholderText("Empty = first HackRF; optional hex serial")
         self.hackrf_tx_gain, hackrf_tx_value = self._slider(0, 47, 1)
@@ -94,6 +114,14 @@ class RadioPanel(QWidget):
             grid.addWidget(widget, row, col, 1, span)
         self.backend.currentIndexChanged.connect(self._visibility)
         self.sync(settings)
+
+    def _toggle_details(self, visible):
+        self.details.setVisible(visible)
+        self.details_button.setArrowType(
+            Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow
+        )
+        self.layout().activate()
+        self.detailsToggled.emit(visible)
 
     def _slider(self, low, high, scale):
         slider = QSlider(Qt.Orientation.Horizontal)
